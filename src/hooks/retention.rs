@@ -28,6 +28,7 @@ const MAX_RETENTION_PROJECTS: usize = 256;
 const MAX_REFLECTION_QUEUE_ENTRIES: usize = 512;
 const MAX_ACTIVE_REFLECTION_JOBS: usize = 256;
 const MAX_REFLECTION_JOB_BYTES: usize = 64 * 1024;
+const MAX_RETENTION_DIRECTORY_ENTRIES: usize = 512;
 
 /// Held OS lock for one global retention sweep.
 ///
@@ -60,6 +61,14 @@ struct QueuedReflectionJob {
     session_id: String,
 }
 
+/// Files selected by bounded scans. A complete plan is required before the
+/// first mutation so a late filesystem failure cannot leave partial retention.
+struct RetentionPlan {
+    runtime_files: Vec<std::path::PathBuf>,
+    observation_files: Vec<std::path::PathBuf>,
+    completed_jobs: Vec<std::path::PathBuf>,
+}
+
 /// Run retention without deleting the session whose SessionEnd reflection is
 /// about to read it. Long-running sessions can legitimately predate the
 /// configured cutoff.
@@ -85,29 +94,89 @@ fn run_preserving_session_at(
     harness: &Path,
     obs: &Path,
 ) -> io::Result<(u64, usize)> {
+    run_preserving_session_at_with(
+        active_session,
+        days,
+        projects,
+        harness,
+        obs,
+        SystemTime::now(),
+        delete_old_rows,
+    )
+}
+
+fn run_preserving_session_at_with<F>(
+    active_session: Option<(&str, &str)>,
+    days: u64,
+    projects: &Path,
+    harness: &Path,
+    obs: &Path,
+    now: SystemTime,
+    delete_rows: F,
+) -> io::Result<(u64, usize)>
+where
+    F: FnOnce(&str, &HashSet<(String, String)>) -> io::Result<u64>,
+{
     if days == 0 {
         return Ok((0, 0));
     }
 
-    let now = SystemTime::now();
     let Some(_lease) = try_acquire_global_retention_lease(projects, now)? else {
         return Ok((0, 0));
     };
 
     // Complete every bounded, fallible scan before any delete/prune operation.
     let active_sessions = active_reflection_sessions(projects, active_session)?;
-    let mut files = sweep_runtime_files(harness, obs, now);
-
     let cutoff_day = days_ago(days);
-    let rows = delete_old_rows(&cutoff_day, &active_sessions)?;
-    files += prune_observation_jsonl_excluding(projects, &cutoff_day, &active_sessions)?;
-    files += prune_completed_reflection_jobs(
+    let plan = collect_retention_plan(
         projects,
-        Duration::from_secs(days.saturating_mul(24 * 60 * 60)),
+        harness,
+        obs,
         now,
+        &cutoff_day,
+        &active_sessions,
+        Duration::from_secs(days.saturating_mul(24 * 60 * 60)),
     )?;
+
+    let rows = delete_rows(&cutoff_day, &active_sessions)?;
+    let files = commit_retention_plan(plan)?;
     record_global_retention(projects)?;
     Ok((rows, files))
+}
+
+fn collect_retention_plan(
+    projects: &Path,
+    harness: &Path,
+    obs: &Path,
+    now: SystemTime,
+    cutoff_day: &str,
+    active_sessions: &HashSet<(String, String)>,
+    completed_job_max_age: Duration,
+) -> io::Result<RetentionPlan> {
+    Ok(RetentionPlan {
+        runtime_files: collect_runtime_files(harness, obs, now)?,
+        observation_files: collect_observation_jsonl(projects, cutoff_day, active_sessions)?,
+        completed_jobs: collect_completed_reflection_jobs(projects, completed_job_max_age, now)?,
+    })
+}
+
+fn commit_retention_plan(plan: RetentionPlan) -> io::Result<usize> {
+    let mut removed = remove_collected_files(plan.runtime_files)?;
+    removed += remove_collected_files(plan.observation_files)?;
+    removed += remove_collected_files(plan.completed_jobs)?;
+    Ok(removed)
+}
+
+fn remove_collected_files(files: Vec<std::path::PathBuf>) -> io::Result<usize> {
+    let mut removed = 0;
+    for path in files {
+        match fs::remove_file(path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(removed)
 }
 
 fn delete_old_rows(
@@ -151,18 +220,37 @@ pub(crate) fn prune_observation_jsonl(
     prune_observation_jsonl_excluding(projects, cutoff_day, &active_sessions)
 }
 
+#[cfg(test)]
 fn prune_observation_jsonl_excluding(
     projects: &Path,
     cutoff_day: &str,
     active_sessions: &HashSet<(String, String)>,
 ) -> io::Result<usize> {
-    let mut removed = 0;
+    remove_collected_files(collect_observation_jsonl(
+        projects,
+        cutoff_day,
+        active_sessions,
+    )?)
+}
+
+fn collect_observation_jsonl(
+    projects: &Path,
+    cutoff_day: &str,
+    active_sessions: &HashSet<(String, String)>,
+) -> io::Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
     let entries = match fs::read_dir(projects) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(files),
         Err(error) => return Err(error),
     };
-    for project in entries {
+    for (project_count, project) in entries.enumerate() {
+        if project_count >= MAX_RETENTION_PROJECTS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("retention projects exceed limit of {MAX_RETENTION_PROJECTS}"),
+            ));
+        }
         let project = project?;
         if !project.file_type()?.is_dir() {
             continue;
@@ -180,7 +268,16 @@ fn prune_observation_jsonl_excluding(
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         };
-        for entry in obs_entries {
+        for (entry_count, entry) in obs_entries.enumerate() {
+            if entry_count >= MAX_RETENTION_DIRECTORY_ENTRIES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "observation entries exceed limit of {MAX_RETENTION_DIRECTORY_ENTRIES}: {}",
+                        obs.display()
+                    ),
+                ));
+            }
             let entry = entry?;
             if !entry.file_type()?.is_file() {
                 continue;
@@ -205,14 +302,10 @@ fn prune_observation_jsonl_excluding(
             if active_sessions.contains(&(session_id.to_string(), project_name)) {
                 continue;
             }
-            match fs::remove_file(entry.path()) {
-                Ok(()) => removed += 1,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
+            files.push(entry.path());
         }
     }
-    Ok(removed)
+    Ok(files)
 }
 
 fn try_acquire_global_retention_lease(
@@ -543,18 +636,33 @@ fn read_reflection_job(path: &Path) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(test)]
 pub(crate) fn prune_completed_reflection_jobs(
     projects: &Path,
     max_age: Duration,
     now: SystemTime,
 ) -> io::Result<usize> {
+    remove_collected_files(collect_completed_reflection_jobs(projects, max_age, now)?)
+}
+
+fn collect_completed_reflection_jobs(
+    projects: &Path,
+    max_age: Duration,
+    now: SystemTime,
+) -> io::Result<Vec<std::path::PathBuf>> {
     let entries = match fs::read_dir(projects) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
-    let mut removed = 0;
-    for project in entries {
+    let mut files = Vec::new();
+    for (project_count, project) in entries.enumerate() {
+        if project_count >= MAX_RETENTION_PROJECTS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("retention projects exceed limit of {MAX_RETENTION_PROJECTS}"),
+            ));
+        }
         let project = project?;
         if !project.file_type()?.is_dir() {
             continue;
@@ -567,12 +675,21 @@ pub(crate) fn prune_completed_reflection_jobs(
         {
             continue;
         }
-        let jobs = match fs::read_dir(queue) {
+        let jobs = match fs::read_dir(&queue) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         };
-        for job in jobs {
+        for (entry_count, job) in jobs.enumerate() {
+            if entry_count >= MAX_RETENTION_DIRECTORY_ENTRIES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "reflection queue entries exceed limit of {MAX_RETENTION_DIRECTORY_ENTRIES}: {}",
+                        queue.display()
+                    ),
+                ));
+            }
             let job = job?;
             if !job.file_type()?.is_file() {
                 continue;
@@ -588,15 +705,11 @@ pub(crate) fn prune_completed_reflection_jobs(
                 .map(|age| age > max_age)
                 .unwrap_or(false)
             {
-                match fs::remove_file(job.path()) {
-                    Ok(()) => removed += 1,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
+                files.push(job.path());
             }
         }
     }
-    Ok(removed)
+    Ok(files)
 }
 
 /// Remove per-session scratch files that no live session can still be using.
@@ -604,29 +717,43 @@ pub(crate) fn prune_completed_reflection_jobs(
 /// Covers the two that accumulate one-per-hook-process: telemetry error
 /// counters in `obs/`, plus resume locks and event markers in the harness root.
 /// `now` is a parameter so a test can move time forward instead of back-dating files.
-pub(crate) fn sweep_runtime_files(harness: &Path, obs: &Path, now: SystemTime) -> usize {
-    let stale = |p: &Path| -> bool {
-        fs::metadata(p)
-            .and_then(|m| m.modified())
-            .map(|t| {
-                now.duration_since(t)
-                    .map(|age| age > RUNTIME_FILE_MAX_AGE)
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false)
-    };
+#[cfg(test)]
+pub(crate) fn sweep_runtime_files(
+    harness: &Path,
+    obs: &Path,
+    now: SystemTime,
+) -> io::Result<usize> {
+    remove_collected_files(collect_runtime_files(harness, obs, now)?)
+}
 
-    let mut removed = 0;
+fn collect_runtime_files(
+    harness: &Path,
+    obs: &Path,
+    now: SystemTime,
+) -> io::Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
     let targets = [
         (harness, "resume.", ".lock"),
         (harness, "resume.", ".event"),
         (obs, "telemetry_error_count_", ".txt"),
     ];
     for (dir, prefix, suffix) in targets {
-        let Ok(entries) = fs::read_dir(dir) else {
-            continue;
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         };
-        for entry in entries.flatten() {
+        for (entry_count, entry) in entries.enumerate() {
+            if entry_count >= MAX_RETENTION_DIRECTORY_ENTRIES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "runtime entries exceed limit of {MAX_RETENTION_DIRECTORY_ENTRIES}: {}",
+                        dir.display()
+                    ),
+                ));
+            }
+            let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if !name.starts_with(prefix) || !name.ends_with(suffix) {
@@ -634,19 +761,24 @@ pub(crate) fn sweep_runtime_files(harness: &Path, obs: &Path, now: SystemTime) -
             }
             let path = entry.path();
             // Never follow a symlink out of the harness directory.
-            let is_regular = path
-                .symlink_metadata()
-                .map(|m| m.file_type().is_file())
-                .unwrap_or(false);
-            if !is_regular {
+            let metadata = fs::symlink_metadata(&path)?;
+            if !metadata.file_type().is_file() {
                 continue;
             }
-            if stale(&path) && fs::remove_file(&path).is_ok() {
-                removed += 1;
+            let stale = metadata
+                .modified()
+                .map(|modified| {
+                    now.duration_since(modified)
+                        .map(|age| age > RUNTIME_FILE_MAX_AGE)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if stale {
+                files.push(path);
             }
         }
     }
-    removed
+    Ok(files)
 }
 
 #[cfg(test)]
@@ -681,7 +813,7 @@ mod tests {
             File::create(p).unwrap();
         }
 
-        assert_eq!(sweep_runtime_files(harness, &obs, later()), 3);
+        assert_eq!(sweep_runtime_files(harness, &obs, later()).unwrap(), 3);
         assert!(!lock.exists());
         assert!(!event.exists());
         assert!(!counter.exists());
@@ -698,7 +830,10 @@ mod tests {
         let lock = harness.join("resume.20260727_9999.lock");
         File::create(&lock).unwrap();
 
-        assert_eq!(sweep_runtime_files(harness, &obs, SystemTime::now()), 0);
+        assert_eq!(
+            sweep_runtime_files(harness, &obs, SystemTime::now()).unwrap(),
+            0
+        );
         assert!(lock.exists());
     }
 
@@ -710,9 +845,138 @@ mod tests {
                 &dir.path().join("nope"),
                 &dir.path().join("also-nope"),
                 later()
-            ),
+            )
+            .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn observation_prune_scan_failure_keeps_earlier_eligible_file() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        let eligible = projects
+            .join("project-a")
+            .join("obs")
+            .join("session_20260101_stale.jsonl");
+        fs::create_dir_all(eligible.parent().unwrap()).unwrap();
+        File::create(&eligible).unwrap();
+        fs::create_dir_all(projects.join("project-b")).unwrap();
+        File::create(projects.join("project-b").join("obs")).unwrap();
+
+        let error = prune_observation_jsonl(&projects, "20260501", None).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+        assert!(
+            eligible.exists(),
+            "scan failure must happen before every delete"
+        );
+    }
+
+    #[test]
+    fn completed_job_prune_scan_failure_keeps_earlier_eligible_file() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        let eligible = projects
+            .join("project-a")
+            .join("reflect-queue")
+            .join("job_20260101_stale.completed");
+        fs::create_dir_all(eligible.parent().unwrap()).unwrap();
+        File::create(&eligible).unwrap();
+        fs::create_dir_all(projects.join("project-b")).unwrap();
+        File::create(projects.join("project-b").join("reflect-queue")).unwrap();
+
+        let error = prune_completed_reflection_jobs(&projects, Duration::from_secs(0), later())
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+        assert!(
+            eligible.exists(),
+            "scan failure must happen before every delete"
+        );
+    }
+
+    #[test]
+    fn runtime_sweep_keeps_earlier_eligible_files_when_later_directory_is_invalid() {
+        let dir = tempdir().unwrap();
+        let harness = dir.path().join("harness");
+        fs::create_dir(&harness).unwrap();
+        let stale_lock = harness.join("resume.20260101_stale.lock");
+        File::create(&stale_lock).unwrap();
+        let invalid_obs = harness.join("obs");
+        File::create(&invalid_obs).unwrap();
+
+        let error = sweep_runtime_files(&harness, &invalid_obs, later()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+        assert!(
+            stale_lock.exists(),
+            "a later directory scan failure must keep earlier runtime files"
+        );
+    }
+
+    #[test]
+    fn late_preflight_failure_keeps_every_deletion_category_unmodified() {
+        use std::cell::Cell;
+
+        let dir = tempdir().unwrap();
+        let harness = dir.path().join("harness");
+        let runtime_obs = harness.join("obs");
+        let projects = dir.path().join("projects");
+        let project_a = projects.join("project-a");
+        fs::create_dir_all(&runtime_obs).unwrap();
+        fs::create_dir_all(project_a.join("obs")).unwrap();
+        fs::create_dir_all(project_a.join("reflect-queue")).unwrap();
+
+        let runtime_lock = harness.join("resume.20260101_stale.lock");
+        let runtime_event = harness.join("resume.20260101_stale.event");
+        let telemetry = runtime_obs.join("telemetry_error_count_20260101_stale.txt");
+        let observation = project_a.join("obs/session_20260101_stale.jsonl");
+        let completed_job = project_a.join("reflect-queue/job_20260101_stale.completed");
+        for path in [
+            &runtime_lock,
+            &runtime_event,
+            &telemetry,
+            &observation,
+            &completed_job,
+        ] {
+            File::create(path).unwrap();
+        }
+
+        fs::create_dir_all(projects.join("project-b")).unwrap();
+        File::create(projects.join("project-b/obs")).unwrap();
+        let deleted_rows = Cell::new(false);
+        let error = run_preserving_session_at_with(
+            None,
+            1,
+            &projects,
+            &harness,
+            &runtime_obs,
+            later(),
+            |_, _| {
+                deleted_rows.set(true);
+                Ok(1)
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+        assert!(
+            !deleted_rows.get(),
+            "database deletion must follow preflight"
+        );
+        for path in [
+            &runtime_lock,
+            &runtime_event,
+            &telemetry,
+            &observation,
+            &completed_job,
+        ] {
+            assert!(
+                path.exists(),
+                "late preflight failure must keep {}",
+                path.display()
+            );
+        }
     }
 
     #[test]
