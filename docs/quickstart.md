@@ -6,6 +6,8 @@
 
 - [Claude Code](https://docs.claude.com/en/docs/claude-code) or Codex CLI installed
 - Git
+- Node.js 22 LTS or a newer LTS release for Codex plugin hook bootstrap and
+  lifecycle (`node --version` must report `v22.x` or later)
 - [Rust toolchain](https://rustup.rs) (for source/binary install — plugin marketplace doesn't need this)
 
 ## Install

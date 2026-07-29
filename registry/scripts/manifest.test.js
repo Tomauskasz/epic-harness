@@ -270,6 +270,32 @@ test("CI runs manifest and bootstrap contracts on Linux, macOS, and Windows", ()
   );
 });
 
+test("Codex hook setup documents the supported Node LTS prerequisite", () => {
+  const readme = readFileSync(join(ROOT, "README.md"), "utf8");
+  const quickstart = readFileSync(join(ROOT, "docs", "quickstart.md"), "utf8");
+
+  assert.match(
+    readme,
+    /Node\.js 22 LTS or a newer LTS release.*required.*Codex.*hook/i,
+    "Codex hooks execute the Node bootstrap; document the supported Node LTS range as an actionable prerequisite",
+  );
+  assert.match(
+    quickstart,
+    /Node\.js 22 LTS or a newer LTS release/,
+    "quickstart must retain the supported Node LTS range for Codex hook users",
+  );
+  assert.match(
+    readme,
+    /node --version/,
+    "tell users how to verify the required Node runtime before enabling hooks",
+  );
+  assert.doesNotMatch(
+    readme,
+    /does not require Node\.js/i,
+    "the hook lifecycle is not Node-free; qualify binary-only installation separately if needed",
+  );
+});
+
 test("CI runs the frozen dashboard install, checks, tests, build, and asset comparison", () => {
   const workflow = readFileSync(
     join(ROOT, ".github", "workflows", "ci.yml"),

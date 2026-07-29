@@ -15,7 +15,7 @@ Thanks for your interest in contributing!
 cargo build                              # Build the binary
 cargo test                               # Run all tests (314+ unit + 18 integration)
 cargo clippy                             # Lint
-cp target/debug/epic-harness hooks/bin/  # Test as plugin
+cargo install --path . --force           # Install the local binary on PATH for plugin hooks
 ```
 
 ## Commit Convention

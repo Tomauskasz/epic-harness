@@ -92,6 +92,13 @@ epic-harness supports **Claude Code** and **Codex CLI** plugins. Skills, hooks,
 and the `harness-mem` MCP server load from each host's plugin layout; there is
 no `install` subcommand.
 
+**Node.js 22 LTS or a newer LTS release is required for Codex hook bootstrap and
+lifecycle.** Verify it before starting a Codex session:
+
+```bash
+node --version  # must report v22.x or later
+```
+
 ### Claude Code (recommended)
 
 ```
@@ -120,8 +127,9 @@ cargo binstall epic-harness                  # pre-built binary (Rust)
 cargo install epic-harness                   # build from source
 ```
 
-`cargo install` requires Rust 1.94 or newer. It embeds the checked-in dashboard
-asset and does not require Node.js or `pnpm`.
+`cargo install` requires Rust 1.94 or newer and embeds the checked-in dashboard
+asset. Binary-only use does not run the Node bootstrap; plugin hooks require
+Node.js 22 LTS or a newer LTS release.
 
 No Homebrew? Use cargo-dist's generated installer:
 

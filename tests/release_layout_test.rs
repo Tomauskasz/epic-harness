@@ -57,3 +57,50 @@ fn release_contains_no_unsupported_host_or_handwritten_installer_artifacts() {
         "cargo-dist generates the release installers; do not upload handwritten copies"
     );
 }
+
+#[test]
+fn tag_release_refreshes_and_verifies_the_dashboard_before_dist_build() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect("release workflow must be readable");
+
+    let frozen_install = workflow
+        .find("pnpm install --frozen-lockfile")
+        .expect("tag releases must install dashboard dependencies from the locked manifest");
+    let dashboard_build = workflow
+        .find("pnpm run build")
+        .expect("tag releases must build the dashboard before packaging");
+    let byte_comparison = workflow
+        .find("readFileSync('app/dist/index.html').equals(readFileSync('assets/dashboard.html'))")
+        .expect("tag releases must compare the built dashboard and embedded asset byte-for-byte");
+    let dist_build = workflow
+        .find("dist build ${{ needs.plan.outputs.tag-flag }}")
+        .expect("release workflow must invoke cargo-dist");
+
+    assert!(
+        frozen_install < dashboard_build
+            && dashboard_build < byte_comparison
+            && byte_comparison < dist_build,
+        "tag releases must frozen-install, build, and byte-compare the dashboard before cargo-dist builds artifacts"
+    );
+    assert!(
+        workflow.contains("node -e \"const { readFileSync } = require('node:fs');"),
+        "use Node's built-in byte comparison so the release gate works on Windows, macOS, and Linux"
+    );
+}
+
+#[test]
+fn contributing_uses_the_path_installed_binary_for_plugin_testing() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let contributing = std::fs::read_to_string(root.join("CONTRIBUTING.md"))
+        .expect("CONTRIBUTING.md must be readable");
+
+    assert!(
+        contributing.contains("cargo install --path . --force"),
+        "contributors must install the local binary on PATH before testing plugin hooks"
+    );
+    assert!(
+        !contributing.contains("hooks/bin/"),
+        "plugin hooks resolve epic-harness from PATH; hooks/bin is not a maintained test path"
+    );
+}

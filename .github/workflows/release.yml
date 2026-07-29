@@ -152,6 +152,15 @@ jobs:
         uses: pnpm/action-setup@v6
         with:
           version: 11
+      - name: Install dashboard dependencies
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+      - name: Build dashboard
+        working-directory: app
+        run: pnpm run build
+      - name: Verify generated dashboard asset
+        run: >-
+          node -e "const { readFileSync } = require('node:fs'); if (!readFileSync('app/dist/index.html').equals(readFileSync('assets/dashboard.html'))) { console.error('assets/dashboard.html is stale; run pnpm install --frozen-lockfile && pnpm run build in app, then copy app/dist/index.html to assets/dashboard.html'); process.exit(1); }"
       - name: Build artifacts
         env:
           POSTHOG_KEY: ${{ secrets.POSTHOG_KEY }}
