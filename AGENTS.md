@@ -51,7 +51,10 @@ flowchart TD
     EVOLVE --> DONE["Orbit Complete\nConsolidated Report"]
 ```
 
-**State tracking**: `$HARNESS_DIR/orbit/PIPELINE-{timestamp}.json` — updated after every phase transition, survives context compaction.
+**State tracking**: `$HARNESS_DIR/orbit/PIPELINE-{id}.json` where `id` is the
+canonical Orbit timestamp identity — updated after every phase transition,
+survives context compaction. SessionEnd reads only this exact filename for its
+observed identity; unrelated pipeline files are not completion candidates.
 
 **Human checkpoints**: explicit opt-in to interactive mode, 3 failed audits (pause). Direct and Council are auto-detected and auto-approved.
 

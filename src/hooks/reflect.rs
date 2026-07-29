@@ -2896,22 +2896,22 @@ fn sync_completed_orbit_pipelines_in(
     project: &str,
     expected: &std::collections::BTreeSet<&str>,
 ) -> io::Result<()> {
+    if expected.len() > crate::shared::orbit::MAX_ORBIT_PIPELINE_FILES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "SessionEnd recorded more than {} Orbit pipeline identities",
+                crate::shared::orbit::MAX_ORBIT_PIPELINE_FILES
+            ),
+        ));
+    }
     let mut synced = std::collections::BTreeSet::new();
-    for path in all_orbit_pipeline_files(&harness.join("orbit"))? {
-        // A malformed unrelated pipeline must not poison an exact replay.
-        // If a mapped pipeline cannot be read, it remains absent from `synced`
-        // and the explicit missing-identity error below keeps the job retryable.
-        let Ok(content) = read_orbit_pipeline_file(&path) else {
+    for id in expected {
+        let Some((_, pipeline)) = crate::shared::orbit::read_exact_orbit_pipeline_in(harness, id)?
+        else {
             continue;
         };
-        let Ok(pipeline) = serde_json::from_str::<serde_json::Value>(&content) else {
-            continue;
-        };
-        let Some(id) = pipeline.get("id").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        if !expected.contains(id)
-            || pipeline.get("status").and_then(serde_json::Value::as_str) != Some("complete")
+        if pipeline.get("status").and_then(serde_json::Value::as_str) != Some("complete")
             || pipeline.get("phase").and_then(serde_json::Value::as_str) != Some("evolve")
             || pipeline
                 .get("evolution_session_id")
@@ -2920,6 +2920,7 @@ fn sync_completed_orbit_pipelines_in(
         {
             continue;
         }
+        let state_json = serde_json::to_string(&pipeline).map_err(io::Error::other)?;
         crate::store::runtime::block_on(crate::store::orbit_store::upsert_pipeline_pool(
             &pool,
             id,
@@ -2927,7 +2928,7 @@ fn sync_completed_orbit_pipelines_in(
             "complete",
             Some("evolve"),
             pipeline.get("mode").and_then(serde_json::Value::as_str),
-            &content,
+            &state_json,
         ))?;
         synced.insert(id.to_string());
     }
@@ -2948,32 +2949,6 @@ fn sync_completed_orbit_pipelines_in(
     Ok(())
 }
 
-/// Return every regular pipeline file when replaying an exact durable mapping.
-/// The dashboard/reporting view is bounded, but synchronization cannot omit a
-/// valid mapped file just because many newer pipeline files exist.
-fn all_orbit_pipeline_files(orbit_dir: &Path) -> io::Result<Vec<PathBuf>> {
-    let entries = match fs::read_dir(orbit_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
-    let mut files = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
-        if entry.file_type()?.is_file() && name.starts_with("PIPELINE-") && name.ends_with(".json")
-        {
-            files.push(path);
-        }
-    }
-    files.sort();
-    Ok(files)
-}
-
 fn orbit_pipeline_candidates(orbit_dir: &Path) -> io::Result<Vec<PathBuf>> {
     let entries = match fs::read_dir(orbit_dir) {
         Ok(entries) => entries,
@@ -2991,7 +2966,7 @@ fn orbit_pipeline_candidates(orbit_dir: &Path) -> io::Result<Vec<PathBuf>> {
         if entry.file_type()?.is_file() && name.starts_with("PIPELINE-") && name.ends_with(".json")
         {
             newest.push(std::cmp::Reverse(path));
-            if newest.len() > MAX_ORBIT_PIPELINE_FILES {
+            if newest.len() > crate::shared::orbit::MAX_ORBIT_PIPELINE_FILES {
                 newest.pop();
             }
         }
@@ -3005,15 +2980,17 @@ fn orbit_pipeline_candidates(orbit_dir: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 fn read_orbit_pipeline_file(path: &Path) -> io::Result<String> {
-    let mut bytes = Vec::with_capacity(MAX_ORBIT_PIPELINE_BYTES.min(64 * 1024));
+    let mut bytes =
+        Vec::with_capacity(crate::shared::orbit::MAX_ORBIT_PIPELINE_BYTES.min(64 * 1024));
     fs::File::open(path)?
-        .take((MAX_ORBIT_PIPELINE_BYTES + 1) as u64)
+        .take((crate::shared::orbit::MAX_ORBIT_PIPELINE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_ORBIT_PIPELINE_BYTES {
+    if bytes.len() > crate::shared::orbit::MAX_ORBIT_PIPELINE_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "orbit pipeline exceeds {MAX_ORBIT_PIPELINE_BYTES} bytes: {}",
+                "orbit pipeline exceeds {} bytes: {}",
+                crate::shared::orbit::MAX_ORBIT_PIPELINE_BYTES,
                 path.display()
             ),
         ));
@@ -3504,14 +3481,17 @@ mod tests {
     #[test]
     fn orbit_pipeline_candidates_keep_only_the_newest_named_file_bound() {
         let orbit = tempfile::tempdir().unwrap();
-        for index in 0..=MAX_ORBIT_PIPELINE_FILES {
+        for index in 0..=crate::shared::orbit::MAX_ORBIT_PIPELINE_FILES {
             fs::write(orbit.path().join(format!("PIPELINE-{index:03}.json")), "{}").unwrap();
         }
         fs::write(orbit.path().join("unrelated.json"), "{}").unwrap();
 
         let candidates = orbit_pipeline_candidates(orbit.path()).unwrap();
 
-        assert_eq!(candidates.len(), MAX_ORBIT_PIPELINE_FILES);
+        assert_eq!(
+            candidates.len(),
+            crate::shared::orbit::MAX_ORBIT_PIPELINE_FILES
+        );
         assert!(
             candidates
                 .iter()
@@ -3525,43 +3505,39 @@ mod tests {
     }
 
     #[test]
-    fn orbit_pipeline_sync_candidates_include_files_beyond_the_dashboard_bound() {
-        let orbit = tempfile::tempdir().unwrap();
-        for index in 0..=MAX_ORBIT_PIPELINE_FILES {
-            fs::write(orbit.path().join(format!("PIPELINE-{index:03}.json")), "{}").unwrap();
-        }
-
-        assert_eq!(
-            all_orbit_pipeline_files(orbit.path()).unwrap().len(),
-            MAX_ORBIT_PIPELINE_FILES + 1
-        );
+    fn sync_completed_orbit_pipeline_rejects_an_over_cap_mapping() {
+        let harness = tempfile::tempdir().unwrap();
+        let pool = crate::store::runtime::block_on(async {
+            let pool = crate::store::pool::test_memory_pool().await;
+            crate::store::schema::init_schema_pool(&pool).await?;
+            Ok::<_, io::Error>(pool)
+        })
+        .unwrap();
+        let ids: Vec<String> = (0..=crate::shared::orbit::MAX_ORBIT_PIPELINE_FILES)
+            .map(|index| format!("pipeline-{index}"))
+            .collect();
+        let expected: std::collections::BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+        let error = sync_completed_orbit_pipelines_in(
+            harness.path(),
+            &pool,
+            "session-ready",
+            "project-a",
+            &expected,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
-    fn sync_completed_orbit_pipeline_repairs_a_stale_store_row_beyond_the_dashboard_bound() {
+    fn sync_completed_orbit_pipeline_repairs_an_exact_stale_store_row() {
         let harness = tempfile::tempdir().unwrap();
         let orbit = harness.path().join("orbit");
         fs::create_dir(&orbit).unwrap();
-        for index in 0..=MAX_ORBIT_PIPELINE_FILES {
-            fs::write(
-                orbit.join(format!("PIPELINE-{index:03}.json")),
-                format!(r#"{{"id":"other-{index}","status":"running","phase":"go"}}"#),
-            )
-            .unwrap();
-        }
-        let completed = orbit.join("PIPELINE-000.json");
         fs::write(
-            &completed,
+            orbit.join("PIPELINE-ready.json"),
             r#"{"id":"ready","status":"complete","phase":"evolve","evolution_session_id":"session-ready"}"#,
         )
         .unwrap();
-        assert!(
-            !orbit_pipeline_candidates(&orbit)
-                .unwrap()
-                .contains(&completed),
-            "the bounded dashboard scan must exclude the oldest target"
-        );
-
         let pool = crate::store::runtime::block_on(async {
             let pool = crate::store::pool::test_memory_pool().await;
             crate::store::schema::init_schema_pool(&pool).await?;
@@ -3591,7 +3567,11 @@ mod tests {
     fn orbit_pipeline_read_rejects_files_over_the_byte_bound() {
         let orbit = tempfile::tempdir().unwrap();
         let path = orbit.path().join("PIPELINE-too-large.json");
-        fs::write(&path, vec![b' '; MAX_ORBIT_PIPELINE_BYTES + 1]).unwrap();
+        fs::write(
+            &path,
+            vec![b' '; crate::shared::orbit::MAX_ORBIT_PIPELINE_BYTES + 1],
+        )
+        .unwrap();
 
         let error = read_orbit_pipeline_file(&path).unwrap_err();
 

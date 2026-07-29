@@ -1,10 +1,15 @@
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use super::paths::{canonical_for_compare, orbit_dir};
+
+/// Maximum exact Orbit identities handled by a single SessionEnd replay.
+/// Exceeding the bound fails the job rather than silently omitting state.
+pub(crate) const MAX_ORBIT_PIPELINE_FILES: usize = 64;
+pub(crate) const MAX_ORBIT_PIPELINE_BYTES: usize = 1024 * 1024;
 
 /// Scan a directory for PIPELINE-*.json files with `"status": "running"`.
 /// Returns the most recent running pipeline (by filename sort order), or None.
@@ -280,56 +285,35 @@ pub fn reflection_completion_candidates_in(
     if observed_pipeline_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let orbit_dir = regular_orbit_dir(harness_dir)?;
     let observed: std::collections::BTreeSet<&str> =
         observed_pipeline_ids.iter().map(String::as_str).collect();
+    if observed.len() > MAX_ORBIT_PIPELINE_FILES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "SessionEnd observed more than {MAX_ORBIT_PIPELINE_FILES} Orbit pipeline identities"
+            ),
+        ));
+    }
     let mut candidates = std::collections::BTreeSet::new();
-    for entry in fs::read_dir(&orbit_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !name.starts_with("PIPELINE-") || !name.ends_with(".json") {
-            continue;
-        }
-        validate_pipeline_path(&path, harness_dir, &orbit_dir)?;
-        let content = fs::read_to_string(&path)?;
-        let state: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("invalid Orbit pipeline {}: {error}", path.display()),
-            )
-        })?;
-        if state.get("status").and_then(serde_json::Value::as_str) != Some("running") {
-            continue;
-        }
-        let Some(id) = state.get("id").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        // Only a pipeline observed in this SessionEnd can influence its
-        // durable completion marker.  An unrelated old/noncanonical file
-        // must not poison another pipeline's reflection replay.
-        if !observed.contains(id) {
-            continue;
-        }
+    for id in observed {
         if !is_canonical_pipeline_id(id) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Orbit pipeline id must be canonical before SessionEnd completion",
             ));
         }
+        let Some((_, state)) = read_exact_orbit_pipeline_in(harness_dir, id)? else {
+            continue;
+        };
+        if state.get("status").and_then(serde_json::Value::as_str) != Some("running") {
+            continue;
+        }
         if state.get("phase").and_then(serde_json::Value::as_str) != Some("awaiting_evolution") {
             continue;
         }
         validate_ready_for_reflection_completion(&state)?;
-        if !candidates.insert(id.to_string()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("duplicate observed Orbit pipeline id: {id}"),
-            ));
-        }
+        candidates.insert(id.to_string());
     }
     Ok(candidates.into_iter().collect())
 }
@@ -342,48 +326,29 @@ fn complete_pipelines_after_verified_reflection_in(
     let orbit_dir = regular_orbit_dir(harness_dir)?;
     let expected_ids: std::collections::BTreeSet<&str> =
         pipeline_ids.iter().map(String::as_str).collect();
+    if expected_ids.len() > MAX_ORBIT_PIPELINE_FILES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "SessionEnd recorded more than {MAX_ORBIT_PIPELINE_FILES} Orbit pipeline identities"
+            ),
+        ));
+    }
     let mut pending = Vec::new();
-    let mut matched_ids = std::collections::BTreeSet::new();
-    for entry in fs::read_dir(&orbit_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !name.starts_with("PIPELINE-") || !name.ends_with(".json") {
-            continue;
-        }
-        validate_pipeline_path(&path, harness_dir, &orbit_dir)?;
-        let content = fs::read_to_string(&path)?;
-        let state: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("invalid Orbit pipeline {}: {error}", path.display()),
-            )
-        })?;
-        if state.get("status").and_then(serde_json::Value::as_str) != Some("running") {
-            continue;
-        }
-        let Some(id) = state.get("id").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        if !expected_ids.contains(id) {
-            continue;
-        }
+    for id in expected_ids {
         if !is_canonical_pipeline_id(id) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Orbit pipeline id must be canonical before SessionEnd completion",
             ));
         }
-        validate_ready_for_reflection_completion(&state)?;
-        if !matched_ids.insert(id.to_string()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("duplicate durable Orbit pipeline id: {id}"),
-            ));
+        let Some((path, state)) = read_exact_orbit_pipeline_in(harness_dir, id)? else {
+            continue;
+        };
+        if state.get("status").and_then(serde_json::Value::as_str) != Some("running") {
+            continue;
         }
+        validate_ready_for_reflection_completion(&state)?;
         pending.push((path, state));
     }
 
@@ -481,6 +446,60 @@ fn regular_orbit_dir(harness_dir: &Path) -> io::Result<PathBuf> {
         ));
     }
     Ok(orbit_dir)
+}
+
+/// Read exactly the filename owned by one canonical pipeline identity.
+/// Pipeline state has always been persisted as `PIPELINE-{id}.json`; enforcing
+/// that relationship lets SessionEnd avoid parsing unrelated files.
+pub(crate) fn read_exact_orbit_pipeline_in(
+    harness_dir: &Path,
+    pipeline_id: &str,
+) -> io::Result<Option<(PathBuf, serde_json::Value)>> {
+    if !is_canonical_pipeline_id(pipeline_id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Orbit pipeline id must be canonical",
+        ));
+    }
+    let orbit_dir = regular_orbit_dir(harness_dir)?;
+    let path = orbit_dir.join(format!("PIPELINE-{pipeline_id}.json"));
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    validate_pipeline_path(&path, harness_dir, &orbit_dir)?;
+    let mut bytes = Vec::with_capacity(MAX_ORBIT_PIPELINE_BYTES.min(64 * 1024));
+    fs::File::open(&path)?
+        .take((MAX_ORBIT_PIPELINE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_ORBIT_PIPELINE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Orbit pipeline exceeds {MAX_ORBIT_PIPELINE_BYTES} bytes: {}",
+                path.display()
+            ),
+        ));
+    }
+    let content = String::from_utf8(bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let state: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid Orbit pipeline {}: {error}", path.display()),
+        )
+    })?;
+    if state.get("id").and_then(serde_json::Value::as_str) != Some(pipeline_id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Orbit pipeline filename and id disagree: expected {pipeline_id} in {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(Some((path, state)))
 }
 
 fn validate_pipeline_path(path: &Path, harness_dir: &Path, orbit_dir: &Path) -> io::Result<()> {
@@ -850,7 +869,7 @@ mod completion_tests {
         let harness = tempfile::tempdir().unwrap();
         let orbit = harness.path().join("orbit");
         fs::create_dir(&orbit).unwrap();
-        let pipeline = orbit.join("PIPELINE-20260729-valid.json");
+        let pipeline = orbit.join("PIPELINE-valid.json");
         fs::write(
             &pipeline,
             r#"{"id":"valid","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#,
@@ -880,7 +899,7 @@ mod completion_tests {
         let harness = tempfile::tempdir().unwrap();
         let orbit = harness.path().join("orbit");
         fs::create_dir(&orbit).unwrap();
-        let pipeline = orbit.join("PIPELINE-20260729-not-ready.json");
+        let pipeline = orbit.join("PIPELINE-not-ready.json");
         let before = r#"{"id":"not-ready","status":"running","phase":"ship","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
         fs::write(&pipeline, before).unwrap();
 
@@ -901,7 +920,7 @@ mod completion_tests {
         let harness = tempfile::tempdir().unwrap();
         let orbit = harness.path().join("orbit");
         fs::create_dir(&orbit).unwrap();
-        let pipeline = orbit.join("PIPELINE-20260729-no-history.json");
+        let pipeline = orbit.join("PIPELINE-no-history.json");
         let before = r#"{"id":"no-history","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#;
         fs::write(&pipeline, before).unwrap();
 
@@ -922,7 +941,7 @@ mod completion_tests {
         let harness = tempfile::tempdir().unwrap();
         let orbit = harness.path().join("orbit");
         fs::create_dir(&orbit).unwrap();
-        let pipeline = orbit.join("PIPELINE-20260729-collision.json");
+        let pipeline = orbit.join("PIPELINE-a-b.json");
         let before = r#"{"id":"a-b","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
         fs::write(&pipeline, before).unwrap();
 
@@ -944,7 +963,7 @@ mod completion_tests {
         let harness = tempfile::tempdir().unwrap();
         let orbit = harness.path().join("orbit");
         fs::create_dir(&orbit).unwrap();
-        let pipeline = orbit.join("PIPELINE-20260729-later.json");
+        let pipeline = orbit.join("PIPELINE-later.json");
         let in_flight = r#"{"id":"later","status":"running","phase":"ship","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
         fs::write(&pipeline, in_flight).unwrap();
 
@@ -995,7 +1014,7 @@ mod completion_tests {
         let harness = tempfile::tempdir().unwrap();
         let orbit = harness.path().join("orbit");
         fs::create_dir(&orbit).unwrap();
-        let pipeline = orbit.join("PIPELINE-20260729-malformed.json");
+        let pipeline = orbit.join("PIPELINE-malformed.json");
         let before = r#"{"id":"malformed","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":{}}"#;
         fs::write(&pipeline, before).unwrap();
 
@@ -1008,34 +1027,78 @@ mod completion_tests {
     }
 
     #[test]
-    fn candidate_selection_rejects_duplicate_observed_ids_without_changing_bytes() {
+    fn candidate_selection_ignores_an_unobserved_malformed_pipeline() {
         let harness = tempfile::tempdir().unwrap();
         let orbit = harness.path().join("orbit");
         fs::create_dir(&orbit).unwrap();
-        let first = orbit.join("PIPELINE-20260729-duplicate-a.json");
-        let second = orbit.join("PIPELINE-20260729-duplicate-b.json");
-        let state = r#"{"id":"duplicate","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
-        fs::write(&first, state).unwrap();
-        fs::write(&second, state).unwrap();
+        fs::write(
+            orbit.join("PIPELINE-ready.json"),
+            r#"{"id":"ready","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#,
+        )
+        .unwrap();
+        let unrelated = orbit.join("PIPELINE-unrelated.json");
+        let malformed = "{";
+        fs::write(&unrelated, malformed).unwrap();
+
+        assert_eq!(
+            super::reflection_completion_candidates_in(harness.path(), &["ready".into()]).unwrap(),
+            vec!["ready"]
+        );
+        assert_eq!(fs::read_to_string(unrelated).unwrap(), malformed);
+    }
+
+    #[test]
+    fn candidate_selection_rejects_more_than_the_pipeline_cap() {
+        let harness = tempfile::tempdir().unwrap();
+        let ids: Vec<String> = (0..=super::MAX_ORBIT_PIPELINE_FILES)
+            .map(|index| format!("pipeline-{index}"))
+            .collect();
+
+        let error = super::reflection_completion_candidates_in(harness.path(), &ids).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn candidate_selection_rejects_an_oversized_exact_pipeline_without_changing_bytes() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-ready.json");
+        let bytes = vec![b' '; super::MAX_ORBIT_PIPELINE_BYTES + 1];
+        fs::write(&pipeline, &bytes).unwrap();
+
+        let error = super::reflection_completion_candidates_in(harness.path(), &["ready".into()])
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(pipeline).unwrap(), bytes);
+    }
+
+    #[test]
+    fn candidate_selection_rejects_a_filename_and_id_mismatch_without_changing_bytes() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-duplicate.json");
+        let state = r#"{"id":"other","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
+        fs::write(&pipeline, state).unwrap();
 
         assert!(
             super::reflection_completion_candidates_in(harness.path(), &["duplicate".into()])
                 .is_err()
         );
-        assert_eq!(fs::read_to_string(first).unwrap(), state);
-        assert_eq!(fs::read_to_string(second).unwrap(), state);
+        assert_eq!(fs::read_to_string(pipeline).unwrap(), state);
     }
 
     #[test]
-    fn completion_rejects_duplicate_durable_ids_without_changing_bytes() {
+    fn completion_rejects_a_filename_and_id_mismatch_without_changing_bytes() {
         let harness = tempfile::tempdir().unwrap();
         let orbit = harness.path().join("orbit");
         fs::create_dir(&orbit).unwrap();
-        let first = orbit.join("PIPELINE-20260729-duplicate-a.json");
-        let second = orbit.join("PIPELINE-20260729-duplicate-b.json");
-        let state = r#"{"id":"duplicate","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
-        fs::write(&first, state).unwrap();
-        fs::write(&second, state).unwrap();
+        let pipeline = orbit.join("PIPELINE-duplicate.json");
+        let state = r#"{"id":"other","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
+        fs::write(&pipeline, state).unwrap();
 
         assert!(
             super::complete_pipelines_after_verified_reflection_in(
@@ -1045,8 +1108,7 @@ mod completion_tests {
             )
             .is_err()
         );
-        assert_eq!(fs::read_to_string(first).unwrap(), state);
-        assert_eq!(fs::read_to_string(second).unwrap(), state);
+        assert_eq!(fs::read_to_string(pipeline).unwrap(), state);
     }
 
     #[test]
@@ -1054,7 +1116,7 @@ mod completion_tests {
         let harness = tempfile::tempdir().unwrap();
         let orbit = harness.path().join("orbit");
         fs::create_dir(&orbit).unwrap();
-        let ready = orbit.join("PIPELINE-20260729-ready.json");
+        let ready = orbit.join("PIPELINE-ready.json");
         let unrelated = orbit.join("PIPELINE-20260729-unrelated.json");
         fs::write(
             &ready,
@@ -1086,7 +1148,7 @@ mod completion_tests {
         let harness = tempfile::tempdir().unwrap();
         let orbit = harness.path().join("orbit");
         fs::create_dir(&orbit).unwrap();
-        let pipeline = orbit.join("PIPELINE-20260729-retry.json");
+        let pipeline = orbit.join("PIPELINE-retry-id.json");
         let rejected = r#"{"id":"retry-id","status":"running","phase":"ship","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
         fs::write(&pipeline, rejected).unwrap();
 
