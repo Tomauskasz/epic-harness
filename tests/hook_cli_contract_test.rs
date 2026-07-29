@@ -45,6 +45,64 @@ fn harness_path(home: &Path, project: &Path) -> PathBuf {
     )
 }
 
+#[test]
+fn path_ignores_unrelated_piped_stdin() {
+    let temp = tempfile::tempdir().expect("temporary test directory");
+    let home = temp.path().join("home");
+    let project = project_path(temp.path());
+    fs::create_dir_all(&project).expect("project directory");
+    let expected = harness_path(&home, &project);
+
+    let mut process = Command::new(BINARY);
+    process
+        .arg("path")
+        .current_dir(&project)
+        .env("HOME", &home)
+        .env_remove("USERPROFILE")
+        .env_remove("HOMEDRIVE")
+        .env_remove("HOMEPATH")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = process
+        .output_with_stdin(b"unrelated stdin")
+        .expect("run path with piped stdin");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        PathBuf::from(
+            String::from_utf8(output.stdout)
+                .expect("path output is UTF-8")
+                .trim(),
+        ),
+        expected
+    );
+}
+
+#[test]
+fn direct_guard_rejects_malformed_hook_input() {
+    let temp = tempfile::tempdir().expect("temporary test directory");
+    let project = project_path(temp.path());
+    fs::create_dir_all(&project).expect("project directory");
+
+    let output = run_hook(temp.path(), &project, "guard", "unrelated stdin");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"}}"#
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("invalid hook input JSON"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn establish_host_session_state(home: &Path, project: &Path, session_id: &str) {
     let harness = harness_path(home, project);
     fs::create_dir_all(&harness).expect("harness directory");
