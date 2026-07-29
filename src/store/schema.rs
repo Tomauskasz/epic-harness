@@ -7,7 +7,7 @@ use sqlx::AnyPool;
 use std::io;
 
 /// Current schema version. Bump when DDL changes.
-pub(crate) const SCHEMA_VERSION: u32 = 6;
+pub(crate) const SCHEMA_VERSION: u32 = 7;
 
 async fn stored_schema_version(pool: &AnyPool) -> io::Result<Option<u32>> {
     match sqlx::query_scalar::<_, String>(
@@ -465,6 +465,18 @@ pub(crate) const DDL_SQLITE: &str = r#"
         completed_at TEXT NOT NULL,
         PRIMARY KEY (session_id, project)
     );
+
+    CREATE TABLE IF NOT EXISTS reflection_pipeline_ids (
+        session_id  TEXT NOT NULL,
+        project     TEXT NOT NULL,
+        pipeline_id TEXT NOT NULL,
+        PRIMARY KEY (session_id, project, pipeline_id),
+        FOREIGN KEY (session_id, project)
+            REFERENCES reflection_sessions(session_id, project)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_reflection_pipeline_ids_project
+        ON reflection_pipeline_ids(project, pipeline_id);
 
     CREATE TABLE IF NOT EXISTS reflection_metrics (
         session_id TEXT NOT NULL,
