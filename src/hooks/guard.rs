@@ -156,31 +156,100 @@ fn check_recursive_delete(cmd: &str, home: &Path, workspace: &Path) -> bool {
 }
 
 fn recursive_delete_targets(cmd: &str) -> Vec<String> {
-    let words = shell_words(cmd);
-    let Some(program) = words.first() else {
+    split_top_level_commands(cmd)
+        .into_iter()
+        .flat_map(|segment| match shell_words(segment) {
+            Some(words) => recursive_delete_targets_from_words(&words, 0),
+            // Do not search arbitrary prose for dangerous-looking text. An
+            // unparseable command is only denied when the segment itself
+            // starts with a destructive program, which is concrete evidence
+            // it was intended for execution rather than documentation.
+            None => unparseable_direct_delete_targets(segment),
+        })
+        .collect()
+}
+
+fn recursive_delete_targets_from_words(words: &[String], depth: usize) -> Vec<String> {
+    const MAX_WRAPPER_DEPTH: usize = 8;
+    let Some((program, arguments)) = words.split_first() else {
         return Vec::new();
     };
-    let program = program
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(program)
-        .to_ascii_lowercase();
+    let program = executable_name(program);
     match program.as_str() {
-        "rm" => posix_rm_targets(&words[1..]),
-        "remove-item" | "ri" | "del" | "erase" => powershell_remove_item_targets(&words[1..]),
+        "rm" => posix_rm_targets(arguments),
+        "remove-item" | "ri" | "del" | "erase" => powershell_remove_item_targets(arguments),
         "rd" | "rmdir" => {
-            let cmd_targets = cmd_rmdir_targets(&words[1..]);
+            let cmd_targets = cmd_rmdir_targets(arguments);
             if cmd_targets.is_empty() {
-                powershell_remove_item_targets(&words[1..])
+                powershell_remove_item_targets(arguments)
             } else {
                 cmd_targets
             }
         }
+        "&" if depth < MAX_WRAPPER_DEPTH => {
+            recursive_delete_targets_from_words(arguments, depth + 1)
+        }
+        "sudo" if depth < MAX_WRAPPER_DEPTH => sudo_command(arguments)
+            .map(|command| recursive_delete_targets_from_words(command, depth + 1))
+            .unwrap_or_default(),
+        "sh" | "bash" | "zsh" if depth < MAX_WRAPPER_DEPTH => shell_command_text(arguments)
+            .map(|script| recursive_delete_targets(script))
+            .unwrap_or_default(),
+        "cmd" if depth < MAX_WRAPPER_DEPTH => cmd_command_text(arguments)
+            .map(|script| recursive_delete_targets(&script))
+            .unwrap_or_default(),
+        "powershell" | "pwsh" if depth < MAX_WRAPPER_DEPTH => powershell_command_text(arguments)
+            .map(|script| recursive_delete_targets(&script))
+            .unwrap_or_default(),
         _ => Vec::new(),
     }
 }
 
-fn shell_words(command: &str) -> Vec<String> {
+fn executable_name(program: &str) -> String {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let lower = name.to_ascii_lowercase();
+    lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
+}
+
+fn split_top_level_commands(command: &str) -> Vec<&str> {
+    let mut commands = Vec::new();
+    let mut quote = None;
+    let mut start = 0;
+    let bytes = command.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let character = bytes[index] as char;
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            }
+        } else if matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if character == ';'
+            || ((character == '&' || character == '|')
+                && bytes
+                    .get(index + 1)
+                    .is_some_and(|next| *next as char == character))
+        {
+            let segment = command[start..index].trim();
+            if !segment.is_empty() {
+                commands.push(segment);
+            }
+            index += usize::from(character != ';');
+            start = index + 1;
+        }
+        index += 1;
+    }
+
+    let segment = command[start..].trim();
+    if !segment.is_empty() {
+        commands.push(segment);
+    }
+    commands
+}
+
+fn shell_words(command: &str) -> Option<Vec<String>> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut quote = None;
@@ -200,7 +269,70 @@ fn shell_words(command: &str) -> Vec<String> {
     if !word.is_empty() {
         words.push(word);
     }
-    words
+    quote.is_none().then_some(words)
+}
+
+fn unparseable_direct_delete_targets(segment: &str) -> Vec<String> {
+    let mut words = segment.split_whitespace();
+    let Some(program) = words.next() else {
+        return Vec::new();
+    };
+    match executable_name(program).as_str() {
+        "rm" => posix_rm_targets(&words.map(str::to_string).collect::<Vec<_>>()),
+        "remove-item" | "ri" | "del" | "erase" => {
+            powershell_remove_item_targets(&words.map(str::to_string).collect::<Vec<_>>())
+        }
+        "rd" | "rmdir" => cmd_rmdir_targets(&words.map(str::to_string).collect::<Vec<_>>()),
+        _ => Vec::new(),
+    }
+}
+
+fn sudo_command(arguments: &[String]) -> Option<&[String]> {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        if argument == "--" {
+            return arguments.get(index + 1..);
+        }
+        if !argument.starts_with('-') || argument == "-" {
+            return arguments.get(index..);
+        }
+        let option = argument.to_ascii_lowercase();
+        index += 1;
+        if matches!(
+            option.as_str(),
+            "-u" | "--user" | "-g" | "--group" | "-h" | "--host" | "-c" | "-d" | "-r"
+        ) && !argument.contains('=')
+        {
+            index += 1;
+        }
+    }
+    None
+}
+
+fn shell_command_text(arguments: &[String]) -> Option<&str> {
+    arguments
+        .iter()
+        .position(|argument| argument == "-c")
+        .and_then(|index| arguments.get(index + 1))
+        .map(String::as_str)
+}
+
+fn cmd_command_text(arguments: &[String]) -> Option<String> {
+    arguments
+        .iter()
+        .position(|argument| argument.eq_ignore_ascii_case("/c"))
+        .map(|index| arguments[index + 1..].join(" "))
+        .filter(|text| !text.is_empty())
+}
+
+fn powershell_command_text(arguments: &[String]) -> Option<String> {
+    arguments
+        .iter()
+        .position(|argument| {
+            argument.eq_ignore_ascii_case("-command") || argument.eq_ignore_ascii_case("-c")
+        })
+        .map(|index| arguments[index + 1..].join(" "))
+        .filter(|text| !text.is_empty())
 }
 
 fn posix_rm_targets(arguments: &[String]) -> Vec<String> {
@@ -232,14 +364,14 @@ fn powershell_remove_item_targets(arguments: &[String]) -> Vec<String> {
             continue;
         }
         let lower = argument.to_ascii_lowercase();
-        if matches!(lower.as_str(), "-recurse" | "-r") {
+        if powershell_recurse_option(&lower) {
             recursive = true;
         } else if matches!(lower.as_str(), "-path" | "-literalpath") {
             path_value_follows = true;
         } else if argument.starts_with('-')
             && let Some((option, value)) = argument.split_once(':')
         {
-            if option.eq_ignore_ascii_case("-recurse") || option.eq_ignore_ascii_case("-r") {
+            if powershell_recurse_option(option) {
                 recursive = !value.eq_ignore_ascii_case("$false")
                     && !value.eq_ignore_ascii_case("false")
                     && value != "0";
@@ -253,6 +385,12 @@ fn powershell_remove_item_targets(arguments: &[String]) -> Vec<String> {
         }
     }
     recursive.then_some(targets).unwrap_or_default()
+}
+
+fn powershell_recurse_option(option: &str) -> bool {
+    let option = option.strip_prefix('-').unwrap_or(option);
+    let option = option.to_ascii_lowercase();
+    option == "r" || (option.len() >= 3 && "recurse".starts_with(&option))
 }
 
 fn cmd_rmdir_targets(arguments: &[String]) -> Vec<String> {
@@ -273,8 +411,24 @@ fn is_protected_delete_target(target: &str, home: &Path, workspace: &Path) -> bo
     let candidate =
         symbolic_delete_target(target, home, workspace).unwrap_or_else(|| PathBuf::from(target));
     is_filesystem_root(&candidate)
+        || is_posix_root(target)
+        || is_windows_volume_root(target)
         || paths_equal(&candidate, home)
         || paths_equal(&candidate, workspace)
+}
+
+fn is_posix_root(target: &str) -> bool {
+    let target = target.trim();
+    !target.is_empty() && target.chars().all(|character| character == '/')
+}
+
+fn is_windows_volume_root(target: &str) -> bool {
+    let target = target.trim();
+    let bytes = target.as_bytes();
+    bytes.len() == 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
 }
 
 fn symbolic_delete_target(target: &str, home: &Path, workspace: &Path) -> Option<PathBuf> {
@@ -756,6 +910,14 @@ pub fn run(input: &HookInput) -> i32 {
         && rules_file.is_file()
         && let Ok(content) = std::fs::read_to_string(&rules_file)
     {
+        if let Err(problem) = validate_guard_rule_patterns(&content) {
+            hint(
+                "guard",
+                &format!("BLOCKED: invalid configured guard rule: {problem}"),
+            );
+            get_telemetry().track_hook_blocked(RuleKind::Custom);
+            return 2;
+        }
         let (custom_blocked, custom_warned) = common::parse_guard_rules(&content);
         for rule in &custom_blocked {
             if rule.pattern.is_match(cmd) {
@@ -880,6 +1042,18 @@ impl GuardRulesFile {
         render_section(&mut out, "warned:", &self.warned);
         out
     }
+}
+
+/// Reject configured rules the runtime parser would otherwise silently omit.
+/// A blocked custom rule that cannot compile must not make the safety policy
+/// look active while allowing every matching command through.
+fn validate_guard_rule_patterns(content: &str) -> Result<(), String> {
+    let rules = GuardRulesFile::parse(content);
+    for (pattern, _) in rules.blocked.iter().chain(rules.warned.iter()) {
+        Regex::new(pattern)
+            .map_err(|error| format!("pattern {pattern:?} does not compile: {error}"))?;
+    }
+    Ok(())
 }
 
 /// Append a guard rule to a `guard-rules.yaml` file at `path`.
@@ -1741,6 +1915,12 @@ mod tests {
     }
 
     #[test]
+    fn invalid_configured_guard_regex_is_rejected() {
+        let rules = "blocked:\n  - pattern: [unterminated | msg: must apply\n";
+        assert!(validate_guard_rule_patterns(rules).is_err());
+    }
+
+    #[test]
     fn blocks_powershell_recursive_delete_of_workspace_symbol() {
         let command: String = ['R', 'e', 'm', 'o', 'v', 'e', '-', 'I', 't', 'e', 'm']
             .into_iter()
@@ -1783,6 +1963,71 @@ mod tests {
         ));
         assert!(!check_recursive_delete(
             r"rmdir /s C:\work\repo\target",
+            home,
+            workspace
+        ));
+    }
+
+    #[test]
+    fn recursive_delete_unwraps_supported_shell_wrappers_and_command_lists() {
+        let home = Path::new(r"C:\Users\operator");
+        let workspace = Path::new(r"C:\work\repo");
+        let rm = format!("{} {}", "rm", "-rf");
+        let commands = [
+            format!("sudo {rm} /"),
+            format!("sh -c 'echo safe; {rm} ~'"),
+            format!("bash -c 'true && {rm} $PWD'"),
+            r"zsh -c 'false || rmdir /s C:\Users\operator'".to_string(),
+            r#"cmd /c "echo safe && rmdir /s C:\Users\operator""#.to_string(),
+            r#"cmd /c "rmdir /s C:\""#.to_string(),
+            r#"powershell -Command "Get-ChildItem; Remove-Item -Rec:$true .""#.to_string(),
+            r#"powershell -Command "& Remove-Item -Rec:$true .""#.to_string(),
+            r#"pwsh -Command "Remove-Item -Recurse:$true C:\Users\operator""#.to_string(),
+            r#"pwsh -Command "Remove-Item -Rec C:\""#.to_string(),
+        ];
+
+        for command in commands {
+            assert!(
+                check_recursive_delete(&command, home, workspace),
+                "must block protected recursive delete through {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn recursive_delete_keeps_descendants_nonrecursive_and_docs_text_allowed() {
+        let home = Path::new(r"C:\Users\operator");
+        let workspace = Path::new(r"C:\work\repo");
+        let rm = format!("{} {}", "rm", "-rf");
+        let commands = [
+            r#"powershell -Command "Remove-Item -Rec:$true C:\work\repo\target""#.to_string(),
+            r#"cmd /c "rmdir C:\Users\operator""#.to_string(),
+            r#"pwsh -Command "Remove-Item C:\""#.to_string(),
+            "sh -c 'rm /'".to_string(),
+            format!("printf 'documentation: sudo {rm} /'"),
+        ];
+
+        for command in commands {
+            assert!(
+                !check_recursive_delete(&command, home, workspace),
+                "must allow {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn recursive_delete_denies_only_anchored_unparseable_invocations() {
+        let home = Path::new(r"C:\Users\operator");
+        let workspace = Path::new(r"C:\work\repo");
+        let rm = format!("{} {}", "rm", "-rf");
+
+        assert!(check_recursive_delete(
+            &format!("{rm} / 'unterminated"),
+            home,
+            workspace
+        ));
+        assert!(!check_recursive_delete(
+            &format!("printf 'documentation: {rm} /"),
             home,
             workspace
         ));
