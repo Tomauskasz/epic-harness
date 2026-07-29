@@ -89,7 +89,16 @@ fn is_read_only_command(command: &str) -> bool {
         match character {
             '\'' if !double_quoted => single_quoted = !single_quoted,
             '"' if !single_quoted => double_quoted = !double_quoted,
-            '|' | ';' | '\n' if !single_quoted && !double_quoted => {
+            '|' if !single_quoted && !double_quoted => {
+                segments.push(&command[start..offset]);
+                if chars.get(index + 1).map(|(_, next)| *next) == Some('|') {
+                    start = chars[index + 1].0 + '|'.len_utf8();
+                    index += 1;
+                } else {
+                    start = offset + character.len_utf8();
+                }
+            }
+            ';' | '\n' if !single_quoted && !double_quoted => {
                 segments.push(&command[start..offset]);
                 start = offset + character.len_utf8();
             }
@@ -1040,6 +1049,18 @@ mod tests {
             "Get-Content build.log",
             "Get-Content build.log | Select-String TypeError",
             "Get-ChildItem src | Select-Object Name",
+        ] {
+            let outcome = decide_outcome(None, Some("type_error"), "bash", command);
+            assert_eq!(outcome.result, "unknown", "{command}");
+            assert!(outcome.failure.is_none(), "{command}");
+        }
+    }
+
+    #[test]
+    fn content_reads_allow_shell_or_between_read_only_segments() {
+        for command in [
+            "cat build.log || echo retry",
+            "Get-Content build.log || echo retry",
         ] {
             let outcome = decide_outcome(None, Some("type_error"), "bash", command);
             assert_eq!(outcome.result, "unknown", "{command}");
