@@ -23,9 +23,8 @@
   "files": [
     ".claude-plugin/",
     ".codex-plugin/",
-    "registry/commands/",
-    "registry/skills/",
-    "registry/agents/",
+    "skills/",
+    "mcp_config.json",
     "registry/scripts/",
     "hooks/",
     "registry/presets/",
