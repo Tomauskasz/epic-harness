@@ -965,11 +965,10 @@ fn is_leap(y: i32) -> bool {
 }
 
 const REFLECTION_JOB_ENV: &str = "EPIC_REFLECT_WORKER_JOB";
-const REFLECTION_SLOT_ENV: &str = "EPIC_REFLECT_WORKER_SLOT";
 const REFLECTION_PROJECT_ENV: &str = "EPIC_REFLECT_PROJECT";
 /// Reflection mutates metrics, skill files and project ledgers. Keep that
-/// transaction serial per project; other projects still have their own slot.
-const REFLECTION_SPAWN_LIMIT: usize = 1;
+/// transaction serial per project; other projects have independent OS locks.
+const REFLECTION_WORKER_LOCK: &str = "worker.lock";
 const MAX_REFLECTION_QUEUE_SCAN: usize = 64;
 const MAX_REFLECTION_QUEUE_FILES: usize = MAX_REFLECTION_QUEUE_SCAN * 2;
 const MAX_REFLECTION_OBSERVATIONS: i64 = 5_000;
@@ -992,7 +991,6 @@ const MAX_CLAUDE_JSONL_BYTES: u64 = 256 * 1024;
 const MAX_CLAUDE_JSONL_LINE_BYTES: usize = 16 * 1024;
 const MAX_ORBIT_PIPELINE_FILES: usize = 64;
 const MAX_ORBIT_PIPELINE_BYTES: usize = 1024 * 1024;
-const REFLECTION_CLAIM_MAX_AGE: Duration = Duration::from_secs(15 * 60);
 const MAX_REFLECTION_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1010,19 +1008,14 @@ struct ReflectionJob {
 struct ReflectionClaim {
     claimed_at: String,
     owner: String,
+    fence: String,
 }
 
-/// A durable, cross-process worker permit. The parent reserves it before
-/// spawning, so concurrent SessionEnd hooks cannot create more workers than
-/// the configured queue capacity.
-struct ReflectionWorkerSlot {
-    path: PathBuf,
-}
-
-impl Drop for ReflectionWorkerSlot {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
+/// An OS-owned lock held from recovery through claim, reflection, and
+/// settlement. Its file is deliberately persistent: OS lock release after a
+/// crash, rather than file age or deletion, determines abandonment.
+struct ReflectionWorkerLock {
+    _file: fs::File,
 }
 
 fn read_bounded_jsonl<T: DeserializeOwned>(
@@ -1447,25 +1440,10 @@ fn ensure_reflection_queue_dir(queue: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn reserve_reflection_worker_slot(queue: &Path) -> io::Result<Option<ReflectionWorkerSlot>> {
+fn try_acquire_reflection_worker_lock(queue: &Path) -> io::Result<Option<ReflectionWorkerLock>> {
     ensure_reflection_queue_dir(queue)?;
-    for slot in 0..REFLECTION_SPAWN_LIMIT {
-        let path = queue.join(format!("worker-{slot}.slot"));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                file.write_all(now_iso().as_bytes())?;
-                file.sync_all()?;
-                return Ok(Some(ReflectionWorkerSlot { path }));
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(None)
+    crate::orchestrate::state::try_acquire_lock(&queue.join(REFLECTION_WORKER_LOCK))
+        .map(|lock| lock.map(|_file| ReflectionWorkerLock { _file }))
 }
 
 fn reflection_queue_files(queue: &Path, extension: &str) -> io::Result<Vec<PathBuf>> {
@@ -1487,29 +1465,6 @@ fn reflection_queue_files(queue: &Path, extension: &str) -> io::Result<Vec<PathB
         }
     }
     Ok(files)
-}
-
-fn recover_stale_reflection_worker_slots(
-    queue: &Path,
-    now: SystemTime,
-    max_age: Duration,
-) -> io::Result<usize> {
-    let mut recovered = 0;
-    for path in reflection_queue_files(queue, "slot")? {
-        let modified = fs::metadata(&path)?.modified()?;
-        if now
-            .duration_since(modified)
-            .map(|age| age > max_age)
-            .unwrap_or(false)
-        {
-            match fs::remove_file(path) {
-                Ok(()) => recovered += 1,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-    }
-    Ok(recovered)
 }
 
 fn sync_directory(path: &Path) -> io::Result<()> {
@@ -1624,6 +1579,7 @@ fn claim_reflection_job(pending: &Path) -> io::Result<Option<PathBuf>> {
     job.claim = Some(ReflectionClaim {
         claimed_at: now_iso(),
         owner: format!("pid:{}", std::process::id()),
+        fence: uuid::Uuid::new_v4().to_string(),
     });
     if !publish_new_file(queue, &claimed, |file| {
         serde_json::to_writer(&mut *file, &job).map_err(io::Error::other)?;
@@ -1640,7 +1596,26 @@ fn claim_reflection_job(pending: &Path) -> io::Result<Option<PathBuf>> {
     Ok(Some(claimed))
 }
 
-fn complete_reflection_job(claimed: &Path) -> io::Result<()> {
+fn reflection_claim_fence(claimed: &Path) -> io::Result<String> {
+    let job: ReflectionJob =
+        serde_json::from_slice(&fs::read(claimed)?).map_err(io::Error::other)?;
+    job.claim
+        .map(|claim| claim.fence)
+        .filter(|fence| !fence.is_empty())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "reflection claim has no fence"))
+}
+
+fn ensure_reflection_claim_fence(claimed: &Path, fence: &str) -> io::Result<()> {
+    if fence.is_empty() || reflection_claim_fence(claimed)? != fence {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "reflection claim fence no longer belongs to this worker",
+        ));
+    }
+    Ok(())
+}
+
+fn complete_reflection_job(claimed: &Path, fence: &str) -> io::Result<()> {
     if claimed.extension().and_then(|ext| ext.to_str()) != Some("claimed") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1653,6 +1628,7 @@ fn complete_reflection_job(claimed: &Path) -> io::Result<()> {
             "reflection job has no queue directory",
         )
     })?;
+    ensure_reflection_claim_fence(claimed, fence)?;
     crate::team::codex::atomic_replace_file(claimed, &claimed.with_extension("completed"))?;
     sync_directory(parent)
 }
@@ -1705,7 +1681,8 @@ fn read_claimed_reflection_job(claimed: &Path) -> io::Result<ReflectionJob> {
     }
 }
 
-fn retry_or_dead_letter_reflection_job(claimed: &Path) -> io::Result<bool> {
+fn retry_or_dead_letter_reflection_job(claimed: &Path, fence: &str) -> io::Result<bool> {
+    ensure_reflection_claim_fence(claimed, fence)?;
     let mut job: ReflectionJob =
         serde_json::from_slice(&fs::read(claimed)?).map_err(io::Error::other)?;
     job.attempts = job.attempts.saturating_add(1);
@@ -1730,36 +1707,36 @@ fn retry_or_dead_letter_reflection_job(claimed: &Path) -> io::Result<bool> {
     Ok(dead_lettered)
 }
 
-fn recover_stale_reflection_claims(
+fn recover_abandoned_reflection_claims(
     queue: &Path,
-    now: SystemTime,
-    max_age: Duration,
+    _worker_lock: &ReflectionWorkerLock,
 ) -> io::Result<usize> {
     let mut recovered = 0;
     for path in reflection_queue_files(queue, "claimed")? {
         if path.with_extension("completed").exists() {
             continue;
         }
-        let modified = fs::metadata(&path)?.modified()?;
-        if now
-            .duration_since(modified)
-            .map(|age| age > max_age)
-            .unwrap_or(false)
-        {
-            let pending = path.with_extension("pending");
-            match fs::remove_file(&pending) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-            crate::team::codex::atomic_replace_file(&path, &pending)?;
-            if let Some(parent) = pending.parent() {
-                sync_directory(parent)?;
-            }
-            recovered += 1;
+        let pending = path.with_extension("pending");
+        match fs::remove_file(&pending) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
+        crate::team::codex::atomic_replace_file(&path, &pending)?;
+        if let Some(parent) = pending.parent() {
+            sync_directory(parent)?;
+        }
+        recovered += 1;
     }
     Ok(recovered)
+}
+
+/// Recover only after proving no live worker holds the project OS lock.
+fn recover_abandoned_reflection_claims_if_unlocked(queue: &Path) -> io::Result<usize> {
+    let Some(worker_lock) = try_acquire_reflection_worker_lock(queue)? else {
+        return Ok(0);
+    };
+    recover_abandoned_reflection_claims(queue, &worker_lock)
 }
 
 fn pending_reflection_jobs(queue: &Path) -> io::Result<Vec<PathBuf>> {
@@ -1811,44 +1788,32 @@ fn pending_reflection_jobs(queue: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 fn spawn_pending_reflection_jobs(queue: &Path) -> io::Result<usize> {
-    let pending = pending_reflection_jobs(queue)?;
+    let Some(job) = pending_reflection_jobs(queue)?.into_iter().next() else {
+        return Ok(0);
+    };
     let executable = std::env::current_exe()?;
-    let mut spawned = 0;
-    for job in pending {
-        let scope: ReflectionJob =
-            serde_json::from_slice(&fs::read(&job)?).map_err(io::Error::other)?;
-        validate_reflection_job(&scope)?;
-        let expected_queue = resolve_external_harness_dir(&scope.project)?.join("reflect-queue");
-        if canonical_for_compare(queue)? != canonical_for_compare(&expected_queue)? {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "reflection queue does not belong to project {}",
-                    scope.project
-                ),
-            ));
-        }
-        let Some(slot) = reserve_reflection_worker_slot(queue)? else {
-            break;
-        };
-        let slot_path = slot.path.clone();
-        if let Err(error) = Command::new(&executable)
-            .arg("reflect")
-            .env(REFLECTION_JOB_ENV, &job)
-            .env(REFLECTION_SLOT_ENV, &slot_path)
-            .env(REFLECTION_PROJECT_ENV, &scope.project)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            drop(slot);
-            return Err(error);
-        }
-        std::mem::forget(slot);
-        spawned += 1;
+    let scope: ReflectionJob =
+        serde_json::from_slice(&fs::read(&job)?).map_err(io::Error::other)?;
+    validate_reflection_job(&scope)?;
+    let expected_queue = resolve_external_harness_dir(&scope.project)?.join("reflect-queue");
+    if canonical_for_compare(queue)? != canonical_for_compare(&expected_queue)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "reflection queue does not belong to project {}",
+                scope.project
+            ),
+        ));
     }
-    Ok(spawned)
+    Command::new(&executable)
+        .arg("reflect")
+        .env(REFLECTION_JOB_ENV, &job)
+        .env(REFLECTION_PROJECT_ENV, &scope.project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(1)
 }
 
 fn fallback_projects_for_session(reflection_session_id: &str) -> io::Result<Vec<String>> {
@@ -1908,8 +1873,7 @@ fn enqueue_reflection(reflection_session_id: &str) -> io::Result<()> {
     for project in reflection_projects_for_session(reflection_session_id)? {
         let harness = resolve_external_harness_dir(&project)?;
         let queue = harness.join("reflect-queue");
-        recover_stale_reflection_claims(&queue, SystemTime::now(), REFLECTION_CLAIM_MAX_AGE)?;
-        recover_stale_reflection_worker_slots(&queue, SystemTime::now(), REFLECTION_CLAIM_MAX_AGE)?;
+        let _ = recover_abandoned_reflection_claims_if_unlocked(&queue)?;
         let job = ReflectionJob {
             session_id: reflection_session_id.to_string(),
             project,
@@ -1925,11 +1889,11 @@ fn enqueue_reflection(reflection_session_id: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn settle_reflection_job(claimed: &Path, reflection_code: i32) -> io::Result<()> {
+fn settle_reflection_job(claimed: &Path, fence: &str, reflection_code: i32) -> io::Result<()> {
     if reflection_code == 0 {
-        complete_reflection_job(claimed)
+        complete_reflection_job(claimed, fence)
     } else {
-        retry_or_dead_letter_reflection_job(claimed).map(|_| ())
+        retry_or_dead_letter_reflection_job(claimed, fence).map(|_| ())
     }
 }
 
@@ -1971,28 +1935,31 @@ fn run_reflection_worker(pending: &Path) -> i32 {
         eprintln!("[reflect] invalid worker queue: {error}");
         return 1;
     }
-    let slot_path = match std::env::var_os(REFLECTION_SLOT_ENV).map(PathBuf::from) {
-        Some(path)
-            if canonical_for_compare(path.parent().unwrap_or(Path::new(""))).ok()
-                == canonical_for_compare(&queue).ok()
-                && path
-                    .symlink_metadata()
-                    .map(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
-                    .unwrap_or(false) =>
-        {
-            path
-        }
-        _ => {
-            eprintln!("[reflect] worker has no valid slot permit");
+    let Some(worker_lock) = (match try_acquire_reflection_worker_lock(&queue) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("[reflect] failed to acquire worker lock: {error}");
             return 1;
         }
+    }) else {
+        return 0;
     };
-    let worker_slot = ReflectionWorkerSlot { path: slot_path };
+    if let Err(error) = recover_abandoned_reflection_claims(&queue, &worker_lock) {
+        eprintln!("[reflect] failed to recover abandoned claims: {error}");
+        return 1;
+    }
     let code = match claim_reflection_job(pending) {
         Ok(Some(claimed)) => match read_claimed_reflection_job(&claimed) {
             Ok(job) if job.project == declared.project => {
+                let fence = match job.claim.as_ref().map(|claim| claim.fence.as_str()) {
+                    Some(fence) if !fence.is_empty() => fence,
+                    _ => {
+                        eprintln!("[reflect] claimed job has no fence");
+                        return 1;
+                    }
+                };
                 let reflection_code = run_reflection(&job.session_id);
-                match settle_reflection_job(&claimed, reflection_code) {
+                match settle_reflection_job(&claimed, fence, reflection_code) {
                     Ok(()) => reflection_code,
                     Err(error) => {
                         eprintln!("[reflect] failed to settle reflection job: {error}");
@@ -2018,9 +1985,8 @@ fn run_reflection_worker(pending: &Path) -> i32 {
             1
         }
     };
-    // Drop before dispatching: this project has one permit, and every worker
-    // exit (including claim/read/settlement failure) must hand the queue on.
-    drop(worker_slot);
+    // Drop before dispatching so one pending worker can own this project next.
+    drop(worker_lock);
     if let Err(error) = spawn_pending_reflection_jobs(&queue) {
         eprintln!("[reflect] failed to dispatch next pending job: {error}");
     }
@@ -3282,7 +3248,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_queue_recovery_filters_claims_and_slots_before_the_cap() {
+    fn abandoned_queue_recovery_filters_claims_before_the_cap() {
         let queue = tempfile::tempdir().unwrap();
         for index in 0..MAX_REFLECTION_QUEUE_SCAN {
             fs::write(
@@ -3292,22 +3258,13 @@ mod tests {
             .unwrap();
         }
         let claimed = queue.path().join("job_target.claimed");
-        let slot = queue.path().join("worker-target.slot");
         fs::write(&claimed, "{}").unwrap();
-        fs::write(&slot, "worker").unwrap();
-        let now = SystemTime::now() + Duration::from_secs(60);
 
         assert_eq!(
-            recover_stale_reflection_claims(queue.path(), now, Duration::from_secs(30)).unwrap(),
-            1
-        );
-        assert_eq!(
-            recover_stale_reflection_worker_slots(queue.path(), now, Duration::from_secs(30))
-                .unwrap(),
+            recover_abandoned_reflection_claims_if_unlocked(queue.path()).unwrap(),
             1
         );
         assert!(claimed.with_extension("pending").is_file());
-        assert!(!slot.exists());
     }
 
     #[test]
@@ -3496,7 +3453,8 @@ mod tests {
             claim_reflection_job(&pending).unwrap().is_none(),
             "claimed job cannot be claimed twice"
         );
-        complete_reflection_job(&claimed).unwrap();
+        let fence = reflection_claim_fence(&claimed).unwrap();
+        complete_reflection_job(&claimed, &fence).unwrap();
 
         assert!(
             enqueue_reflection_job(dir.path(), &job).unwrap().is_none(),
@@ -3525,7 +3483,8 @@ mod tests {
             .expect("claimed job");
         let claimed_inode = fs::metadata(&claimed).unwrap().ino();
 
-        assert!(!retry_or_dead_letter_reflection_job(&claimed).unwrap());
+        let fence = reflection_claim_fence(&claimed).unwrap();
+        assert!(!retry_or_dead_letter_reflection_job(&claimed, &fence).unwrap());
 
         let pending_inode = fs::metadata(&pending).unwrap().ino();
         assert_ne!(
@@ -3562,19 +3521,19 @@ mod tests {
             .expect("claimed job");
         let saved = read_claimed_reflection_job(&claimed).unwrap();
 
-        assert!(
-            saved
-                .claim
-                .as_ref()
-                .is_some_and(|lease| { !lease.claimed_at.is_empty() && !lease.owner.is_empty() })
-        );
+        assert!(saved.claim.as_ref().is_some_and(|lease| {
+            !lease.claimed_at.is_empty() && !lease.owner.is_empty() && !lease.fence.is_empty()
+        }));
+        let live_worker = try_acquire_reflection_worker_lock(dir.path())
+            .unwrap()
+            .expect("live worker lock");
         assert_eq!(
-            recover_stale_reflection_claims(dir.path(), SystemTime::now(), Duration::from_secs(30))
-                .unwrap(),
+            recover_abandoned_reflection_claims_if_unlocked(dir.path()).unwrap(),
             0,
-            "the old pending mtime must not make the live claim stale"
+            "the live OS lock must prevent recovery regardless of file age"
         );
         assert!(claimed.is_file());
+        drop(live_worker);
     }
 
     #[test]
@@ -3594,14 +3553,16 @@ mod tests {
             .unwrap()
             .expect("claimed job");
 
-        settle_reflection_job(&claimed, 1).unwrap();
+        let fence = reflection_claim_fence(&claimed).unwrap();
+        settle_reflection_job(&claimed, &fence, 1).unwrap();
 
         assert!(!claimed.with_extension("completed").exists());
         assert!(pending.is_file(), "failed required persistence must replay");
         let replayed = claim_reflection_job(&pending)
             .unwrap()
             .expect("replayed claim");
-        settle_reflection_job(&replayed, 0).unwrap();
+        let replay_fence = reflection_claim_fence(&replayed).unwrap();
+        settle_reflection_job(&replayed, &replay_fence, 0).unwrap();
         assert!(replayed.with_extension("completed").is_file());
     }
 
@@ -3622,7 +3583,8 @@ mod tests {
             .unwrap()
             .expect("claimed job");
 
-        assert!(retry_or_dead_letter_reflection_job(&claimed).unwrap());
+        let fence = reflection_claim_fence(&claimed).unwrap();
+        assert!(retry_or_dead_letter_reflection_job(&claimed, &fence).unwrap());
         assert!(!pending.exists(), "poison job must not return to pending");
         let failed = claimed.with_extension("failed");
         let saved: ReflectionJob = serde_json::from_slice(&fs::read(&failed).unwrap()).unwrap();
@@ -3656,27 +3618,126 @@ mod tests {
     }
 
     #[test]
-    fn stale_reflection_claim_returns_to_pending_queue() {
+    fn live_reflection_lock_prevents_aging_recovery_until_the_owner_releases_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = ReflectionJob {
+            session_id: "20260729_live-lock".into(),
+            project: "project-a".into(),
+            created_at: "2026-07-29T10:00:00Z".into(),
+            attempts: 0,
+            claim: None,
+        };
+        let pending = enqueue_reflection_job(dir.path(), &job).unwrap().unwrap();
+        let claimed = claim_reflection_job(&pending).unwrap().unwrap();
+        let old = SystemTime::now() - Duration::from_secs(16 * 60);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&claimed)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+
+        let ready = dir.path().join("worker-ready");
+        let release = dir.path().join("worker-release");
+        let executable = std::env::current_exe().unwrap();
+        let mut live_worker = Command::new(executable)
+            .arg("--exact")
+            .arg("hooks::reflect::tests::reflection_lock_child_process")
+            .arg("--nocapture")
+            .env("EPIC_TEST_REFLECTION_LOCK_QUEUE", dir.path())
+            .env("EPIC_TEST_REFLECTION_LOCK_READY", &ready)
+            .env("EPIC_TEST_REFLECTION_LOCK_RELEASE", &release)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !ready.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "child worker must acquire the OS lock");
+        assert_eq!(
+            recover_abandoned_reflection_claims_if_unlocked(dir.path()).unwrap(),
+            0,
+            "an aged claim remains live while its OS lock is held"
+        );
+        assert!(claimed.exists());
+
+        fs::write(&release, "release").unwrap();
+        assert!(live_worker.wait().unwrap().success());
+        assert_eq!(
+            recover_abandoned_reflection_claims_if_unlocked(dir.path()).unwrap(),
+            1,
+            "a crash-released OS lock permits recovery without an mtime lease"
+        );
+        assert!(pending.exists());
+    }
+
+    #[test]
+    fn reflection_lock_child_process() {
+        let (Some(queue), Some(ready), Some(release)) = (
+            std::env::var_os("EPIC_TEST_REFLECTION_LOCK_QUEUE").map(PathBuf::from),
+            std::env::var_os("EPIC_TEST_REFLECTION_LOCK_READY").map(PathBuf::from),
+            std::env::var_os("EPIC_TEST_REFLECTION_LOCK_RELEASE").map(PathBuf::from),
+        ) else {
+            return;
+        };
+        let _lock = try_acquire_reflection_worker_lock(&queue)
+            .unwrap()
+            .expect("child worker lock");
+        fs::write(ready, "ready").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !release.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(release.exists(), "parent must release the child worker");
+    }
+
+    #[test]
+    fn settlement_rejects_a_replaced_claim_fence() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = ReflectionJob {
+            session_id: "20260729-fenced-settlement".into(),
+            project: "project-a".into(),
+            created_at: "2026-07-29T10:00:00Z".into(),
+            attempts: 0,
+            claim: None,
+        };
+        let pending = enqueue_reflection_job(dir.path(), &job).unwrap().unwrap();
+        let first_claim = claim_reflection_job(&pending).unwrap().unwrap();
+        let first_fence = reflection_claim_fence(&first_claim).unwrap();
+
+        assert!(!retry_or_dead_letter_reflection_job(&first_claim, &first_fence).unwrap());
+        let replacement = claim_reflection_job(&pending).unwrap().unwrap();
+        let replacement_fence = reflection_claim_fence(&replacement).unwrap();
+        assert_ne!(first_fence, replacement_fence);
+
+        let error = settle_reflection_job(&replacement, &first_fence, 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            replacement.exists(),
+            "a stale worker cannot settle a replacement claim"
+        );
+
+        settle_reflection_job(&replacement, &replacement_fence, 0).unwrap();
+        assert!(replacement.with_extension("completed").exists());
+    }
+
+    #[test]
+    fn abandoned_reflection_claim_returns_to_pending_queue() {
         let dir = tempfile::tempdir().unwrap();
         let claimed = dir.path().join("job_session.claimed");
         fs::write(&claimed, "{}").unwrap();
 
-        let recovered = recover_stale_reflection_claims(
-            dir.path(),
-            SystemTime::now() + Duration::from_secs(60),
-            Duration::from_secs(30),
-        )
-        .unwrap();
+        let recovered = recover_abandoned_reflection_claims_if_unlocked(dir.path()).unwrap();
 
         assert_eq!(recovered, 1);
         assert!(claimed.with_extension("pending").exists());
     }
 
     #[test]
-    fn reflection_worker_slots_cap_concurrent_dispatch() {
+    fn reflection_worker_os_lock_caps_concurrent_workers() {
         let dir = tempfile::tempdir().unwrap();
-        let first = reserve_reflection_worker_slot(dir.path()).unwrap();
-        let second = reserve_reflection_worker_slot(dir.path()).unwrap();
+        let first = try_acquire_reflection_worker_lock(dir.path()).unwrap();
+        let second = try_acquire_reflection_worker_lock(dir.path()).unwrap();
 
         assert!(first.is_some());
         assert!(
@@ -3686,7 +3747,7 @@ mod tests {
 
         drop(first);
         assert!(
-            reserve_reflection_worker_slot(dir.path())
+            try_acquire_reflection_worker_lock(dir.path())
                 .unwrap()
                 .is_some()
         );

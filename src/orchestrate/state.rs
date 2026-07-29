@@ -352,6 +352,33 @@ pub(crate) fn acquire_lock(lock_path: &Path) -> io::Result<fs::File> {
     Ok(file)
 }
 
+/// Try to acquire an exclusive advisory lock without waiting.
+///
+/// A successful handle owns the lock until it is dropped. `Ok(None)` means a
+/// live process owns it; operating systems release the lock after a crash.
+#[cfg(unix)]
+pub(crate) fn try_acquire_lock(lock_path: &Path) -> io::Result<Option<fs::File>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(Some(file));
+    }
+    let error = io::Error::last_os_error();
+    if matches!(error.raw_os_error(), Some(libc::EAGAIN | libc::EWOULDBLOCK)) {
+        Ok(None)
+    } else {
+        Err(error)
+    }
+}
+
 #[cfg(not(unix))]
 pub(crate) fn acquire_lock(lock_path: &Path) -> io::Result<fs::File> {
     let file = fs::OpenOptions::new()
@@ -362,6 +389,27 @@ pub(crate) fn acquire_lock(lock_path: &Path) -> io::Result<fs::File> {
         .open(lock_path)?;
     lock_file_exclusive(&file)?;
     Ok(file)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn try_acquire_lock(lock_path: &Path) -> io::Result<Option<fs::File>> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    match try_lock_file_exclusive(&file) {
+        Ok(()) => Ok(Some(file)),
+        Err(error)
+            if error.kind() == io::ErrorKind::WouldBlock || error.raw_os_error() == Some(33) =>
+        {
+            // ERROR_LOCK_VIOLATION (33) is the Win32 non-blocking contention
+            // result; retaining the numeric check keeps the contract explicit.
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -381,8 +429,27 @@ const fn windows_lock_contract() -> WindowsLockContract {
     }
 }
 
+#[cfg(any(windows, test))]
+const fn windows_try_lock_contract() -> WindowsLockContract {
+    WindowsLockContract {
+        flags: 0x0000_0003,
+        bytes_low: 1,
+        bytes_high: 0,
+    }
+}
+
 #[cfg(windows)]
 fn lock_file_exclusive(file: &fs::File) -> io::Result<()> {
+    lock_file_exclusive_with(file, windows_lock_contract())
+}
+
+#[cfg(windows)]
+fn try_lock_file_exclusive(file: &fs::File) -> io::Result<()> {
+    lock_file_exclusive_with(file, windows_try_lock_contract())
+}
+
+#[cfg(windows)]
+fn lock_file_exclusive_with(file: &fs::File, contract: WindowsLockContract) -> io::Result<()> {
     use std::ffi::c_void;
     use std::os::windows::io::AsRawHandle;
 
@@ -407,7 +474,6 @@ fn lock_file_exclusive(file: &fs::File) -> io::Result<()> {
         ) -> i32;
     }
 
-    let contract = windows_lock_contract();
     let mut overlapped: Overlapped = unsafe { std::mem::zeroed() };
     let result = unsafe {
         LockFileEx(
@@ -432,6 +498,11 @@ fn lock_file_exclusive(_file: &fs::File) -> io::Result<()> {
         io::ErrorKind::Unsupported,
         "cross-process file locking is unsupported on this platform",
     ))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn try_lock_file_exclusive(file: &fs::File) -> io::Result<()> {
+    lock_file_exclusive(file)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1046,6 +1117,13 @@ mod tests {
     fn windows_lock_contract_is_exclusive_and_covers_one_byte() {
         let contract = windows_lock_contract();
         assert_eq!(contract.flags, 0x0000_0002);
+        assert_eq!((contract.bytes_low, contract.bytes_high), (1, 0));
+    }
+
+    #[test]
+    fn windows_try_lock_contract_fails_immediately_and_covers_one_byte() {
+        let contract = windows_try_lock_contract();
+        assert_eq!(contract.flags, 0x0000_0003);
         assert_eq!((contract.bytes_low, contract.bytes_high), (1, 0));
     }
 
