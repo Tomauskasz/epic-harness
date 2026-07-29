@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import https from "node:https";
 import test from "node:test";
 
@@ -835,6 +835,116 @@ set /p EPIC_STDIN=
       } else {
         assert.equal(result.stdout, "", event);
       }
+    }
+  } finally {
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+});
+
+test("Codex SessionStart dispatches complete JSON before stdin closes", async () => {
+  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+  const stdinPath = join(fixture.root, "stdin.txt");
+
+  try {
+    writeCommand(
+      fixture.bin,
+      "epic-harness",
+      `if [ "$1" = "version" ]; then
+  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2
+  exit 0
+fi
+cat > "$EPIC_TEST_STDIN"
+printf '%s\\n' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"ok"}}'`,
+      `if "%1"=="version" (
+  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} 1>&2
+  exit /b 0
+)
+set /p EPIC_STDIN=
+> "%EPIC_TEST_STDIN%" (echo(%EPIC_STDIN%)
+echo {"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"ok"}}`,
+    );
+    const input = JSON.stringify({
+      hook_event_name: "SessionStart",
+      session_id: "open-stdin-session",
+    });
+    const child = spawn(process.execPath, [SCRIPT, "hook", "SessionStart", "resume"], {
+      env: { ...fixture.env, EPIC_TEST_STDIN: stdinPath },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stdin.write(input.slice(0, 13));
+    await new Promise((resolve) => setImmediate(resolve));
+    child.stdin.write(input.slice(13));
+
+    const result = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ timeout: true }), 500);
+      child.once("exit", (code, signal) => {
+        clearTimeout(timer);
+        resolve({ code, signal, timeout: false });
+      });
+    });
+    if (result.timeout) {
+      child.kill();
+      await new Promise((resolve) => child.once("close", resolve));
+    }
+    assert.equal(result.timeout, false, "runner waited for stdin EOF after complete JSON");
+    assert.equal(result.code, 0, result.signal ?? "SessionStart failed");
+    assert.deepEqual(
+      JSON.parse(readFileSync(stdinPath, "utf8")),
+      { ...JSON.parse(input), host: "codex" },
+      "runner must invoke resume with the complete payload",
+    );
+    assert.deepEqual(
+      assertSingleJsonObject(stdout, "SessionStart"),
+      {
+        hookSpecificOutput: {
+          hookEventName: "SessionStart",
+          additionalContext: "ok",
+        },
+      },
+      "runner must forward resume output",
+    );
+    child.stdin.destroy();
+  } finally {
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+});
+
+test("Codex runner preserves closed empty, malformed, and trailing input", () => {
+  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+  const stdinPath = join(fixture.root, "stdin.txt");
+
+  try {
+    writeCommand(
+      fixture.bin,
+      "epic-harness",
+      `if [ "$1" = "version" ]; then
+  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2
+  exit 0
+fi
+cat > "$EPIC_TEST_STDIN"
+printf '%s\\n' '{"hookSpecificOutput":{"hookEventName":"SessionStart"}}'`,
+      `if "%1"=="version" (
+  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} 1>&2
+  exit /b 0
+)
+set /p EPIC_STDIN=
+> "%EPIC_TEST_STDIN%" (echo(%EPIC_STDIN%)
+echo {"hookSpecificOutput":{"hookEventName":"SessionStart"}}
+exit /b 0`,
+    );
+    for (const input of ["", '{"hook_event_name":"SessionStart"', '{"hook_event_name":"SessionStart"} trailing']) {
+      const result = runScript(
+        ["hook", "SessionStart", "resume"],
+        { ...fixture.env, EPIC_TEST_STDIN: stdinPath },
+        input,
+      );
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(readFileSync(stdinPath, "utf8").trimEnd(), input);
     }
   } finally {
     rmSync(fixture.root, { force: true, recursive: true });
