@@ -962,6 +962,7 @@ const REFLECTION_PROJECT_ENV: &str = "EPIC_REFLECT_PROJECT";
 /// transaction serial per project; other projects still have their own slot.
 const REFLECTION_SPAWN_LIMIT: usize = 1;
 const MAX_REFLECTION_QUEUE_SCAN: usize = 64;
+const MAX_REFLECTION_QUEUE_FILES: usize = MAX_REFLECTION_QUEUE_SCAN * 2;
 const MAX_REFLECTION_OBSERVATIONS: i64 = 5_000;
 const MAX_REFLECTION_JSONL_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_REFLECTION_JSONL_LINE_BYTES: usize = 16 * 1024;
@@ -1590,13 +1591,18 @@ fn claim_reflection_job(pending: &Path) -> io::Result<Option<PathBuf>> {
     };
     let mut job: ReflectionJob = match fs::read(pending) {
         Ok(bytes) => match serde_json::from_slice(&bytes) {
-            Ok(job) => job,
+            Ok(job) => {
+                if let Err(error) = validate_reflection_job(&job) {
+                    quarantine_pending_reflection_job(pending)?;
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid pending reflection job: {error}"),
+                    ));
+                }
+                job
+            }
             Err(error) => {
-                crate::team::codex::atomic_replace_file(
-                    pending,
-                    &pending.with_extension("failed"),
-                )?;
-                sync_directory(queue)?;
+                quarantine_pending_reflection_job(pending)?;
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("invalid pending reflection job: {error}"),
@@ -1656,6 +1662,23 @@ fn quarantine_reflection_job(claimed: &Path) -> io::Result<()> {
         )
     })?;
     crate::team::codex::atomic_replace_file(claimed, &claimed.with_extension("failed"))?;
+    sync_directory(parent)
+}
+
+fn quarantine_pending_reflection_job(pending: &Path) -> io::Result<()> {
+    if pending.extension().and_then(|ext| ext.to_str()) != Some("pending") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reflection job is not pending",
+        ));
+    }
+    let parent = pending.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reflection job has no queue directory",
+        )
+    })?;
+    crate::team::codex::atomic_replace_file(pending, &pending.with_extension("failed"))?;
     sync_directory(parent)
 }
 
@@ -1731,24 +1754,49 @@ fn recover_stale_reflection_claims(
 }
 
 fn pending_reflection_jobs(queue: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut pending: Vec<(u32, PathBuf)> = match fs::read_dir(queue) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().map(|t| t.is_file()).unwrap_or(false))
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("pending"))
-            .take(MAX_REFLECTION_QUEUE_SCAN)
-            .filter_map(|path| {
-                fs::read(&path).ok().and_then(|bytes| {
-                    serde_json::from_slice::<ReflectionJob>(&bytes)
-                        .ok()
-                        .map(|job| (job.attempts, path))
-                })
-            })
-            .collect(),
+    let entries = match fs::read_dir(queue) {
+        Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
+    let mut pending = Vec::new();
+    let mut scanned = 0;
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("pending") {
+            continue;
+        }
+        scanned += 1;
+        let job = match fs::read(&path)
+            .and_then(|bytes| {
+                serde_json::from_slice::<ReflectionJob>(&bytes).map_err(io::Error::other)
+            })
+            .and_then(|job| {
+                validate_reflection_job(&job)?;
+                Ok(job)
+            }) {
+            Ok(job) => job,
+            Err(error) => {
+                quarantine_pending_reflection_job(&path)?;
+                eprintln!(
+                    "[reflect] invalid pending reflection job {}: {error}",
+                    path.display()
+                );
+                if scanned == MAX_REFLECTION_QUEUE_FILES {
+                    break;
+                }
+                continue;
+            }
+        };
+        pending.push((job.attempts, path));
+        if pending.len() == MAX_REFLECTION_QUEUE_SCAN || scanned == MAX_REFLECTION_QUEUE_FILES {
+            break;
+        }
+    }
     pending.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
     Ok(pending.into_iter().map(|(_, path)| path).collect())
 }
@@ -1831,7 +1879,11 @@ fn reflection_projects_for_session(reflection_session_id: &str) -> io::Result<Ve
         let pool = crate::store::pool::harness_pool().await?;
         crate::store::observations::distinct_projects_for_session_pool(&pool, reflection_session_id)
             .await
-    })?;
+    })
+    .unwrap_or_else(|error| {
+        eprintln!("[reflect] SQLite project discovery failed, falling back to JSONL: {error}");
+        Vec::new()
+    });
     projects.extend(fallback_projects_for_session(reflection_session_id)?);
     projects.sort();
     projects.dedup();
@@ -3036,6 +3088,67 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn reflection_project_discovery_uses_jsonl_when_sqlite_is_unavailable() {
+        struct HomeRestore {
+            home: Option<std::ffi::OsString>,
+        }
+
+        impl Drop for HomeRestore {
+            fn drop(&mut self) {
+                unsafe {
+                    match self.home.take() {
+                        Some(home) => std::env::set_var("HOME", home),
+                        None => std::env::remove_var("HOME"),
+                    }
+                }
+            }
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        let _restore = HomeRestore {
+            home: std::env::var_os("HOME"),
+        };
+        unsafe { std::env::set_var("HOME", home.path()) };
+
+        let session_id = "20260729_fallback";
+        let project = "fallback-project";
+        let observations = home
+            .path()
+            .join(".harness/projects")
+            .join(project)
+            .join("obs");
+        fs::create_dir_all(&observations).unwrap();
+        let record = ObsRecord {
+            timestamp: "2026-07-29T00:00:00Z".into(),
+            tool: "Read".into(),
+            tool_category: "read".into(),
+            action: None,
+            result: Some("success".into()),
+            score: Some(1.0),
+            dimensions: None,
+            failure_category: None,
+            error_snippet: None,
+            file_ext: None,
+            sequence_id: None,
+            pipeline_id: None,
+            tool_use_id: None,
+        };
+        fs::write(
+            observations.join(format!("session_{session_id}.jsonl")),
+            format!("{}\n", serde_json::to_string(&record).unwrap()),
+        )
+        .unwrap();
+        fs::create_dir_all(home.path().join(".harness")).unwrap();
+        fs::write(home.path().join(".harness/harness.db"), "not sqlite").unwrap();
+
+        assert_eq!(
+            reflection_projects_for_session(session_id).unwrap(),
+            vec![project.to_string()]
+        );
+    }
+
+    #[test]
     fn pending_queue_scan_ignores_completed_entries_before_the_cap() {
         let queue = tempfile::tempdir().unwrap();
         for index in 0..MAX_REFLECTION_QUEUE_SCAN {
@@ -3059,6 +3172,38 @@ mod tests {
             pending_reflection_jobs(queue.path()).unwrap(),
             vec![pending]
         );
+    }
+
+    #[test]
+    fn pending_queue_quarantines_malformed_jobs_before_valid_jobs() {
+        let queue = tempfile::tempdir().unwrap();
+        for index in 0..MAX_REFLECTION_QUEUE_SCAN {
+            fs::write(
+                queue.path().join(format!("job_{index:03}.pending")),
+                "not json",
+            )
+            .unwrap();
+        }
+        let job = ReflectionJob {
+            session_id: "20260729_valid".into(),
+            project: "test-project".into(),
+            created_at: "2026-07-29T00:00:00Z".into(),
+            attempts: 0,
+            claim: None,
+        };
+        let valid = queue.path().join("job_999.pending");
+        fs::write(&valid, serde_json::to_vec(&job).unwrap()).unwrap();
+
+        assert_eq!(pending_reflection_jobs(queue.path()).unwrap(), vec![valid]);
+        for index in 0..MAX_REFLECTION_QUEUE_SCAN {
+            assert!(
+                queue
+                    .path()
+                    .join(format!("job_{index:03}.failed"))
+                    .is_file(),
+                "malformed job {index} must be quarantined"
+            );
+        }
     }
 
     #[test]
