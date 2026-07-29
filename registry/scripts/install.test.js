@@ -40,6 +40,48 @@ const STRUCTURED_HOOKS = [
   ["SessionEnd", "reflect"],
 ];
 
+function makeWindowsCommandShim() {
+  if (!IS_WINDOWS) return null;
+
+  const root = mkdtempSync(join(tmpdir(), "epic-harness-command-shim-"));
+  const executable = join(root, "command-shim.exe");
+  const source = `
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+
+public static class CommandShim {
+  public static int Main(string[] args) {
+    var executablePath = Process.GetCurrentProcess().MainModule.FileName;
+    var scriptPath = Path.ChangeExtension(executablePath, ".cmd");
+    var quotedArgs = String.Join(" ", args.Select(arg => arg.IndexOfAny(new[] { ' ', '\\t', '\"' }) >= 0 ? "\\\"" + arg.Replace("\\\"", "\\\\\\\"") + "\\\"" : arg));
+    var startInfo = new ProcessStartInfo {
+      FileName = Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe",
+      Arguments = "/d /s /c call \\\"" + scriptPath + "\\\" " + quotedArgs,
+      UseShellExecute = false,
+      RedirectStandardInput = false,
+      RedirectStandardOutput = false,
+      RedirectStandardError = false,
+    };
+    using (var child = Process.Start(startInfo)) {
+      child.WaitForExit();
+      return child.ExitCode;
+    }
+  }
+}`;
+  const command = `Add-Type -TypeDefinition @'\n${source}\n'@ -OutputAssembly '${executable.replaceAll("'", "''")}' -OutputType ConsoleApplication`;
+  const result = spawnSync(
+    "powershell.exe",
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  return executable;
+}
+
+const WINDOWS_COMMAND_SHIM = makeWindowsCommandShim();
+
 function writeCommand(bin, name, unixBody, windowsBody) {
   const path = join(bin, IS_WINDOWS ? `${name}.cmd` : name);
   writeFileSync(
@@ -48,7 +90,12 @@ function writeCommand(bin, name, unixBody, windowsBody) {
       ? `@echo off\r\n${windowsBody}\r\n`
       : `#!/bin/sh\n${unixBody}\n`,
   );
-  if (!IS_WINDOWS) chmodSync(path, 0o755);
+  if (IS_WINDOWS) {
+    const executable = join(bin, `${name}.exe`);
+    copyFileSync(WINDOWS_COMMAND_SHIM, executable);
+    return executable;
+  }
+  chmodSync(path, 0o755);
   return path;
 }
 
@@ -294,8 +341,7 @@ exit /b 99`,
 fi
 printf '%s\\n' "$*" >> "$EPIC_TEST_CALLS"`,
         `if "%1"=="version" (
-  set /p EPIC_VERSION=<"%EPIC_TEST_VERSION_FILE%"
-  echo epic-harness %EPIC_VERSION% runtime-revision %EPIC_TEST_RUNTIME_REVISION% 1>&2
+  for /f "usebackq delims=" %%v in ("%EPIC_TEST_VERSION_FILE%") do echo epic-harness %%v runtime-revision %EPIC_TEST_RUNTIME_REVISION% 1>&2
   exit /b 0
 )
 echo %*>>"%EPIC_TEST_CALLS%"`,
@@ -455,8 +501,7 @@ test("a same-version runtime with a different revision is reinstalled and verifi
 fi
 exit 99`,
       `if "%1"=="version" (
-  set /p EPIC_REVISION=<"%EPIC_TEST_REVISION_FILE%"
-  echo epic-harness ${PLUGIN_VERSION} runtime-revision %EPIC_REVISION% 1>&2
+  for /f "usebackq delims=" %%v in ("%EPIC_TEST_REVISION_FILE%") do echo epic-harness ${PLUGIN_VERSION} runtime-revision %%v 1>&2
   exit /b 0
 )
 exit /b 99`,
@@ -744,7 +789,7 @@ test("runner rejects unsupported event and subcommand pairs before invoking a ru
   }
 });
 
-test("runner forwards stdin unchanged for every supported hook event", () => {
+test("Codex runner stamps every supported hook payload with explicit host provenance", () => {
   const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
   const stdinPath = join(fixture.root, "stdin.txt");
   const events = [
@@ -752,6 +797,7 @@ test("runner forwards stdin unchanged for every supported hook event", () => {
     ["PreToolUse", "guard"],
     ["PostToolUse", "observe"],
     ["PostToolUse", "polish"],
+    ["PostToolUseFailure", "observe"],
     ["SubagentStart", "observe"],
     ["SubagentStop", "observe"],
     ["PreCompact", "snapshot"],
@@ -785,7 +831,11 @@ set /p EPIC_STDIN=
       );
 
       assert.equal(result.status, 0, `${event}: ${result.stderr}`);
-      assert.equal(readFileSync(stdinPath, "utf8").trim(), input, event);
+      assert.deepEqual(
+        JSON.parse(readFileSync(stdinPath, "utf8")),
+        { ...JSON.parse(input), host: "codex" },
+        event,
+      );
       if (event === "SubagentStop") {
         assert.deepEqual(JSON.parse(result.stdout), {});
       } else {

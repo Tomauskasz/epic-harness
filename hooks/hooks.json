@@ -64,6 +64,19 @@
         ]
       }
     ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/registry/scripts/install.js\" hook PostToolUseFailure observe",
+            "async": true,
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PreCompact": [
       {
         "matcher": "*",

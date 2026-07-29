@@ -55,7 +55,7 @@ static SILENT_OK_CMDS: LazyLock<Regex> = LazyLock::new(|| {
 /// deliberately absent — their keywords are real evidence.
 static READ_ONLY_CMDS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^\s*(sudo\s+)?(cat|bat|nl|head|tail|less|more|sed|awk|cut|sort|uniq|wc|tr|rg|grep|egrep|fgrep|ag|ack|find|fd|ls|tree|stat|file|jq|yq|xxd|od|strings|diff|comm|echo|printf|pwd|which|type|env|date|git\s+(diff|log|show|blame|status|ls-files|cat-file|rev-parse))\b",
+        r"^\s*(sudo\s+)?(cat|bat|nl|head|tail|less|more|sed|awk|cut|sort|uniq|wc|tr|rg|grep|egrep|fgrep|ag|ack|find|fd|ls|tree|stat|file|jq|yq|xxd|od|strings|diff|comm|echo|printf|pwd|which|type|env|date|get-content|get-childitem|get-item|get-location|get-command|select-string|select-object|git\s+(diff|log|show|blame|status|ls-files|cat-file|rev-parse))\b",
     )
     .unwrap()
 });
@@ -66,7 +66,53 @@ static READ_ONLY_CMDS: LazyLock<Regex> = LazyLock::new(|| {
 /// is a read, but `cargo test | tail -5` is not — the leading command decides
 /// what the output is evidence about.
 fn is_read_only_command(command: &str) -> bool {
-    !command.trim().is_empty() && READ_ONLY_CMDS.is_match(command)
+    if command.trim().is_empty()
+        || command.contains("$(")
+        || command.contains('`')
+        || command.contains('>')
+    {
+        return false;
+    }
+
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut single_quoted = false;
+    let mut double_quoted = false;
+    let chars: Vec<(usize, char)> = command.char_indices().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let (offset, character) = chars[index];
+        if character == '\\' || character == '`' {
+            index += 2;
+            continue;
+        }
+        match character {
+            '\'' if !double_quoted => single_quoted = !single_quoted,
+            '"' if !single_quoted => double_quoted = !double_quoted,
+            '|' | ';' | '\n' if !single_quoted && !double_quoted => {
+                segments.push(&command[start..offset]);
+                start = offset + character.len_utf8();
+            }
+            '&' if !single_quoted && !double_quoted => {
+                segments.push(&command[start..offset]);
+                if chars.get(index + 1).map(|(_, next)| *next) == Some('&') {
+                    start = chars[index + 1].0 + '&'.len_utf8();
+                    index += 1;
+                } else {
+                    start = offset + character.len_utf8();
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    if single_quoted || double_quoted {
+        return false;
+    }
+    segments.push(&command[start..]);
+    segments.into_iter().all(|segment| {
+        !segment.trim().is_empty() && READ_ONLY_CMDS.is_match(&segment.to_ascii_lowercase())
+    })
 }
 
 /// True when a call's output is content it fetched, not a report about itself.
@@ -137,11 +183,26 @@ pub(crate) struct Outcome {
 ///
 /// A reported failure still uses the text to pick a category, falling back to
 /// `runtime_error` when the text names nothing recognizable.
-pub(crate) fn decide_outcome(
+#[cfg(test)]
+fn decide_outcome(
     reported: Option<bool>,
     text_failure: Option<&'static str>,
     tool_category: &str,
     command: &str,
+) -> Outcome {
+    decide_outcome_for_host(reported, text_failure, tool_category, command, false, false)
+}
+
+/// The only host-specific outcome rule is Codex's silent Bash response. The
+/// caller must supply explicit runner provenance; shared event names are not a
+/// host discriminator.
+fn decide_outcome_for_host(
+    reported: Option<bool>,
+    text_failure: Option<&'static str>,
+    tool_category: &str,
+    command: &str,
+    response_is_empty: bool,
+    is_codex_runner: bool,
 ) -> Outcome {
     match reported {
         Some(true) => Outcome {
@@ -165,6 +226,10 @@ pub(crate) fn decide_outcome(
             // a quarter of the evidence and never reaches the seeding
             // thresholds. `unknown` exists to replace a *fabricated failure*,
             // not to discard a real success.
+            None if is_codex_runner && tool_category == "bash" && response_is_empty => Outcome {
+                result: "unknown",
+                failure: None,
+            },
             None => Outcome {
                 result: "success",
                 failure: None,
@@ -178,6 +243,42 @@ pub(crate) fn decide_outcome(
                 failure: Some(cat),
             },
         },
+    }
+}
+
+/// Extract textual tool output without stringifying binary or structured Codex
+/// MCP blocks into persisted failure evidence.
+fn resolve_json_value(v: &serde_json::Value) -> (String, String) {
+    match v {
+        serde_json::Value::String(text) => (text.clone(), String::new()),
+        serde_json::Value::Object(object) => {
+            if object.get("isError").and_then(|value| value.as_bool()) == Some(true) {
+                let text = object
+                    .get("content")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter(|block| {
+                        block.get("type").and_then(|kind| kind.as_str()) == Some("text")
+                    })
+                    .filter_map(|block| block.get("text").and_then(|text| text.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return (mask_secrets(&text), String::new());
+            }
+            let text = |key: &str| {
+                object
+                    .get(key)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+            };
+            let output = match text("output") {
+                "" => text("stdout"),
+                output => output,
+            };
+            (output.to_owned(), text("stderr").to_owned())
+        }
+        _ => (String::new(), String::new()),
     }
 }
 
@@ -589,28 +690,17 @@ pub fn run(input: &HookInput) -> i32 {
     // `stdout` is Claude Code's field name for a Bash response; `output` is the
     // legacy structured shape. Reading only `output` silently dropped every
     // object-shaped Bash result.
-    let resolve_json_value = |v: &serde_json::Value| -> (String, String) {
-        match v {
-            serde_json::Value::String(s) => (s.clone(), String::new()),
-            serde_json::Value::Object(obj) => {
-                let text = |key: &str| obj.get(key).and_then(|v| v.as_str()).unwrap_or("");
-                let out = match text("output") {
-                    "" => text("stdout"),
-                    o => o,
-                };
-                (out.to_string(), text("stderr").to_string())
-            }
-            other => (other.to_string(), String::new()),
-        }
-    };
     // Structured status, when the host sends one, outranks the output text.
     let reported = input
         .tool_response
         .as_ref()
         .or(input.tool_result.as_ref())
-        .and_then(reported_outcome);
+        .and_then(reported_outcome)
+        .or_else(|| {
+            (input.hook_event_name.as_deref() == Some("PostToolUseFailure")).then_some(false)
+        });
 
-    let resolved_output: Option<(String, String)> = if let Some(to) = &input.tool_output {
+    let mut resolved_output: Option<(String, String)> = if let Some(to) = &input.tool_output {
         let out = to.output.as_deref().unwrap_or("").to_string();
         let err = to.stderr.as_deref().unwrap_or("").to_string();
         Some((out, err))
@@ -619,6 +709,20 @@ pub fn run(input: &HookInput) -> i32 {
     } else {
         input.tool_result.as_ref().map(resolve_json_value)
     };
+
+    if let Some(error) = input.error.as_deref() {
+        match &mut resolved_output {
+            Some((_, stderr)) if stderr.is_empty() => *stderr = error.to_owned(),
+            Some((_, stderr)) => {
+                stderr.push('\n');
+                stderr.push_str(error);
+            }
+            None => resolved_output = Some((String::new(), error.to_owned())),
+        }
+    }
+    if resolved_output.is_none() && input.hook_event_name.as_deref() == Some("PostToolUseFailure") {
+        resolved_output = Some((String::new(), String::new()));
+    }
 
     if let Some((output, stderr)) = resolved_output {
         let combined = format!("{output}\n{stderr}");
@@ -630,7 +734,14 @@ pub fn run(input: &HookInput) -> i32 {
             .unwrap_or("");
 
         let text_failure = classify_failure(&combined);
-        let outcome = decide_outcome(reported, text_failure, tool_cat, command);
+        let outcome = decide_outcome_for_host(
+            reported,
+            text_failure,
+            tool_cat,
+            command,
+            combined.trim().is_empty(),
+            crate::shared::host::is_codex_runner(),
+        );
 
         record.failure_category = outcome.failure.map(String::from);
         record.result = Some(outcome.result.into());
@@ -900,8 +1011,8 @@ mod tests {
     }
 
     #[test]
-    fn a_pipeline_is_judged_by_its_leading_command() {
-        // `cat x | grep y` is a read; `cargo test | tail -5` is not.
+    fn content_reads_require_every_shell_segment_to_be_read_only() {
+        // A leading reader cannot prove later shell work only fetched content.
         assert_eq!(
             decide_outcome(None, Some("not_found"), "bash", "cat a.txt | grep foo").result,
             "unknown"
@@ -910,6 +1021,68 @@ mod tests {
             decide_outcome(None, Some("test_fail"), "bash", "cargo test | tail -5").result,
             "error"
         );
+        for command in [
+            "cat build.log && cargo test",
+            "Get-Content build.log; Remove-Item build.log",
+            "cat build.log | tee copied.log",
+        ] {
+            assert_eq!(
+                decide_outcome(None, Some("runtime_error"), "bash", command).result,
+                "error",
+                "{command} must not be exempted by its first segment"
+            );
+        }
+    }
+
+    #[test]
+    fn conservative_powershell_read_commands_are_content_reads() {
+        for command in [
+            "Get-Content build.log",
+            "Get-Content build.log | Select-String TypeError",
+            "Get-ChildItem src | Select-Object Name",
+        ] {
+            let outcome = decide_outcome(None, Some("type_error"), "bash", command);
+            assert_eq!(outcome.result, "unknown", "{command}");
+            assert!(outcome.failure.is_none(), "{command}");
+        }
+    }
+
+    #[test]
+    fn post_tool_use_failure_forces_a_recorded_failure() {
+        let failure = decide_outcome(Some(false), None, "bash", "");
+        assert_eq!(failure.result, "error");
+        assert_eq!(failure.failure, Some("runtime_error"));
+    }
+
+    #[test]
+    fn codex_mcp_failure_uses_only_masked_text_content() {
+        let response = serde_json::json!({
+            "isError": true,
+            "content": [
+                {"type": "text", "text": "Error: Authorization: Bearer sk-secret-token"},
+                {"type": "image", "data": "binary-image-data"},
+                {"type": "resource", "resource": {"text": "structured-secret"}},
+                {"type": "text", "text": {"not": "text"}}
+            ]
+        });
+
+        let (output, stderr) = resolve_json_value(&response);
+        assert!(stderr.is_empty());
+        assert!(output.contains("Error:"));
+        assert!(!output.contains("sk-secret-token"));
+        assert!(!output.contains("binary-image-data"));
+        assert!(!output.contains("structured-secret"));
+    }
+
+    #[test]
+    fn silent_bash_is_unknown_only_with_explicit_codex_provenance() {
+        let codex = decide_outcome_for_host(None, None, "bash", "echo hello", true, true);
+        assert_eq!(codex.result, "unknown");
+        assert!(codex.failure.is_none());
+
+        let unproven = decide_outcome_for_host(None, None, "bash", "echo hello", true, false);
+        assert_eq!(unproven.result, "success");
+        assert!(unproven.failure.is_none());
     }
 
     #[test]

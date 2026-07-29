@@ -37,6 +37,7 @@ const CLAUDE_CONTRACT = [
       ["*", "observe", { async: true, timeout: 5 }],
     ],
   ],
+  ["PostToolUseFailure", [["*", "observe", { async: true, timeout: 5 }]]],
   ["PreCompact", [["*", "snapshot"]]],
   ["SessionEnd", [["*", "reflect"]]],
 ];

@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HookInput {
+    /// Explicit runner provenance. The Codex Node runner stamps this field;
+    /// hooks must not infer a host from a shared event name.
+    pub host: Option<String>,
     pub tool_name: Option<String>,
     pub tool_input: Option<serde_json::Value>,
     /// Legacy structured output (kept for forward compat)
@@ -12,6 +15,9 @@ pub struct HookInput {
     pub tool_result: Option<serde_json::Value>,
     /// Claude Code canonical PostToolUse field name
     pub tool_response: Option<serde_json::Value>,
+    /// Claude Code's PostToolUseFailure error, kept separately from a tool
+    /// response because failure events do not carry `tool_response`.
+    pub error: Option<String>,
     pub conversation_summary: Option<String>,
     pub pending_tasks: Option<Vec<String>>,
     pub context_usage: Option<f64>,
@@ -123,5 +129,16 @@ mod tests {
         .expect("valid hook input");
 
         assert_eq!(input.source.as_deref(), Some("resume"));
+    }
+
+    #[test]
+    fn failure_event_keeps_runner_host_and_top_level_error() {
+        let input: HookInput = serde_json::from_str(
+            r#"{"host":"codex","hook_event_name":"PostToolUseFailure","error":"Error: token=secret"}"#,
+        )
+        .expect("valid failure hook input");
+
+        assert_eq!(input.host.as_deref(), Some("codex"));
+        assert_eq!(input.error.as_deref(), Some("Error: token=secret"));
     }
 }

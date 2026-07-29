@@ -77,7 +77,7 @@ pub fn classify_failure(output: &str) -> Option<&'static str> {
 /// so observing `apply_patch` at all would not have produced edit signal.
 pub fn classify_tool(name: &str) -> &'static str {
     match name.to_lowercase().as_str() {
-        "bash" | "shell" => "bash",
+        "bash" | "shell" | "powershell" => "bash",
         "edit" | "apply_patch" | "multiedit" => "edit",
         "write" | "notebookedit" => "write",
         "read" => "read",

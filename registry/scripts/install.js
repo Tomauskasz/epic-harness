@@ -35,6 +35,7 @@ const HOOK_COMMANDS = new Map([
   ["SessionStart", new Set(["resume"])],
   ["PreToolUse", new Set(["guard"])],
   ["PostToolUse", new Set(["observe", "polish"])],
+  ["PostToolUseFailure", new Set(["observe"])],
   ["SubagentStart", new Set(["observe"])],
   ["SubagentStop", new Set(["observe"])],
   ["PreCompact", new Set(["snapshot"])],
@@ -352,6 +353,20 @@ async function ensureCompatibleRuntime() {
   );
 }
 
+function runnerProvenance(input) {
+  if (!input.trim()) return input;
+  try {
+    const payload = JSON.parse(input);
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+      return input;
+    }
+    const host = process.env.CLAUDE_PLUGIN_ROOT ? "claude" : "codex";
+    return JSON.stringify({ ...payload, host });
+  } catch {
+    return input;
+  }
+}
+
 function runHook(event, subcommand) {
   if (!HOOK_COMMANDS.get(event)?.has(subcommand)) {
     throw new Error(`unsupported hook command: ${event} ${subcommand}`);
@@ -359,12 +374,14 @@ function runHook(event, subcommand) {
 
   const captureStdout =
     event === "PreToolUse" || STRUCTURED_CODEX_EVENTS.has(event);
+  const input = runnerProvenance(readFileSync(0, "utf8"));
   const result = spawnSync(BINARY, [subcommand], {
     encoding: captureStdout ? "utf8" : undefined,
     shell: false,
     stdio: captureStdout
-      ? ["inherit", "pipe", "inherit"]
-      : ["inherit", "inherit", "inherit"],
+      ? ["pipe", "pipe", "inherit"]
+      : ["pipe", "inherit", "inherit"],
+    input,
   });
 
   if (result.error?.code === "ENOENT") {

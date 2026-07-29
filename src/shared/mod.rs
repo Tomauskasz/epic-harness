@@ -110,6 +110,7 @@ mod tests {
     #[test]
     fn tool_categories() {
         assert_eq!(classify_tool("Bash"), "bash");
+        assert_eq!(classify_tool("PowerShell"), "bash");
         assert_eq!(classify_tool("Edit"), "edit");
         assert_eq!(classify_tool("Write"), "write");
         assert_eq!(classify_tool("Read"), "read");
