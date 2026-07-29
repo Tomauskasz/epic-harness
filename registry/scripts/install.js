@@ -4,7 +4,7 @@
 
 "use strict";
 
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import {
   chmodSync,
   createWriteStream,
@@ -23,6 +23,9 @@ const CARGO_PKG = "epic-harness";
 const INSTALLER_MAX_REDIRECTS = 5;
 const INSTALLER_REQUEST_TIMEOUT_MS = 15_000;
 const INSTALLER_TOTAL_TIMEOUT_MS = 60_000;
+const SESSION_START_CHILD_TIMEOUT_MS = 30_000;
+const SESSION_START_INPUT_TIMEOUT_MS = 5_000;
+const SESSION_START_INPUT_MAX_BYTES = 1_048_576;
 const STRUCTURED_CODEX_EVENTS = new Set([
   "SessionStart",
   "SubagentStop",
@@ -44,11 +47,120 @@ function log(message) {
   process.stderr.write(`[epic-harness plugin] ${message}\n`);
 }
 
-function hasCommand(command) {
-  const result = spawnSync(command, ["version"], {
-    shell: false,
-    stdio: "pipe",
+function positiveIntegerEnvironment(name, fallback) {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  if (!/^[1-9]\d*$/.test(value)) return fallback;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : fallback;
+}
+
+function sessionStartLimits() {
+  return {
+    childTimeoutMs: positiveIntegerEnvironment(
+      "EPIC_HOOK_SESSIONSTART_CHILD_TIMEOUT_MS",
+      SESSION_START_CHILD_TIMEOUT_MS,
+    ),
+    inputMaxBytes: positiveIntegerEnvironment(
+      "EPIC_HOOK_SESSIONSTART_INPUT_MAX_BYTES",
+      SESSION_START_INPUT_MAX_BYTES,
+    ),
+    inputTimeoutMs: positiveIntegerEnvironment(
+      "EPIC_HOOK_SESSIONSTART_INPUT_TIMEOUT_MS",
+      SESSION_START_INPUT_TIMEOUT_MS,
+    ),
+  };
+}
+
+function runChild(command, args, {
+  captureStdout = false,
+  captureStderr = false,
+  input,
+  label,
+  timeoutMs,
+} = {}) {
+  return new Promise((resolve) => {
+    let child;
+    let settled = false;
+    let timedOut = false;
+    let stdout = "";
+    let stderr = "";
+    let timer;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    try {
+      child = spawn(command, args, {
+        shell: false,
+        stdio: [
+          input === undefined ? "ignore" : "pipe",
+          captureStdout ? "pipe" : "ignore",
+          captureStderr ? "pipe" : "inherit",
+        ],
+        windowsHide: true,
+      });
+    } catch (error) {
+      finish({ error, status: null, stderr, stdout });
+      return;
+    }
+
+    if (captureStdout) {
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+    }
+    if (captureStderr) {
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+    }
+    child.once("error", (error) => {
+      finish({ error, status: null, stderr, stdout });
+    });
+    child.once("close", (status, signal) => {
+      if (timedOut) {
+        finish({
+          error: new Error(`${label ?? command} timed out after ${timeoutMs} ms`),
+          status,
+          stderr,
+          stdout,
+        });
+        return;
+      }
+      finish({ signal, status, stderr, stdout });
+    });
+    if (timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        if (process.platform === "win32" && child.pid !== undefined) {
+          const taskkill = spawn(
+            join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe"),
+            ["/pid", String(child.pid), "/t", "/f"],
+            { shell: false, stdio: "ignore", windowsHide: true },
+          );
+          taskkill.once("error", () => child.kill("SIGKILL"));
+          taskkill.once("close", () => child.kill("SIGKILL"));
+          return;
+        }
+        child.kill("SIGKILL");
+      }, timeoutMs);
+    }
+    if (input !== undefined) {
+      child.stdin.end(input);
+    }
   });
+}
+
+async function hasCommand(command, timeoutMs) {
+  const result = await runChild(command, ["version"], {
+    captureStderr: true,
+    label: `${command} version probe`,
+    timeoutMs,
+  });
+  if (result.error?.code === "ENOENT") return false;
+  if (result.error) throw result.error;
   return result.status === 0;
 }
 
@@ -59,16 +171,19 @@ class HookRunError extends Error {
   }
 }
 
-function getBinaryRuntime() {
-  const result = spawnSync(BINARY, ["version"], {
-    shell: false,
-    stdio: "pipe",
+async function getBinaryRuntime(timeoutMs) {
+  const result = await runChild(BINARY, ["version"], {
+    captureStderr: true,
+    captureStdout: true,
+    label: `${BINARY} version probe`,
+    timeoutMs,
   });
+  if (result.error?.code === "ENOENT") return null;
+  if (result.error) throw result.error;
   if (result.status !== 0) return null;
 
   const output = [result.stderr, result.stdout]
     .filter(Boolean)
-    .map((value) => value.toString())
     .join("\n");
   const match = output.match(
     /(?:^|\r?\n)epic-harness\s+v?(\d+\.\d+\.\d+)\s+runtime-revision\s+([1-9]\d*)(?=\s|$)/,
@@ -230,36 +345,42 @@ function runtimeLabel(runtime) {
   return `${runtime.version} (revision ${runtime.revision})`;
 }
 
-async function install(requiredRuntime) {
+async function install(requiredRuntime, childTimeoutMs) {
   const requiredVersion = requiredRuntime.version;
   const platform = os.platform();
 
   if (platform === "darwin") {
-    const brewProbe = spawnSync("brew", ["--version"], {
-      shell: false,
-      stdio: "pipe",
+    const brewProbe = await runChild("brew", ["--version"], {
+      label: "Homebrew probe",
+      timeoutMs: childTimeoutMs,
     });
+    if (brewProbe.error) throw brewProbe.error;
     if (brewProbe.status === 0) {
       log(`Homebrew detected — installing ${requiredVersion}...`);
-      const result = spawnSync(
+      const result = await runChild(
         "brew",
         ["install", "epicsagas/tap/epic-harness"],
-        { shell: false, stdio: ["ignore", "ignore", "inherit"] },
+        { label: "Homebrew installer", timeoutMs: childTimeoutMs },
       );
-      if (result.status === 0 && sameRuntime(getBinaryRuntime(), requiredRuntime)) {
+      if (result.error) throw result.error;
+      if (
+        result.status === 0 &&
+        sameRuntime(await getBinaryRuntime(childTimeoutMs), requiredRuntime)
+      ) {
         return;
       }
       log("Homebrew did not provide the required version; trying next method...");
     }
   }
 
-  const binstallProbe = spawnSync("cargo", ["binstall", "--version"], {
-    shell: false,
-    stdio: "pipe",
+  const binstallProbe = await runChild("cargo", ["binstall", "--version"], {
+    label: "cargo-binstall probe",
+    timeoutMs: childTimeoutMs,
   });
+  if (binstallProbe.error) throw binstallProbe.error;
   if (binstallProbe.status === 0) {
     log(`cargo-binstall detected — installing ${requiredVersion}...`);
-    const result = spawnSync(
+    const result = await runChild(
       "cargo",
       [
         "binstall",
@@ -267,8 +388,9 @@ async function install(requiredRuntime) {
         "--no-confirm",
         "--force",
       ],
-      { shell: false, stdio: ["ignore", "ignore", "inherit"] },
+      { label: "cargo-binstall installer", timeoutMs: childTimeoutMs },
     );
+    if (result.error) throw result.error;
     if (result.status === 0) return;
     log("cargo-binstall failed; falling back to the release installer...");
   }
@@ -281,11 +403,12 @@ async function install(requiredRuntime) {
       const destination = join(privateDirectory, "installer.ps1");
       log(`Downloading Windows installer for ${requiredVersion}...`);
       await downloadFile(installerUrl(requiredVersion, "ps1"), destination);
-      const result = spawnSync(
+      const result = await runChild(
         "powershell",
         ["-ExecutionPolicy", "Bypass", "-File", destination],
-        { shell: false, stdio: ["ignore", "ignore", "inherit"] },
+        { label: "PowerShell installer", timeoutMs: childTimeoutMs },
       );
+      if (result.error) throw result.error;
       if (result.status !== 0) throw new Error("PowerShell installer failed");
       return;
     } finally {
@@ -301,20 +424,21 @@ async function install(requiredRuntime) {
     log(`Downloading installer for ${requiredVersion}...`);
     await downloadFile(installerUrl(requiredVersion, "sh"), destination);
     chmodSync(destination, 0o700);
-    const result = spawnSync("sh", [destination], {
-      shell: false,
-      stdio: ["ignore", "ignore", "inherit"],
+    const result = await runChild("sh", [destination], {
+      label: "shell installer",
+      timeoutMs: childTimeoutMs,
     });
+    if (result.error) throw result.error;
     if (result.status !== 0) throw new Error("shell installer failed");
   } finally {
     rmSync(privateDirectory, { recursive: true, force: true });
   }
 }
 
-async function ensureCompatibleRuntime() {
+async function ensureCompatibleRuntime(childTimeoutMs) {
   const requiredRuntime = getPluginRuntime();
-  const present = hasCommand(BINARY);
-  const currentRuntime = present ? getBinaryRuntime() : null;
+  const present = await hasCommand(BINARY, childTimeoutMs);
+  const currentRuntime = present ? await getBinaryRuntime(childTimeoutMs) : null;
 
   if (sameRuntime(currentRuntime, requiredRuntime)) return;
 
@@ -331,9 +455,9 @@ async function ensureCompatibleRuntime() {
     );
   }
 
-  await install(requiredRuntime);
+  await install(requiredRuntime, childTimeoutMs);
 
-  const installedRuntime = getBinaryRuntime();
+  const installedRuntime = await getBinaryRuntime(childTimeoutMs);
   if (!sameRuntime(installedRuntime, requiredRuntime)) {
     const actual = installedRuntime
       ? runtimeLabel(installedRuntime)
@@ -391,34 +515,76 @@ function validatedGuardDeny(output) {
   return trimmed;
 }
 
-function readHookInput() {
+function readHookInput(event) {
   return new Promise((resolve, reject) => {
     let input = "";
+    let inputBytes = 0;
     let settled = false;
+    const limits = event === "SessionStart" ? sessionStartLimits() : null;
+    let timer;
     const finish = () => {
       if (!settled) {
         settled = true;
+        clearTimeout(timer);
         resolve(input);
       }
+    };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      process.stdin.pause();
+      process.stdin.destroy();
+      reject(error);
     };
 
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => {
+      inputBytes += Buffer.byteLength(chunk, "utf8");
+      if (limits && inputBytes > limits.inputMaxBytes) {
+        fail(
+          new Error(
+            `SessionStart input exceeded ${limits.inputMaxBytes} byte limit`,
+          ),
+        );
+        return;
+      }
       input += chunk;
-      try {
-        JSON.parse(input);
-        // Codex sends one JSON object. Dispatch as soon as it is complete: its
-        // stdin may remain open while it waits for the hook command to return.
-        process.stdin.pause();
-        process.stdin.destroy();
-        finish();
-      } catch {
-        // The JSON may be split across chunks. EOF preserves the existing
-        // malformed/empty-input path without guessing a timeout or truncation.
+      if (event === "SessionStart") {
+        try {
+          JSON.parse(input);
+          // Codex keeps SessionStart stdin open while waiting for this command.
+          // Only this event may dispatch before EOF.
+          process.stdin.pause();
+          process.stdin.destroy();
+          finish();
+        } catch {
+          // The JSON may be split across chunks; the bounded timer handles an
+          // incomplete held-open payload while EOF retains the legacy path.
+        }
       }
     });
-    process.stdin.once("end", finish);
-    process.stdin.once("error", reject);
+    process.stdin.once("end", () => {
+      if (event !== "SessionStart" && input.trim()) {
+        try {
+          JSON.parse(input);
+        } catch (error) {
+          fail(new Error(`invalid JSON input for ${event}: ${error.message}`));
+          return;
+        }
+      }
+      finish();
+    });
+    process.stdin.once("error", fail);
+    if (limits) {
+      timer = setTimeout(() => {
+        fail(
+          new Error(
+            `SessionStart input timed out after ${limits.inputTimeoutMs} ms`,
+          ),
+        );
+      }, limits.inputTimeoutMs);
+    }
   });
 }
 
@@ -429,14 +595,13 @@ async function runHook(event, subcommand) {
 
   const captureStdout =
     event === "PreToolUse" || STRUCTURED_CODEX_EVENTS.has(event);
-  const input = runnerProvenance(await readHookInput());
-  const result = spawnSync(BINARY, [subcommand], {
-    encoding: captureStdout ? "utf8" : undefined,
-    shell: false,
-    stdio: captureStdout
-      ? ["pipe", "pipe", "inherit"]
-      : ["pipe", "inherit", "inherit"],
+  const input = runnerProvenance(await readHookInput(event));
+  const result = await runChild(BINARY, [subcommand], {
+    captureStdout,
     input,
+    label: `${BINARY} ${subcommand}`,
+    timeoutMs:
+      event === "SessionStart" ? sessionStartLimits().childTimeoutMs : undefined,
   });
 
   if (result.error?.code === "ENOENT") {
@@ -528,7 +693,7 @@ async function main() {
   }
 
   if (event === "SessionStart") {
-    await ensureCompatibleRuntime();
+    await ensureCompatibleRuntime(sessionStartLimits().childTimeoutMs);
   }
   await runHook(event, subcommand);
 }
