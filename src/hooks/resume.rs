@@ -296,12 +296,12 @@ fn migration_would_recurse(source: &Path, destination: &Path) -> bool {
     if destination.starts_with(source) {
         return true;
     }
-    let Ok(source) = source.canonicalize() else {
+    let Ok(source) = crate::shared::paths::canonical_for_compare(source) else {
         return false;
     };
     let mut ancestor = Some(destination);
     while let Some(path) = ancestor {
-        if let Ok(path) = path.canonicalize() {
+        if let Ok(path) = crate::shared::paths::canonical_for_compare(path) {
             return path.starts_with(source);
         }
         ancestor = path.parent();
