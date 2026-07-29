@@ -843,9 +843,18 @@ fn collect_alcove(cfg: &crate::config::AlcoveConfig) -> serde_json::Value {
     } else {
         std::path::PathBuf::from(&cfg.vault_path)
     };
-    // Fix 2: Canonicalize vault path and verify it stays within home directory
-    let vault = if let Ok(canonical) = vault.canonicalize() {
-        let home = dirs_home();
+    // Fix 2: Canonicalize vault path and verify it stays within home directory.
+    // Both paths must use the comparison representation: Windows canonicalization
+    // yields a verbatim vault path while `dirs_home` is a plain path.
+    let vault = if let Ok(canonical) = canonical_for_compare(&vault) {
+        let home = match canonical_for_compare(&dirs_home()) {
+            Ok(home) => home,
+            Err(error) => {
+                return serde_json::json!({
+                    "error": format!("home directory cannot be canonicalized: {error}")
+                });
+            }
+        };
         if !canonical.starts_with(&home) {
             return serde_json::json!({
                 "error": format!("vault_path escapes home directory: {}", canonical.display())
@@ -2957,6 +2966,39 @@ fn detect_session_stack(observations: &[ObsRecord]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    #[serial_test::serial]
+    fn alcove_collects_a_vault_beneath_a_plain_home_path() {
+        struct HomeRestore(Option<std::ffi::OsString>);
+
+        impl Drop for HomeRestore {
+            fn drop(&mut self) {
+                unsafe {
+                    match self.0.take() {
+                        Some(home) => std::env::set_var("HOME", home),
+                        None => std::env::remove_var("HOME"),
+                    }
+                }
+            }
+        }
+
+        let home = tempfile::tempdir().expect("home directory");
+        let _restore = HomeRestore(std::env::var_os("HOME"));
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let vault = home.path().join("vault");
+        fs::create_dir(&vault).expect("vault directory");
+        fs::write(vault.join("note.md"), "# note").expect("vault note");
+
+        let collected = collect_alcove(&crate::config::AlcoveConfig {
+            vault_path: "~/vault".into(),
+            projects: vec![],
+            max_docs: 1,
+        });
+
+        assert_eq!(collected["docs_collected"], 1);
+    }
 
     fn fallback_record(session_id: &str) -> EvolutionRecord {
         EvolutionRecord {

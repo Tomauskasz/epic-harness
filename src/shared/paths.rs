@@ -206,9 +206,10 @@ fn resolve_external_harness_dir_in(root: &std::path::Path, slug: &str) -> std::i
             format!("unknown harness project slug: {slug}"),
         ));
     }
-    let canonical_root = root.canonicalize()?;
+    let canonical_root = canonical_for_compare(root)?;
     let canonical_project = candidate.canonicalize()?;
-    if !canonical_project.starts_with(&canonical_root) {
+    let comparable_project = canonical_for_compare(&canonical_project)?;
+    if !comparable_project.starts_with(&canonical_root) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             format!(
