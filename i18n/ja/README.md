@@ -88,7 +88,7 @@ auth/DB を変更?          → secure 発火 (OWASPチェックリスト、近�
 
 > **初めての方は** [クイックスタートガイド（5分）](../../docs/quickstart.md)をお読みください。
 
-epic-harnessは**プラグイン**として配布されます — スキル、フック、`harness-mem` MCPサーバーはプラグインレイアウト（`skills/`, `hooks.json`, `mcp_config.json`）から直接ロードされます。`install` サブコマンドはなく、各ツールがディスクからプラグインを読み取ります。
+epic-harnessは**プラグイン**として配布されます — スキル、フック、`harness-mem` MCPサーバーはプラグインレイアウト（`skills/`, `hooks/hooks.json`, `mcp_config.json`）から直接ロードされます。`install` サブコマンドはなく、各ツールがディスクからプラグインを読み取ります。
 
 ### Claude Code（推奨）
 
@@ -682,7 +682,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 /plugin install epic@epicsagas
 ```
 
-その後Claude Codeを再起動。フックはプラグインの `hooks.json` から読み込まれます。
+その後Claude Codeを再起動。フックはプラグインの `hooks/hooks.json` から読み込まれます。
 </details>
 
 <details>

@@ -230,10 +230,6 @@ function harnessApiPlugin(): Plugin {
             data = [
               { name: 'Claude Code', installed: fs.existsSync(path.join(home, '.claude', 'settings.json')), config_path: '~/.claude/settings.json', version: null },
               { name: 'Codex', installed: false, config_path: null, version: null },
-              { name: 'Gemini CLI', installed: fs.existsSync(path.join(home, '.gemini', 'settings.json')), config_path: null, version: null },
-              { name: 'Cursor', installed: false, config_path: null, version: null },
-              { name: 'Cline', installed: false, config_path: null, version: null },
-              { name: 'Aider', installed: false, config_path: null, version: null },
             ];
 
           } else if (cmd === 'get_graph') {

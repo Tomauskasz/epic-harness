@@ -88,7 +88,7 @@ Nachdem die Session endet, analysiert die **evolve-Schleife**, was fehlschlug, g
 
 > **Zum ersten Mal hier?** Lesen Sie den [Schnellstart-Leitfaden (5 Min.)](../../docs/quickstart.md).
 
-epic-harness wird als **Plugin** ausgeliefert — Skills, Hooks und der `harness-mem` MCP-Server werden direkt aus dem Plugin-Layout (`skills/`, `hooks.json`, `mcp_config.json`) geladen. Es gibt keinen `install`-Subcommand; jedes Tool liest das Plugin von der Festplatte.
+epic-harness wird als **Plugin** ausgeliefert — Skills, Hooks und der `harness-mem` MCP-Server werden direkt aus dem Plugin-Layout (`skills/`, `hooks/hooks.json`, `mcp_config.json`) geladen. Es gibt keinen `install`-Subcommand; jedes Tool liest das Plugin von der Festplatte.
 
 ### Claude Code (empfohlen)
 
@@ -682,7 +682,7 @@ Installieren Sie das Plugin neu, um die Hooks neu zu laden:
 /plugin install epic@epicsagas
 ```
 
-Starten Sie dann Claude Code neu. Hooks werden aus der `hooks.json` des Plugins geladen.
+Starten Sie dann Claude Code neu. Hooks werden aus der `hooks/hooks.json` des Plugins geladen.
 </details>
 
 <details>

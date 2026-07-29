@@ -2,8 +2,8 @@
 //!
 //! The difference in how hosts consume hook output is **per-event, not
 //! per-host**, and `hook_event_name` is not a host discriminator: Claude Code
-//! sends it on every hook payload, exactly as the Codex-family hosts (Codex,
-//! Antigravity) do. Both also understand the same structured shapes —
+//! sends it on every hook payload, exactly as Codex does. Both understand the
+//! same structured shapes —
 //! `hookSpecificOutput`, `permissionDecision`, `{"continue":true}`.
 //!
 //! An earlier version of this file claimed the opposite ("present only for

@@ -49,7 +49,7 @@ port = 7700       # set to 0 to disable auto-launch
 auto_open = true  # open browser on session startup/resume
 ```
 
-Screens: **Dashboard** · /orbit Pipeline · Commands (3) · Skills (26) · Live Agents · Eval & Evolve · Hooks (6) · Integrations (6) · harness-mem · Settings
+Screens: **Dashboard** · /orbit Pipeline · Commands (3) · Skills (26) · Live Agents · Eval & Evolve · Hooks (6) · Integrations (2) · harness-mem · Settings
 
 ---
 
@@ -188,7 +188,7 @@ Consent is stored at `~/.config/epic-harness/telemetry-consent`. When off, no te
 | Command | What it does |
 |---------|-------------|
 | `/orbit` | **Full autonomous pipeline**: spec → go → check → ship → evolve in one shot |
-| `/team` | Browse org libraries, hire existing teams, or design new ones (3–6 agents, synced to `.claude/agents/`) |
+| `/team` | Browse org libraries, hire existing teams, or design new ones (3–6 agents, synced to Claude Code and native Codex agents when installed) |
 | `/evolve` | Manual evolution trigger — analyze sessions, view dashboard, inspect skill effectiveness, rollback |
 
 Pipeline stages (`/spec`, `/go`, `/check`, `/ship`, `/discover`) are now **skills** — they auto-trigger via context or can be invoked by name. Legacy command names still work via alias routing.
@@ -476,7 +476,7 @@ Teams are **org-level**, not project-bound. Running `/team` in any project enric
 
 ```bash
 epic team                              # Interactive: scan → design → write → sync
-epic team sync backend                 # Dispatch agents → .claude/agents/backend/
+epic team sync backend                 # Sync Claude agents → .claude/agents/backend/; also native Codex agents when ~/.codex exists
 epic team link backend                 # Dispatch + register project in team config
 epic team list                         # All teams in current org
 epic team list --org netflix           # Teams in a named org
@@ -485,7 +485,9 @@ epic team delete backend               # Recall from current project only
 epic team delete backend --global      # Permanently delete from org store
 ```
 
-After syncing, agents are available in the next session: `@domain-expert`, `@reviewer`, `@tester`, etc.
+After syncing, Claude Code agents are available in the next session as `@domain-expert`,
+`@reviewer`, `@tester`, etc. When `~/.codex` exists, Codex also receives native agents
+with generated names.
 
 | Type | Keyword | Default agents |
 |------|---------|---------------|
@@ -509,8 +511,9 @@ All tools share the same `~/.harness/projects/{slug}/` data directory.
 | **Claude Code** | ✓ Full | ✓ 3 commands (incl. /orbit) | ✓ 26 skills | Live |
 | **Codex CLI** | ✓ Full | ✓ 3 prompts (incl. /orbit) | ✓ 26 | Generated¹ |
 
-¹ `epic team sync` writes native Codex custom agents (flat `~/.codex/agents/*.toml` with
-`name`/`description`/`developer_instructions`). Epic registers Codex
+¹ `epic team sync` writes native Codex custom agents only when `~/.codex` already exists,
+as flat `~/.codex/agents/*.toml` with `name`/`description`/`developer_instructions`.
+`--global` changes only the Claude Code destination. Epic registers Codex
 `SubagentStart` and `SubagentStop`, retains the host agent ID/type, and updates
 live orchestration state for native Codex subagents.
 
@@ -738,7 +741,7 @@ Reinstall the plugin to reload hooks:
 /plugin install epic@epicsagas
 ```
 
-Then restart Claude Code. Hooks are loaded from the plugin's `hooks.json`.
+Then restart Claude Code. Hooks are loaded from the plugin's `hooks/hooks.json`.
 </details>
 
 <details>

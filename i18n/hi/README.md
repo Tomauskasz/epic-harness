@@ -75,7 +75,7 @@ Auth या DB छू रहे हैं?   → secure ट्रिगर (OWAS
 
 > **पहली बार?** [त्वरित प्रारंभ गाइड (5 मिनट)](../../docs/quickstart.md) पढ़ें।
 
-epic-harness एक **प्लगइन** के रूप में वितरित होता है — स्किल्स, hooks और `harness-mem` MCP सर्वर सीधे प्लगइन लेआउट (`skills/`, `hooks.json`, `mcp_config.json`) से लोड होते हैं। कोई `install` सबकमांड नहीं है; प्रत्येक टूल प्लगइन को डिस्क से पढ़ता है।
+epic-harness एक **प्लगइन** के रूप में वितरित होता है — स्किल्स, hooks और `harness-mem` MCP सर्वर सीधे प्लगइन लेआउट (`skills/`, `hooks/hooks.json`, `mcp_config.json`) से लोड होते हैं। कोई `install` सबकमांड नहीं है; प्रत्येक टूल प्लगइन को डिस्क से पढ़ता है।
 
 ### Claude Code (अनुशंसित)
 

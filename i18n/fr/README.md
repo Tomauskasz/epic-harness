@@ -49,7 +49,7 @@ port = 7700       # mettre a 0 pour desactiver le lancement automatique
 auto_open = true  # ouvrir le navigateur lors de la premiere session
 ```
 
-Ecrans : **Dashboard** · Pipeline /orbit · Commandes (3) · Competences (26) · Agents en direct · Eval & Evolve · Hooks (6) · Integrations (6) · harness-mem · Parametres
+Ecrans : **Dashboard** · Pipeline /orbit · Commandes (3) · Competences (26) · Agents en direct · Eval & Evolve · Hooks (6) · Integrations (2) · harness-mem · Parametres
 
 ---
 
@@ -88,7 +88,7 @@ Apres la fin de la session, la **boucle evolve** analyse ce qui a echoue, genere
 
 > **Premiere fois ?** Lisez le [Guide de demarrage rapide (5 min)](../../docs/quickstart.md).
 
-epic-harness est distribué en tant que **plugin** — les skills, hooks et le serveur MCP `harness-mem` sont chargés directement depuis la disposition du plugin (`skills/`, `hooks.json`, `mcp_config.json`). Il n'y a pas de sous-commande `install` ; chaque outil lit le plugin depuis le disque.
+epic-harness est distribué en tant que **plugin** — les skills, hooks et le serveur MCP `harness-mem` sont chargés directement depuis la disposition du plugin (`skills/`, `hooks/hooks.json`, `mcp_config.json`). Il n'y a pas de sous-commande `install` ; chaque outil lit le plugin depuis le disque.
 
 ### Claude Code (recommande)
 
@@ -682,7 +682,7 @@ Réinstallez le plugin pour recharger les hooks :
 /plugin install epic@epicsagas
 ```
 
-Puis redémarrez Claude Code. Les hooks sont chargés depuis le `hooks.json` du plugin.
+Puis redémarrez Claude Code. Les hooks sont chargés depuis le `hooks/hooks.json` du plugin.
 </details>
 
 <details>

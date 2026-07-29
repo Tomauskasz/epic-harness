@@ -49,7 +49,7 @@ port = 7700       # 0으로 설정하면 자동 실행 비활성화
 auto_open = true  # 첫 세션에서 브라우저 열기
 ```
 
-화면: **Dashboard** · /orbit Pipeline · Commands (3) · Skills (26) · Live Agents · Eval & Evolve · Hooks (6) · Integrations (6) · harness-mem · Settings
+화면: **Dashboard** · /orbit Pipeline · Commands (3) · Skills (26) · Live Agents · Eval & Evolve · Hooks (6) · Integrations (2) · harness-mem · Settings
 
 ---
 
@@ -88,7 +88,7 @@ auth/DB 코드를 수정했나요?   → secure 발동 (OWASP 체크리스트, �
 
 > **처음이라면?** [빠른 시작 가이드 (5분)](../../docs/quickstart.md)를 읽어보세요.
 
-epic-harness는 **플러그인**으로 배포됩니다 — 스킬, 훅, `harness-mem` MCP 서버가 플러그인 레이아웃(`skills/`, `hooks.json`, `mcp_config.json`)에서 직접 로드됩니다. `install` 서브커맨드는 없으며, 각 도구가 디스크에서 플러그인을 읽습니다.
+epic-harness는 **플러그인**으로 배포됩니다 — 스킬, 훅, `harness-mem` MCP 서버가 플러그인 레이아웃(`skills/`, `hooks/hooks.json`, `mcp_config.json`)에서 직접 로드됩니다. `install` 서브커맨드는 없으며, 각 도구가 디스크에서 플러그인을 읽습니다.
 
 ### Claude Code (권장)
 
@@ -682,7 +682,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 /plugin install epic@epicsagas
 ```
 
-그 다음 Claude Code를 재시작하세요. 훅은 플러그인의 `hooks.json`에서 로드됩니다.
+그 다음 Claude Code를 재시작하세요. 훅은 플러그인의 `hooks/hooks.json`에서 로드됩니다.
 </details>
 
 <details>

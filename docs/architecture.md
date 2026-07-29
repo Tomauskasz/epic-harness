@@ -365,9 +365,9 @@ epic-harness/
 │   ├── auditor.md
 │   └── planner.md
 ├── hooks/             # Ring 0 + Ring 3
-│   ├── hooks.json     ← hook registration (Claude Code)
-│   ├── bin/
-│   │   └── epic-harness  ← Rust single binary
+│   └── hooks.json     ← hook registration (Claude Code: hooks/hooks.json)
+├── .codex-plugin/
+│   └── hooks.json     ← hook registration (Codex: `.codex-plugin/hooks.json`)
 ├── integrations/      # embedded assets
 │   └── common/
 │       └── HARNESS.md  # embedded via include_str!, seeded to ~/.harness/

@@ -1,6 +1,6 @@
 # `epic team` — Org-Level Agent Teams
 
-> Implementation: `src/hooks/team/`
+> Implementation: `src/team/`
 > Spec: `docs/research/team-spec.md`
 
 ---
@@ -12,15 +12,17 @@ knowledge across projects and are never silently overwritten.
 
 Core model:
 ```
-Org  ──owns──▶  Team  ──has──▶  Agent(s)  (copied to .claude/agents/ per project)
+Org  ──owns──▶  Team  ──has──▶  Agent(s)  (synced to Claude; additionally to Codex when installed)
                   │
                   ├──has──▶  Playbook     (global, append-only)
                   └──has──▶  Mission      (one-line purpose)
 ```
 
 Teams live in `~/.harness/orgs/{org}/teams/{team}/` — independent of any project.
-Agents are **copied** into `.claude/agents/{team}/` at sync time, where Claude Code
-auto-discovers them.
+Each sync writes Claude Markdown agents to `.claude/agents/{team}/` in the current
+project (or `~/.claude/agents/{team}/` with `--global`), where Claude Code auto-discovers
+them. It also writes native, flat Codex TOML agents to `~/.codex/agents/` only if
+`~/.codex` already exists; `--global` does not change that Codex destination.
 
 ---
 
@@ -87,6 +89,7 @@ Phase 3 — Write / merge
 Phase 4 — Sync
   - Copy agents to ./.claude/agents/{team}/
   - Inject ## Team Context into each copy
+  - Also write native Codex TOML agents to ~/.codex/agents/ when ~/.codex exists
 ```
 
 ### Subcommands
@@ -96,12 +99,12 @@ epic team list                       # list teams in current org
 epic team list --org netflix         # list teams in named org
 epic team show backend               # config + agents + mission
 epic team show backend --playbook    # also print full playbook
-epic team sync backend               # re-copy agents to .claude/agents/
-epic team sync backend --global     # sync to ~/.claude/agents/ (global, all projects)
+epic team sync backend               # sync Claude project agents; also Codex agents when ~/.codex exists
+epic team sync backend --global     # sync Claude agents to ~/.claude/agents/; Codex location is unchanged
 epic team link backend               # attach existing team (sync + add to config.projects)
-epic team unlink backend             # remove .claude/agents/backend/ (keeps global store)
-epic team delete backend             # remove from current project (.claude/agents/backend/)
-epic team delete backend --global    # permanently delete from org store + local copy
+epic team unlink backend             # remove synced Claude and owned Codex agents (keeps global store)
+epic team delete backend             # remove current project's Claude and owned Codex agents
+epic team delete backend --global    # permanently delete from org store + synced agents
 epic team history backend reviewer   # list .history/ backups for an agent
 ```
 
@@ -111,7 +114,7 @@ epic team history backend reviewer   # list .history/ backups for an agent
 |---|---|
 | `--org <name>` | Target a specific org (default: `"epic"`) |
 | `--playbook` | `show` only: print full accumulated playbook |
-| `--global` | `sync` only: install agents to `~/.claude/agents/` instead of project-local `.claude/agents/` |
+| `--global` | `sync` only: install Claude agents to `~/.claude/agents/` instead of project-local `.claude/agents/`; Codex stays at `~/.codex/agents/` |
 
 ---
 
@@ -149,8 +152,11 @@ All prompts default to **skip** (safe). Destructive ops require explicit `y`.
 ## Project Integration
 
 At sync time, agents are **copied** to `.claude/agents/{team}/` with a `## Team Context`
-section injected. This gives each agent orientation without loading the full playbook
-into the context window.
+section injected. This gives each Claude Code agent orientation without loading the full
+playbook into the context window. If `~/.codex` already exists, the same sync additionally
+renders each agent as a flat TOML file in `~/.codex/agents/` with `name`, `description`,
+and `developer_instructions`; Claude-only `model`, `tools`, and `skills` frontmatter is
+dropped.
 
 ```markdown
 ## Team Context
@@ -162,7 +168,8 @@ into the context window.
 The global store holds canonical definitions (no Team Context).
 The project copy holds canonical definition + injected context.
 
-Re-running `epic team sync backend` refreshes the project copy (e.g. after mission update).
+Re-running `epic team sync backend` refreshes the Claude project copy and, when Codex is
+installed, its native agent files (e.g. after a mission update).
 
 `.claude/agents/` is **not** gitignored by default — teams may want to version-control
 their project-local copies. Add to `.gitignore` explicitly if undesired.
@@ -197,10 +204,11 @@ Each supported tool's `/team` command delegates to `epic team` (Claude Code or C
 ## Implementation
 
 ```
-src/hooks/team/
+src/team/
 ├── mod.rs      entry point — pub fn run(args) -> i32
 ├── store.rs    storage layer — TeamConfig, path helpers, CRUD, content builders
-└── cli.rs      dispatch + 7 subcommands, interactive flow, scan_project, sync_to_project
+├── cli.rs      dispatch + 7 subcommands, interactive flow, scan_project, sync_to_project
+└── codex.rs    native Codex TOML rendering and safe file writes
 ```
 
 ### Key types (`store.rs`)
@@ -232,11 +240,11 @@ pub struct TeamConfig {
 | Function | Purpose |
 |---|---|
 | `cmd_default()` | Interactive 4-phase design flow |
-| `sync_to_project(org, team)` | Copy + inject agents into `.claude/agents/{team}/` |
+| `sync_to_project(org, team)` | Copy + inject Claude agents into `.claude/agents/{team}/`; write Codex TOML agents only if `~/.codex` already exists |
 | `cmd_list` | List teams with type + project count |
 | `cmd_show` | Show config, mission, agents (+ playbook with `--playbook`) |
 | `cmd_sync` | Re-sync from global store to project |
 | `cmd_link` | Sync + register project in config |
-| `cmd_unlink` | Remove `.claude/agents/{team}/` from project |
-| `cmd_delete` | No flag: remove `.claude/agents/{team}/` from current project. `--global`: permanently delete from org store (prompts confirmation) |
+| `cmd_unlink` | Remove the project Claude copy and any owned Codex TOML agents |
+| `cmd_delete` | No flag: remove the project Claude copy and owned Codex TOML agents. `--global`: permanently delete from org store (prompts confirmation) |
 | `cmd_history` | List `.history/` backups for an agent |

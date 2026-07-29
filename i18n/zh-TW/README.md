@@ -88,7 +88,7 @@ $ /orbit "為登入 API 新增 JWT 驗證"
 
 > **第一次使用？** 請閱讀[快速入門指南（5 分鐘）](../../docs/quickstart.md)。
 
-epic-harness 以**外掛**形式分發 — 技能、掛鉤和 `harness-mem` MCP 伺服器直接從外掛佈局（`skills/`、`hooks.json`、`mcp_config.json`）載入。沒有 `install` 子命令，各工具直接從磁碟讀取外掛。
+epic-harness 以**外掛**形式分發 — 技能、掛鉤和 `harness-mem` MCP 伺服器直接從外掛佈局（`skills/`、`hooks/hooks.json`、`mcp_config.json`）載入。沒有 `install` 子命令，各工具直接從磁碟讀取外掛。
 
 ### Claude Code（推薦）
 
@@ -682,7 +682,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 /plugin install epic@epicsagas
 ```
 
-然後重新啟動 Claude Code。掛鉤從外掛的 `hooks.json` 載入。
+然後重新啟動 Claude Code。掛鉤從外掛的 `hooks/hooks.json` 載入。
 </details>
 
 <details>

@@ -88,7 +88,7 @@ $ /orbit "为登录 API 添加 JWT 认证"
 
 > **首次使用？** 阅读[快速入门指南（5 分钟）](../../docs/quickstart.md)。
 
-epic-harness 以**插件**形式分发 — 技能、hooks 和 `harness-mem` MCP 服务器直接从插件布局（`skills/`、`hooks.json`、`mcp_config.json`）加载。没有 `install` 子命令，各工具直接从磁盘读取插件。
+epic-harness 以**插件**形式分发 — 技能、hooks 和 `harness-mem` MCP 服务器直接从插件布局（`skills/`、`hooks/hooks.json`、`mcp_config.json`）加载。没有 `install` 子命令，各工具直接从磁盘读取插件。
 
 ### Claude Code（推荐）
 
@@ -682,7 +682,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 /plugin install epic@epicsagas
 ```
 
-然后重启 Claude Code。Hooks 从插件的 `hooks.json` 加载。
+然后重启 Claude Code。Hooks 从插件的 `hooks/hooks.json` 加载。
 </details>
 
 <details>

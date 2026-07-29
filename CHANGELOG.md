@@ -36,8 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`polish` skipped most edits on Claude Code**: the PostToolUse matcher was
   `Edit` alone while `guard`'s was `Edit|Write|MultiEdit|NotebookEdit` in the
   same manifest. Files created by `Write` were never formatted or typechecked.
-- **Codex capped `reflect` at 3 seconds**: the SessionEnd hook runs the whole
-  Ring 3 round. Raised to 60 s, matching the Claude Code manifest.
+- **Codex caps `reflect` at 3 seconds**: the SessionEnd manifest uses Codex's
+  three-second maximum.
 - **A missing SessionStart record denied every tool call**: `guard`'s exit code
   decides whether the user's command runs, and an unresolvable session identity
   returned the deny code. Upgrading the plugin mid-session reproduces it — no

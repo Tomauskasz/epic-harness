@@ -88,7 +88,7 @@ Al cerrar la sesión, el **bucle evolve** analiza qué falló, genera habilidade
 
 > **¿Primera vez?** Lee la [Guía de inicio rápido (5 min)](../../docs/quickstart.md).
 
-epic-harness se distribuye como **plugin** — las skills, hooks y el servidor MCP `harness-mem` se cargan directamente desde el diseño del plugin (`skills/`, `hooks.json`, `mcp_config.json`). No hay subcomando `install`; cada herramienta lee el plugin desde el disco.
+epic-harness se distribuye como **plugin** — las skills, hooks y el servidor MCP `harness-mem` se cargan directamente desde el diseño del plugin (`skills/`, `hooks/hooks.json`, `mcp_config.json`). No hay subcomando `install`; cada herramienta lee el plugin desde el disco.
 
 ### Claude Code (recomendado)
 
@@ -682,7 +682,7 @@ Reinstala el plugin para recargar los hooks:
 /plugin install epic@epicsagas
 ```
 
-Luego reinicia Claude Code. Los hooks se cargan desde el `hooks.json` del plugin.
+Luego reinicia Claude Code. Los hooks se cargan desde el `hooks/hooks.json` del plugin.
 </details>
 
 <details>

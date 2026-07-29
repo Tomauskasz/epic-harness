@@ -172,3 +172,106 @@ fn manifest_commands_reference_files_that_exist() {
         }
     }
 }
+
+/// The dashboard, current setup guidance, and host comments must describe the
+/// same two supported plugin hosts as the manifests. Historical changelog
+/// records deliberately remain outside this current-state contract.
+#[test]
+fn current_host_claims_match_the_two_plugin_manifests() {
+    let root = repo_root();
+    let claude_manifest = root.join("hooks/hooks.json");
+    let codex_manifest = root.join(".codex-plugin/hooks.json");
+    assert!(
+        claude_manifest.is_file(),
+        "Claude hooks must live at hooks/hooks.json"
+    );
+    assert!(
+        codex_manifest.is_file(),
+        "Codex hooks must live at .codex-plugin/hooks.json"
+    );
+
+    let vite = std::fs::read_to_string(root.join("app/vite.config.ts"))
+        .expect("dashboard dev integration source must be readable");
+    let start = vite
+        .find("get_integration_status")
+        .expect("dashboard must expose integration status");
+    let end = vite[start..]
+        .find("} else if")
+        .map(|offset| start + offset)
+        .unwrap_or(vite.len());
+    let integration_status = &vite[start..end];
+    for host in ["Claude Code", "Codex"] {
+        assert!(
+            integration_status.contains(host),
+            "dashboard integration status must advertise {host}"
+        );
+    }
+    for unsupported in ["Gemini CLI", "Cursor", "Cline", "Aider"] {
+        assert!(
+            !integration_status.contains(unsupported),
+            "dashboard integration status must not advertise unsupported host {unsupported}"
+        );
+    }
+
+    let readme = std::fs::read_to_string(root.join("README.md")).expect("README must be readable");
+    assert!(readme.contains("Integrations (2)"));
+    assert!(!readme.contains("Integrations (6)"));
+    assert!(readme.contains("`hooks/hooks.json`"));
+
+    let changelog =
+        std::fs::read_to_string(root.join("CHANGELOG.md")).expect("changelog must be readable");
+    let unreleased = changelog
+        .split_once("## [Unreleased]")
+        .map(|(_, section)| {
+            section
+                .split_once("\n## [")
+                .map_or(section, |(current, _)| current)
+        })
+        .expect("changelog must contain an Unreleased section");
+    assert!(
+        !unreleased.contains("Raised to 60 s"),
+        "the current Unreleased changelog must retain Codex's three-second SessionEnd limit"
+    );
+    assert!(unreleased.contains("three-second maximum"));
+
+    let architecture = std::fs::read_to_string(root.join("docs/architecture.md"))
+        .expect("architecture documentation must be readable");
+    assert!(architecture.contains("`.codex-plugin/hooks.json`"));
+
+    let team_docs = std::fs::read_to_string(root.join("docs/team.md"))
+        .expect("team documentation must be readable");
+    assert!(team_docs.contains("`src/team/`"));
+    assert!(!team_docs.contains("src/hooks/team/"));
+    assert!(team_docs.contains("`~/.codex/agents/`"));
+    assert!(team_docs.contains("only if `~/.codex` already exists"));
+
+    for locale in [
+        "de", "es", "fr", "hi", "ja", "ko", "pt-BR", "zh-CN", "zh-TW",
+    ] {
+        let path = format!("i18n/{locale}/README.md");
+        let localized = std::fs::read_to_string(root.join(&path))
+            .unwrap_or_else(|error| panic!("{path} must be readable: {error}"));
+        assert!(
+            localized.contains("`hooks/hooks.json`"),
+            "{path} must name Claude Code's exact hook manifest"
+        );
+        assert!(
+            !localized.contains("`hooks.json`"),
+            "{path} must not describe a non-existent root hooks.json"
+        );
+    }
+
+    for path in [
+        "docs/architecture.md",
+        "docs/team.md",
+        "src/shared/host.rs",
+        "src/telemetry.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(path))
+            .unwrap_or_else(|error| panic!("{path} must be readable: {error}"));
+        assert!(
+            !source.contains("Antigravity"),
+            "current host contract must not claim Antigravity support: {path}"
+        );
+    }
+}
