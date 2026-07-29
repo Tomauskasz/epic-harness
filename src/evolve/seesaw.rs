@@ -56,6 +56,9 @@ pub fn save_registry(reg: &SolvedTaskRegistry) -> io::Result<()> {
 pub fn scores_from_digests(digests: &[TaskDigest]) -> HashMap<String, f64> {
     digests
         .iter()
+        // A digest with no evaluated observations has no outcome evidence.
+        // Never let a vacant `Success` establish a solved-task baseline.
+        .filter(|d| d.observation_count > 0)
         .map(|d| {
             (
                 d.task_id.clone(),
@@ -200,5 +203,12 @@ mod tests {
         assert_eq!(scores.len(), 2);
         assert_eq!(scores.get("A"), Some(&1.0));
         assert_eq!(scores.get("B"), Some(&0.0));
+    }
+
+    #[test]
+    fn unobserved_digest_cannot_establish_a_solved_task() {
+        let scores = scores_from_digests(&[digest("unknown", TaskOutcome::Success, 0)]);
+
+        assert!(scores.is_empty());
     }
 }

@@ -9,7 +9,12 @@ pub(crate) fn round3(v: f64) -> f64 {
 }
 
 pub fn analyze_session(observations: &[ObsRecord]) -> SessionAnalysis {
-    let scored: Vec<_> = observations.iter().filter(|o| o.score.is_some()).collect();
+    // `unknown` is explicitly not an outcome, even if malformed legacy input
+    // happens to carry a numeric score. It must never inflate success rates.
+    let scored: Vec<_> = observations
+        .iter()
+        .filter(|o| o.score.is_some() && o.result.as_deref() != Some("unknown"))
+        .collect();
     let total = scored.len() as u64;
     let errors: Vec<_> = scored
         .iter()
@@ -586,6 +591,17 @@ mod tests {
 
         assert_eq!(analysis.total_observations, 0);
         assert_eq!(analysis.success_rate, 0.0);
+    }
+
+    #[test]
+    fn analyze_unknown_observation_is_not_counted_as_a_success() {
+        let success = make_obs("Bash", "bash", "success", 1.0, Some("cargo test"));
+        let unknown = make_obs("Read", "read", "unknown", 1.0, Some("src/lib.rs"));
+
+        let analysis = analyze_session(&[success, unknown]);
+
+        assert_eq!(analysis.total_observations, 1);
+        assert_eq!(analysis.success_rate, 1.0);
     }
 
     #[test]

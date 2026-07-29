@@ -18,6 +18,7 @@
 //! 3. Fall back to a single whole-session segment.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::shared::evolution::{TaskDigest, TaskOutcome};
 use crate::shared::obs::ObsRecord;
@@ -26,34 +27,79 @@ use crate::shared::obs::ObsRecord;
 /// no pipeline_id is present. Tuned to match typical inter-task pauses.
 const SEGMENT_GAP_SECS: i64 = 300; // 5 minutes
 
+/// The caller did not provide the stable identity required to persist a
+/// fallback segment ID safely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissingFallbackNamespace;
+
+impl fmt::Display for MissingFallbackNamespace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("fallback task namespace must be non-empty")
+    }
+}
+
+impl std::error::Error for MissingFallbackNamespace {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum SegmentId {
+    Pipeline(String),
+    Fallback(String),
+}
+
 /// Compress a session's observations into per-task digests.
 ///
 /// `prev_digest_task_ids` carries the set of task IDs seen in prior sessions so
 /// each digest's `iterations_seen` reflects cross-iteration persistence (paper
 /// §4.3: "each task's summary links to its history of prior outcomes"). Pass
-/// an empty slice for a cold start.
+/// an empty slice for a cold start. `fallback_task_namespace` must contain the
+/// caller's stable project/session identity; local fallback labels are never
+/// safe to persist by themselves.
 pub fn digest_session(
     observations: &[ObsRecord],
     prev_digest_task_ids: &[String],
-) -> Vec<TaskDigest> {
-    if observations.is_empty() {
-        return Vec::new();
+    fallback_task_namespace: &str,
+) -> Result<Vec<TaskDigest>, MissingFallbackNamespace> {
+    if fallback_task_namespace.trim().is_empty() {
+        return Err(MissingFallbackNamespace);
     }
 
-    let segments = segment_observations(observations);
+    // An unknown result carries no outcome evidence. Keep it out of the
+    // denominator so it cannot manufacture a successful task digest.
+    let evaluated: Vec<_> = observations
+        .iter()
+        .filter(|o| o.score.is_some() && o.result.as_deref() != Some("unknown"))
+        .cloned()
+        .collect();
+    if evaluated.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let segments = segment_observations(&evaluated);
     let prev_seen: HashMap<&str, u32> = prev_digest_task_ids
         .iter()
         .map(|id| (id.as_str(), 1u32))
         .collect();
 
-    segments
+    Ok(segments
         .into_iter()
-        .map(|(task_id, seg)| build_digest(&task_id, &seg, &prev_seen))
-        .collect()
+        .map(|(segment_id, seg)| {
+            let task_id = task_id_for_segment(&segment_id, fallback_task_namespace);
+            build_digest(&task_id, &seg, &prev_seen)
+        })
+        .collect())
+}
+
+/// Pipeline IDs are stable task identities. Local fallback labels must be
+/// namespaced by the caller's real project/session identity.
+fn task_id_for_segment(segment_id: &SegmentId, fallback_task_namespace: &str) -> String {
+    match segment_id {
+        SegmentId::Pipeline(id) => id.clone(),
+        SegmentId::Fallback(label) => format!("{fallback_task_namespace}:{label}"),
+    }
 }
 
 /// Partition observations into ordered (task_id, records) segments.
-fn segment_observations(observations: &[ObsRecord]) -> Vec<(String, Vec<&ObsRecord>)> {
+fn segment_observations(observations: &[ObsRecord]) -> Vec<(SegmentId, Vec<&ObsRecord>)> {
     // Prefer explicit pipeline grouping when any observation carries a pipeline_id.
     let has_pipeline = observations.iter().any(|o| o.pipeline_id.is_some());
     if has_pipeline {
@@ -62,15 +108,15 @@ fn segment_observations(observations: &[ObsRecord]) -> Vec<(String, Vec<&ObsReco
     segment_by_time_gap(observations)
 }
 
-/// Group by `pipeline_id`; observations without one fall into a "session" bucket.
-fn group_by_pipeline(observations: &[ObsRecord]) -> Vec<(String, Vec<&ObsRecord>)> {
-    let mut buckets: HashMap<String, Vec<&ObsRecord>> = HashMap::new();
-    let mut order: Vec<String> = Vec::new();
+/// Group by `pipeline_id`; observations without one fall into a fallback bucket.
+fn group_by_pipeline(observations: &[ObsRecord]) -> Vec<(SegmentId, Vec<&ObsRecord>)> {
+    let mut buckets: HashMap<SegmentId, Vec<&ObsRecord>> = HashMap::new();
+    let mut order: Vec<SegmentId> = Vec::new();
     for o in observations {
-        let key = o
-            .pipeline_id
-            .clone()
-            .unwrap_or_else(|| "session".to_string());
+        let key = o.pipeline_id.as_ref().map_or_else(
+            || SegmentId::Fallback("session".to_string()),
+            |id| SegmentId::Pipeline(id.clone()),
+        );
         if !buckets.contains_key(&key) {
             order.push(key.clone());
         }
@@ -86,8 +132,8 @@ fn group_by_pipeline(observations: &[ObsRecord]) -> Vec<(String, Vec<&ObsRecord>
 }
 
 /// Split on idle gaps > SEGMENT_GAP_SECS; label segments by ordinal.
-fn segment_by_time_gap(observations: &[ObsRecord]) -> Vec<(String, Vec<&ObsRecord>)> {
-    let mut segments: Vec<(String, Vec<&ObsRecord>)> = Vec::new();
+fn segment_by_time_gap(observations: &[ObsRecord]) -> Vec<(SegmentId, Vec<&ObsRecord>)> {
+    let mut segments: Vec<(SegmentId, Vec<&ObsRecord>)> = Vec::new();
     let mut current: Vec<&ObsRecord> = Vec::new();
     let mut last_ts: Option<i64> = None;
     let mut idx = 0u32;
@@ -98,7 +144,7 @@ fn segment_by_time_gap(observations: &[ObsRecord]) -> Vec<(String, Vec<&ObsRecor
             && now - prev > SEGMENT_GAP_SECS
             && !current.is_empty()
         {
-            let label = format!("segment-{idx}");
+            let label = SegmentId::Fallback(format!("segment-{idx}"));
             idx += 1;
             segments.push((label, std::mem::take(&mut current)));
         }
@@ -107,9 +153,9 @@ fn segment_by_time_gap(observations: &[ObsRecord]) -> Vec<(String, Vec<&ObsRecor
     }
     if !current.is_empty() {
         let label = if segments.is_empty() {
-            "session".to_string()
+            SegmentId::Fallback("session".to_string())
         } else {
-            format!("segment-{idx}")
+            SegmentId::Fallback(format!("segment-{idx}"))
         };
         segments.push((label, current));
     }
@@ -317,7 +363,11 @@ mod tests {
 
     #[test]
     fn empty_session_yields_no_digests() {
-        assert!(digest_session(&[], &[]).is_empty());
+        assert!(
+            digest_session(&[], &[], "test-project/test-session")
+                .expect("namespace is valid")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -326,7 +376,8 @@ mod tests {
             rec("Read", "read", Some(1.0), None),
             rec("Edit", "edit", Some(1.0), None),
         ];
-        let digests = digest_session(&obs, &[]);
+        let digests =
+            digest_session(&obs, &[], "test-project/test-session").expect("namespace is valid");
         assert_eq!(digests.len(), 1);
         assert!(matches!(digests[0].outcome, TaskOutcome::Success));
         assert_eq!(digests[0].observation_count, 2);
@@ -339,7 +390,8 @@ mod tests {
             rec("Bash", "bash", Some(0.0), Some("type_error")),
             rec("Bash", "bash", Some(0.0), Some("type_error")),
         ];
-        let digests = digest_session(&obs, &[]);
+        let digests =
+            digest_session(&obs, &[], "test-project/test-session").expect("namespace is valid");
         assert!(matches!(
             digests[0].outcome,
             TaskOutcome::PartialFailure {
@@ -360,11 +412,23 @@ mod tests {
         a.pipeline_id = Some("PIPE-1".into());
         let mut b = rec("Read", "read", Some(0.0), Some("syntax_error"));
         b.pipeline_id = Some("PIPE-2".into());
-        let digests = digest_session(&[a, b], &[]);
+        let digests =
+            digest_session(&[a, b], &[], "test-project/test-session").expect("namespace is valid");
         assert_eq!(digests.len(), 2);
         let ids: Vec<&str> = digests.iter().map(|d| d.task_id.as_str()).collect();
         assert!(ids.contains(&"PIPE-1"));
         assert!(ids.contains(&"PIPE-2"));
+    }
+
+    #[test]
+    fn explicit_pipeline_id_is_not_treated_as_a_fallback_label() {
+        let mut observation = rec("Read", "read", Some(1.0), None);
+        observation.pipeline_id = Some("session".into());
+
+        let digests = digest_session(&[observation], &[], "test-project/test-session")
+            .expect("namespace is valid");
+
+        assert_eq!(digests[0].task_id, "session");
     }
 
     #[test]
@@ -373,15 +437,18 @@ mod tests {
         early.timestamp = "2026-06-16T10:00:00Z".into();
         let mut late = rec("Read", "read", Some(0.0), Some("type_error"));
         late.timestamp = "2026-06-16T11:00:00Z".into(); // 1h gap > 5min
-        let digests = digest_session(&[early, late], &[]);
+        let digests = digest_session(&[early, late], &[], "test-project/test-session")
+            .expect("namespace is valid");
         assert_eq!(digests.len(), 2);
     }
 
     #[test]
     fn iterations_seen_reflects_prior_history() {
         let obs = vec![rec("Read", "read", Some(0.0), Some("type_error"))];
-        let digests = digest_session(&obs, &["session".to_string()]);
-        // The cold-start segment is labeled "session"; prior history bumps it.
+        let task_id = "test-project/test-session:session".to_string();
+        let digests = digest_session(&obs, &[task_id], "test-project/test-session")
+            .expect("namespace is valid");
+        // The fallback segment is session-namespaced; prior history bumps it.
         assert_eq!(digests[0].iterations_seen, 1);
     }
 
@@ -402,7 +469,8 @@ mod tests {
         let mut o3 = rec("Bash", "bash", Some(0.0), Some("type_error"));
         o3.error_snippet =
             Some("a much longer and more verbose error message than the first".into());
-        let digests = digest_session(&[o, o2, o3], &[]);
+        let digests = digest_session(&[o, o2, o3], &[], "test-project/test-session")
+            .expect("namespace is valid");
         // 2 distinct excerpts (dup removed), shortest first.
         assert_eq!(digests[0].evidence_excerpts.len(), 2);
         assert_eq!(digests[0].evidence_excerpts[0], "type mismatch");
@@ -414,5 +482,72 @@ mod tests {
         assert_eq!(parse_epoch("2026-06-16T10:00:00Z"), Some(1_781_604_000));
         assert_eq!(parse_epoch("2026-06-16T10:00:00"), Some(1_781_604_000));
         assert_eq!(parse_epoch("garbage"), None);
+    }
+
+    #[test]
+    fn fallback_segments_are_namespaced_by_the_real_session() {
+        let observations = vec![rec("Read", "read", Some(1.0), None)];
+
+        let first = digest_session(&observations, &[], "project-a/session-one")
+            .expect("namespace is valid");
+        let second = digest_session(&observations, &[], "project-a/session-two")
+            .expect("namespace is valid");
+
+        assert_eq!(first[0].task_id, "project-a/session-one:session");
+        assert_eq!(second[0].task_id, "project-a/session-two:session");
+        assert_ne!(first[0].task_id, second[0].task_id);
+    }
+
+    #[test]
+    fn fallback_segments_reject_a_missing_namespace() {
+        let observations = vec![rec("Read", "read", Some(1.0), None)];
+
+        assert_eq!(
+            digest_session(&observations, &[], "").unwrap_err(),
+            MissingFallbackNamespace
+        );
+    }
+
+    #[test]
+    fn numbered_fallback_segments_do_not_collide_across_sessions() {
+        let mut early = rec("Read", "read", Some(1.0), None);
+        early.timestamp = "2026-06-16T10:00:00Z".into();
+        let mut late = rec("Read", "read", Some(1.0), None);
+        late.timestamp = "2026-06-16T11:00:00Z".into();
+
+        let first = digest_session(&[early.clone(), late.clone()], &[], "project-a/session-one")
+            .expect("namespace is valid");
+        let second = digest_session(&[early, late], &[], "project-a/session-two")
+            .expect("namespace is valid");
+
+        assert_eq!(first[0].task_id, "project-a/session-one:segment-0");
+        assert_eq!(first[1].task_id, "project-a/session-one:segment-1");
+        assert_eq!(second[0].task_id, "project-a/session-two:segment-0");
+        assert_eq!(second[1].task_id, "project-a/session-two:segment-1");
+    }
+
+    #[test]
+    fn unscored_observations_do_not_create_a_successful_digest() {
+        let observations = vec![rec("Read", "read", None, None)];
+
+        assert!(
+            digest_session(&observations, &[], "project-a/session-one")
+                .expect("namespace is valid")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn unscored_observations_are_excluded_from_digest_outcomes() {
+        let observations = vec![
+            rec("Read", "read", Some(1.0), None),
+            rec("Read", "read", None, None),
+        ];
+
+        let digests = digest_session(&observations, &[], "project-a/session-one")
+            .expect("namespace is valid");
+
+        assert_eq!(digests[0].observation_count, 1);
+        assert_eq!(digests[0].outcome, TaskOutcome::Success);
     }
 }

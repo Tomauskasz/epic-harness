@@ -1966,7 +1966,14 @@ fn run_reflection(reflection_session_id: &str) -> i32 {
     // per-task digests and build the adaptation landscape from history. The
     // landscape surfaces persistent failures + untried edit types, and
     // recommends exploration when the engine is plateauing on local edits.
-    let digests = evolve::digest_session(&observations, &[]);
+    let fallback_task_namespace = format!("{slug}/{reflection_session_id}");
+    let digests = match evolve::digest_session(&observations, &[], &fallback_task_namespace) {
+        Ok(digests) => digests,
+        Err(error) => {
+            eprintln!("[reflect] failed to digest session observations: {error}");
+            return 1;
+        }
+    };
     let persistent_cats: Vec<String> = digests
         .iter()
         .flat_map(|d| d.failure_categories.iter().map(|(c, _)| c.clone()))

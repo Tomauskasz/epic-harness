@@ -71,8 +71,11 @@ fn scenario_seesaw_catches_regression() {
 
     // Task identity is driven by pipeline_id, so both sessions digest to the
     // SAME task_id="PIPE-1" — the precondition for a seesaw regression.
-    let seed_digests = evolve::digest_session(&seed_obs, &[]);
-    let regression_digests = evolve::digest_session(&regression_obs, &[]);
+    let seed_digests = evolve::digest_session(&seed_obs, &[], "fixture-project/session-seed")
+        .expect("fixture namespace is valid");
+    let regression_digests =
+        evolve::digest_session(&regression_obs, &[], "fixture-project/session-regression")
+            .expect("fixture namespace is valid");
 
     // Sanity: exactly one segment each, both keyed on the stable pipeline id.
     assert_eq!(
@@ -284,7 +287,9 @@ fn scenario_planner_recommends_exploration() {
 
     // A current failing digest (regression session) feeds the component heatmap.
     let regression_obs = load_jsonl(SESSION_REGRESSION);
-    let digests = evolve::digest_session(&regression_obs, &[]);
+    let digests =
+        evolve::digest_session(&regression_obs, &[], "fixture-project/session-regression")
+            .expect("fixture namespace is valid");
     assert!(!digests.is_empty(), "regression must produce a digest");
 
     let landscape = evolve::build_landscape(&history, &digests, 2);
@@ -465,8 +470,11 @@ fn scenario_task_identity_is_pipeline_stable() {
     let seed_obs = load_jsonl(SESSION_N_SEED);
     let regression_obs = load_jsonl(SESSION_REGRESSION);
 
-    let seed_digests = evolve::digest_session(&seed_obs, &[]);
-    let regression_digests = evolve::digest_session(&regression_obs, &[]);
+    let seed_digests = evolve::digest_session(&seed_obs, &[], "fixture-project/session-seed")
+        .expect("fixture namespace is valid");
+    let regression_digests =
+        evolve::digest_session(&regression_obs, &[], "fixture-project/session-regression")
+            .expect("fixture namespace is valid");
 
     // Every observation in both fixtures carries pipeline_id="PIPE-1"; the
     // digester MUST prefer pipeline grouping and emit that exact task_id.
