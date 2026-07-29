@@ -60,7 +60,8 @@ and reports the ones whose own state contradicts it. Do not set
 
 - `pr_url` is a nonempty concrete GitHub pull-request URL returned by `gh pr create`
 - `ci_status` is exactly `"success"`
-- `audit_fail_count` is not above `max_retries` — above it, Step 5 requires a pause
+- `audit_fail_count` and `max_retries` are integer evidence, and `audit_fail_count` is below `max_retries` — at the limit, Step 5 requires a pause
+- `phase` is exactly `"evolve"`, recorded only after this skill's Evolve work succeeds
 
 ## Step 1: Auto-Detect Mode
 
@@ -210,7 +211,10 @@ identity and persisted session date.
 
 3. Report the evolution outcome in the final summary (evolved skills generated, score trend).
 
-4. Verify the completion invariants again, then commit completion through the
+4. After the reflection and memory record succeed, update the pipeline state to
+   set `"phase": "evolve"`. Do not set `status` to `complete` directly.
+
+5. Verify the completion invariants again, then commit completion through the
    validated atomic transition:
    ```bash
    epic orbit complete

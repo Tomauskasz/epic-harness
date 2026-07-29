@@ -43,7 +43,7 @@ mod tests {
         let pipeline = orbit.join("PIPELINE-20260729-cli.json");
         fs::write(
             &pipeline,
-            r#"{"id":"cli","status":"running","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#,
+            r#"{"id":"cli","status":"running","phase":"evolve","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#,
         )
         .unwrap();
 

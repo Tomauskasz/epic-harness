@@ -2623,21 +2623,6 @@ fn run_reflection(reflection_session_id: &str) -> i32 {
         hint("reflect", &format!("Orbit {id}: {violation}"));
     }
 
-    // 11.6. Orbit evolve gap — retroactively close ship-but-no-evolve pipelines
-    let evolve_patched = match patch_orbit_evolve_gap(&orbit_pipelines, &now_iso()) {
-        Ok(patched) => patched,
-        Err(error) => {
-            eprintln!("[reflect] failed to patch orbit evolve gap: {error}");
-            return 1;
-        }
-    };
-    if evolve_patched > 0 {
-        hint(
-            "reflect",
-            &format!("Orbit: evolve gap closed for {evolve_patched} pipeline(s)"),
-        );
-    }
-
     // 11.7. Workspace manifest
     // This manifest is derived from the already-durable evolved skill files.
     // Its legacy API reports no write result, so it cannot be a completion
@@ -2790,14 +2775,8 @@ fn mark_reflection_completed(reflection_session_id: &str, project: &str) -> i32 
     }
 }
 
-// ── Orbit evolve gap detection ──────────────────────────────────────────────
+// ── Orbit completion invariant detection ───────────────────────────────────
 
-/// Scan orbit pipeline files for completed pipelines that shipped but never
-/// recorded an evolve phase (i.e., the session timed out before orbit could
-/// chain ship → evolve).  Because `reflect::run` already performs the full
-/// evolve analysis, calling this afterward retroactively closes the gap by
-/// adding an evolve entry to the phase_history.  Idempotent: already-patched
-/// pipelines are skipped.  Returns the number of pipelines patched.
 /// Collect invariant violations across the bounded pipeline candidate set.
 ///
 /// Returns `(pipeline_id, violation)` pairs. See
@@ -2872,63 +2851,6 @@ fn orbit_completion_violations(pipelines: &[PathBuf]) -> Vec<(String, String)> {
 
 fn orbit_pipeline_is_persistable(pipeline: &serde_json::Value) -> bool {
     crate::shared::orbit::completion_violations(pipeline).is_empty()
-}
-
-fn patch_orbit_evolve_gap(pipelines: &[PathBuf], now: &str) -> io::Result<usize> {
-    let mut patched = 0;
-    for path in pipelines {
-        let content = read_orbit_pipeline_file(path)?;
-        let mut pipeline: serde_json::Value = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        // Only touch pipelines that completed ship but have no evolve entry.
-        let status_complete = matches!(
-            pipeline["status"].as_str(),
-            Some("complete") | Some("shipped")
-        );
-        if !status_complete {
-            continue;
-        }
-        if !orbit_pipeline_is_persistable(&pipeline) {
-            continue;
-        }
-
-        let history = match pipeline["phase_history"].as_array() {
-            Some(h) => h,
-            None => continue,
-        };
-        let has_ship = history
-            .iter()
-            .any(|e| e["phase"] == "ship" && e["status"] == "complete");
-        // Any evolve entry (including failed) blocks patching: if evolve ran and
-        // failed, patching it complete would misrepresent history.
-        let has_evolve = history.iter().any(|e| e["phase"] == "evolve");
-
-        if !has_ship || has_evolve {
-            continue;
-        }
-
-        // Insert evolve entry before the final "complete" entry (if present).
-        let evolve_entry = serde_json::json!({
-            "phase": "evolve",
-            "status": "complete",
-            "at": now,
-            "note": "applied via reflect hook (session-end gap recovery)"
-        });
-        if let Some(arr) = pipeline["phase_history"].as_array_mut() {
-            match arr.iter().rposition(|e| e["phase"] == "complete") {
-                Some(pos) => arr.insert(pos, evolve_entry),
-                None => arr.push(evolve_entry),
-            }
-        }
-
-        let updated = serde_json::to_string_pretty(&pipeline).map_err(io::Error::other)?;
-        atomic_write(path, updated.as_bytes())?;
-        patched += 1;
-    }
-    Ok(patched)
 }
 
 /// Detect the dominant stack tags from a session's observations, used by R6
@@ -3442,158 +3364,6 @@ mod tests {
         assert_eq!(date_from, "20260101");
     }
 
-    // ── patch_orbit_evolve_gap ───────────────────────────
-
-    #[test]
-    fn patch_orbit_evolve_gap_patches_ship_complete_no_evolve() {
-        let dir = tempfile::tempdir().unwrap();
-        let pipeline = serde_json::json!({
-            "id": "test-pipeline",
-            "status": "complete",
-            "phase": "complete",
-            "pr_url": "https://github.com/o/r/pull/1",
-            "ci_status": "success",
-            "phase_history": [
-                {"phase": "ship", "status": "complete", "at": "2026-01-01T00:00:00Z"},
-                {"phase": "complete", "status": "complete", "at": "2026-01-01T00:01:00Z"}
-            ]
-        });
-        let path = dir.path().join("PIPELINE-test.json");
-        fs::write(&path, serde_json::to_string_pretty(&pipeline).unwrap()).unwrap();
-
-        let pipelines = orbit_pipeline_candidates(dir.path()).unwrap();
-        let patched = patch_orbit_evolve_gap(&pipelines, "2026-01-01T00:02:00Z").unwrap();
-        assert_eq!(patched, 1);
-
-        let updated: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        let history = updated["phase_history"].as_array().unwrap();
-        assert!(
-            history.iter().any(|e| e["phase"] == "evolve"),
-            "evolve entry should be present"
-        );
-        // evolve must come before the final complete entry
-        let evolve_pos = history.iter().position(|e| e["phase"] == "evolve").unwrap();
-        let complete_pos = history
-            .iter()
-            .rposition(|e| e["phase"] == "complete")
-            .unwrap();
-        assert!(evolve_pos < complete_pos, "evolve must precede complete");
-    }
-
-    #[test]
-    fn patch_orbit_evolve_gap_skips_already_evolved() {
-        let dir = tempfile::tempdir().unwrap();
-        let pipeline = serde_json::json!({
-            "id": "test-pipeline-2",
-            "status": "complete",
-            "pr_url": "https://github.com/o/r/pull/2",
-            "ci_status": "success",
-            "phase_history": [
-                {"phase": "ship", "status": "complete", "at": "2026-01-01T00:00:00Z"},
-                {"phase": "evolve", "status": "complete", "at": "2026-01-01T00:01:00Z"},
-                {"phase": "complete", "status": "complete", "at": "2026-01-01T00:02:00Z"}
-            ]
-        });
-        let path = dir.path().join("PIPELINE-test2.json");
-        fs::write(&path, serde_json::to_string_pretty(&pipeline).unwrap()).unwrap();
-
-        let pipelines = orbit_pipeline_candidates(dir.path()).unwrap();
-        let patched = patch_orbit_evolve_gap(&pipelines, "2026-01-01T00:03:00Z").unwrap();
-        assert_eq!(patched, 0, "already-evolved pipeline must not be patched");
-    }
-
-    #[test]
-    fn patch_orbit_evolve_gap_skips_in_progress() {
-        let dir = tempfile::tempdir().unwrap();
-        let pipeline = serde_json::json!({
-            "id": "test-pipeline-3",
-            "status": "build",
-            "phase_history": [
-                {"phase": "ship", "status": "complete", "at": "2026-01-01T00:00:00Z"}
-            ]
-        });
-        let path = dir.path().join("PIPELINE-test3.json");
-        fs::write(&path, serde_json::to_string_pretty(&pipeline).unwrap()).unwrap();
-
-        let pipelines = orbit_pipeline_candidates(dir.path()).unwrap();
-        let patched = patch_orbit_evolve_gap(&pipelines, "2026-01-01T00:01:00Z").unwrap();
-        assert_eq!(patched, 0, "in-progress pipeline must not be patched");
-    }
-
-    #[test]
-    fn patch_orbit_evolve_gap_patches_shipped_status() {
-        let dir = tempfile::tempdir().unwrap();
-        let pipeline = serde_json::json!({
-            "id": "test-pipeline-4",
-            "status": "shipped",
-            "pr_url": "https://github.com/o/r/pull/4",
-            "ci_status": "success",
-            "phase_history": [
-                {"phase": "ship", "status": "complete", "at": "2026-01-01T00:00:00Z"},
-                {"phase": "complete", "status": "complete", "at": "2026-01-01T00:01:00Z"}
-            ]
-        });
-        let path = dir.path().join("PIPELINE-test4.json");
-        fs::write(&path, serde_json::to_string_pretty(&pipeline).unwrap()).unwrap();
-
-        let pipelines = orbit_pipeline_candidates(dir.path()).unwrap();
-        let patched = patch_orbit_evolve_gap(&pipelines, "2026-01-01T00:02:00Z").unwrap();
-        assert_eq!(patched, 1, "shipped status must be patched like complete");
-
-        let updated: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(
-            updated["phase_history"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|e| e["phase"] == "evolve"),
-            "evolve entry should be present for shipped pipeline"
-        );
-    }
-
-    #[test]
-    fn patch_orbit_evolve_gap_skips_failed_evolve() {
-        let dir = tempfile::tempdir().unwrap();
-        let pipeline = serde_json::json!({
-            "id": "test-pipeline-5",
-            "status": "complete",
-            "pr_url": "https://github.com/o/r/pull/5",
-            "ci_status": "success",
-            "phase_history": [
-                {"phase": "ship", "status": "complete", "at": "2026-01-01T00:00:00Z"},
-                {"phase": "evolve", "status": "failed", "at": "2026-01-01T00:01:00Z"},
-                {"phase": "complete", "status": "complete", "at": "2026-01-01T00:02:00Z"}
-            ]
-        });
-        let path = dir.path().join("PIPELINE-test5.json");
-        fs::write(&path, serde_json::to_string_pretty(&pipeline).unwrap()).unwrap();
-
-        let pipelines = orbit_pipeline_candidates(dir.path()).unwrap();
-        let patched = patch_orbit_evolve_gap(&pipelines, "2026-01-01T00:03:00Z").unwrap();
-        assert_eq!(patched, 0, "failed evolve must not be overwritten");
-
-        // Verify the failed entry is preserved as-is
-        let updated: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        let evolve_entries: Vec<_> = updated["phase_history"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|e| e["phase"] == "evolve")
-            .collect();
-        assert_eq!(
-            evolve_entries.len(),
-            1,
-            "must not add duplicate evolve entry"
-        );
-        assert_eq!(
-            evolve_entries[0]["status"], "failed",
-            "original failed status preserved"
-        );
-    }
-
     #[test]
     fn invalid_completed_orbit_is_not_persistable() {
         let pipeline = serde_json::json!({
@@ -3603,6 +3373,24 @@ mod tests {
         });
 
         assert!(!orbit_pipeline_is_persistable(&pipeline));
+    }
+
+    #[test]
+    fn orbit_completion_detection_does_not_mutate_premature_phase_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("PIPELINE-test.json");
+        let before = r#"{"id":"test","status":"complete","phase":"ship","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#;
+        fs::write(&path, before).unwrap();
+
+        let violations =
+            orbit_completion_violations(&orbit_pipeline_candidates(dir.path()).unwrap());
+
+        assert!(
+            violations
+                .iter()
+                .any(|(_, v)| v.contains("phase=\"evolve\""))
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), before);
     }
 
     #[test]

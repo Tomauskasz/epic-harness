@@ -259,11 +259,12 @@ file-level pattern detection needs — and capped at 2 KB.
 ### Orbit invariants
 
 `reflect` only reports any pipeline marked `complete` whose own state
-contradicts it: `audit_fail_count` above `max_retries`, no concrete GitHub
-pull-request URL in `pr_url`, or `ci_status` other than `success`. Detection
-never writes completion state. `epic orbit complete` is the sole validated
-atomic completion path: invalid state is byte-preserving, and an already-valid
-complete file is idempotently byte-preserving.
+contradicts it: missing or malformed integer retry evidence, `audit_fail_count`
+at or above `max_retries`, no concrete GitHub pull-request URL in `pr_url`,
+`ci_status` other than `success`, or `phase` other than `evolve`. Detection never
+writes completion state. `epic orbit complete` is the sole validated atomic
+completion path: invalid state is byte-preserving, and an already-valid complete
+file is idempotently byte-preserving.
 
 `turn_id` is retained but is not yet used to model turn-scoped analysis.
 Project identity is a sanitized canonical project-root name plus a stable hash,

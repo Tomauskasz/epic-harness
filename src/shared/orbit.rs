@@ -136,10 +136,10 @@ pub fn normalize_pipeline_id(id: &str) -> String {
 ///
 /// The pipeline file is written by the orbit skill, so nothing in the harness
 /// could previously contradict it: pipelines were observed marked `complete`
-/// with no PR or CI proof, and one with `audit_fail_count` above its own
-/// `max_retries` — the skill is supposed to pause instead. Consumers must run
-/// this validation before persistence so a self-declared status cannot become
-/// dashboard evidence.
+/// with no PR or CI proof, or exhausted audit retries. Completion requires
+/// explicit numeric retry evidence and an already recorded Evolve phase.
+/// Consumers must run this validation before persistence so a self-declared
+/// status cannot become dashboard evidence.
 ///
 /// Returns one message per violated invariant; empty means the state is
 /// self-consistent. Pipelines that are not complete are not checked — an
@@ -151,14 +151,37 @@ pub fn completion_violations(pipeline: &serde_json::Value) -> Vec<String> {
     }
 
     let mut violations = Vec::new();
-    let num = |key: &str| pipeline.get(key).and_then(|v| v.as_u64());
+    let retry_count = pipeline
+        .get("audit_fail_count")
+        .and_then(serde_json::Value::as_u64);
+    let max_retries = pipeline
+        .get("max_retries")
+        .and_then(serde_json::Value::as_u64);
+    match (retry_count, max_retries) {
+        (Some(fails), Some(max)) if fails >= max => violations.push(format!(
+            "completed with audit_fail_count={fails} at or above max_retries={max}; the run should have paused for a decision"
+        )),
+        (Some(_), Some(_)) => {}
+        _ => violations.push(
+            "completed without integer audit_fail_count and max_retries evidence".to_string(),
+        ),
+    }
 
-    if let (Some(fails), Some(max)) = (num("audit_fail_count"), num("max_retries"))
-        && fails > max
+    if pipeline.get("phase").and_then(|v| v.as_str()) != Some("evolve") {
+        violations.push("completed without phase=\"evolve\" evidence".to_string());
+    }
+
+    if let Some(last_evolve) = pipeline
+        .get("phase_history")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|history| {
+            history
+                .iter()
+                .rfind(|entry| entry.get("phase").and_then(|v| v.as_str()) == Some("evolve"))
+        })
+        && last_evolve.get("status").and_then(|v| v.as_str()) != Some("complete")
     {
-        violations.push(format!(
-            "completed with audit_fail_count={fails} above max_retries={max}; the run should have paused for a decision"
-        ));
+        violations.push("completed after a failed Evolve phase".to_string());
     }
 
     let has_pr = pipeline
@@ -207,7 +230,6 @@ pub fn complete_pipeline_in(harness_dir: &Path) -> io::Result<()> {
         "status".into(),
         serde_json::Value::String("complete".into()),
     );
-    object.insert("phase".into(), serde_json::Value::String("evolve".into()));
     ensure_valid_completion(&completed)?;
     atomic_write_pipeline(&pipeline_path, harness_dir, &orbit_dir, &completed)
 }
@@ -462,6 +484,7 @@ mod completion_tests {
     fn a_clean_completion_reports_nothing() {
         let pipeline = json!({
             "status": "complete",
+            "phase": "evolve",
             "audit_fail_count": 1,
             "max_retries": 3,
             "pr_url": "https://github.com/o/r/pull/1",
@@ -511,6 +534,7 @@ mod completion_tests {
     fn exceeding_max_retries_is_reported() {
         let pipeline = json!({
             "status": "complete",
+            "phase": "evolve",
             "audit_fail_count": 5,
             "max_retries": 3,
             "pr_url": "https://github.com/o/r/pull/1",
@@ -523,7 +547,7 @@ mod completion_tests {
 
     #[test]
     fn completing_without_pr_or_ci_evidence_is_reported() {
-        let pipeline = json!({"status": "complete", "audit_fail_count": 0, "max_retries": 3});
+        let pipeline = json!({"status": "complete", "phase": "evolve", "audit_fail_count": 0, "max_retries": 3});
         let v = violations(&pipeline);
         assert_eq!(v.len(), 2, "{v:?}");
         assert!(v.iter().any(|message| message.contains("pull-request URL")));
@@ -531,9 +555,12 @@ mod completion_tests {
     }
 
     #[test]
-    fn a_completed_ship_phase_is_not_pr_or_ci_evidence() {
+    fn a_completed_ship_history_is_not_pr_or_ci_evidence() {
         let pipeline = json!({
             "status": "shipped",
+            "phase": "evolve",
+            "audit_fail_count": 0,
+            "max_retries": 3,
             "phase_history": [{"phase": "ship", "status": "complete"}]
         });
         let found = violations(&pipeline);
@@ -542,7 +569,7 @@ mod completion_tests {
 
     #[test]
     fn a_blank_pr_url_is_not_evidence() {
-        let pipeline = json!({"status": "complete", "pr_url": "   ", "ci_status": "success"});
+        let pipeline = json!({"status": "complete", "phase": "evolve", "audit_fail_count": 0, "max_retries": 3, "pr_url": "   ", "ci_status": "success"});
         assert_eq!(violations(&pipeline).len(), 1);
     }
 
@@ -550,6 +577,9 @@ mod completion_tests {
     fn a_non_pull_request_url_is_not_evidence() {
         let pipeline = json!({
             "status": "complete",
+            "phase": "evolve",
+            "audit_fail_count": 0,
+            "max_retries": 3,
             "pr_url": "https://github.com/o/r/issues/1",
             "ci_status": "success"
         });
@@ -560,6 +590,9 @@ mod completion_tests {
     fn missing_successful_ci_is_reported() {
         let pipeline = json!({
             "status": "complete",
+            "phase": "evolve",
+            "audit_fail_count": 0,
+            "max_retries": 3,
             "pr_url": "https://github.com/o/r/pull/1"
         });
         let found = violations(&pipeline);
@@ -568,8 +601,8 @@ mod completion_tests {
     }
 
     #[test]
-    fn both_invariants_report_independently() {
-        let pipeline = json!({"status": "complete", "audit_fail_count": 4, "max_retries": 3});
+    fn completion_evidence_violations_report_independently() {
+        let pipeline = json!({"status": "complete", "phase": "evolve", "audit_fail_count": 4, "max_retries": 3});
         assert_eq!(violations(&pipeline).len(), 3);
     }
 
@@ -581,7 +614,7 @@ mod completion_tests {
         let pipeline = orbit.join("PIPELINE-20260729-valid.json");
         fs::write(
             &pipeline,
-            r#"{"id":"valid","status":"running","phase":"ship","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#,
+            r#"{"id":"valid","status":"running","phase":"evolve","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#,
         )
         .unwrap();
 
@@ -591,6 +624,90 @@ mod completion_tests {
             serde_json::from_str(&fs::read_to_string(pipeline).unwrap()).unwrap();
         assert_eq!(state["status"], "complete");
         assert_eq!(state["phase"], "evolve");
+    }
+
+    #[test]
+    fn complete_command_rejects_missing_retry_evidence_without_changing_its_bytes() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-20260729-missing-retries.json");
+        let before = r#"{"id":"missing-retries","status":"running","phase":"evolve","audit_fail_count":1,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#;
+        fs::write(&pipeline, before).unwrap();
+
+        assert!(super::complete_pipeline_in(harness.path()).is_err());
+
+        assert_eq!(fs::read_to_string(pipeline).unwrap(), before);
+    }
+
+    #[test]
+    fn complete_command_rejects_absent_retry_evidence_without_changing_its_bytes() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-20260729-absent-retries.json");
+        let before = r#"{"id":"absent-retries","status":"running","phase":"evolve","pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#;
+        fs::write(&pipeline, before).unwrap();
+
+        assert!(super::complete_pipeline_in(harness.path()).is_err());
+
+        assert_eq!(fs::read_to_string(pipeline).unwrap(), before);
+    }
+
+    #[test]
+    fn complete_command_rejects_malformed_retry_evidence_without_changing_its_bytes() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-20260729-malformed-retries.json");
+        let before = r#"{"id":"malformed-retries","status":"running","phase":"evolve","audit_fail_count":1,"max_retries":"3","pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#;
+        fs::write(&pipeline, before).unwrap();
+
+        assert!(super::complete_pipeline_in(harness.path()).is_err());
+
+        assert_eq!(fs::read_to_string(pipeline).unwrap(), before);
+    }
+
+    #[test]
+    fn complete_command_rejects_retry_count_at_the_limit_without_changing_its_bytes() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-20260729-retry-limit.json");
+        let before = r#"{"id":"retry-limit","status":"running","phase":"evolve","audit_fail_count":3,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#;
+        fs::write(&pipeline, before).unwrap();
+
+        assert!(super::complete_pipeline_in(harness.path()).is_err());
+
+        assert_eq!(fs::read_to_string(pipeline).unwrap(), before);
+    }
+
+    #[test]
+    fn complete_command_requires_evolve_phase_evidence_without_changing_its_bytes() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-20260729-ship-phase.json");
+        let before = r#"{"id":"ship-phase","status":"running","phase":"ship","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#;
+        fs::write(&pipeline, before).unwrap();
+
+        assert!(super::complete_pipeline_in(harness.path()).is_err());
+
+        assert_eq!(fs::read_to_string(pipeline).unwrap(), before);
+    }
+
+    #[test]
+    fn complete_command_rejects_failed_evolve_history_without_changing_its_bytes() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-20260729-failed-evolve.json");
+        let before = r#"{"id":"failed-evolve","status":"running","phase":"evolve","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[{"phase":"evolve","status":"failed"}]}"#;
+        fs::write(&pipeline, before).unwrap();
+
+        assert!(super::complete_pipeline_in(harness.path()).is_err());
+
+        assert_eq!(fs::read_to_string(pipeline).unwrap(), before);
     }
 
     #[test]

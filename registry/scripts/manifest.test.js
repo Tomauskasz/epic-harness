@@ -364,12 +364,15 @@ test("Orbit dismissal uses one exact project-scoped backend", () => {
   assert.match(frontend, /project === '__all__'/);
 });
 
-test("Orbit completion requires concrete PR and green CI evidence", () => {
+test("Orbit completion requires PR, CI, retry, and Evolve evidence", () => {
   const orbit = readFileSync(join(ROOT, "skills", "orbit", "SKILL.md"), "utf8");
 
   assert.match(orbit, /"ci_status": null/);
   assert.match(orbit, /`pr_url` is a nonempty concrete GitHub pull-request URL/);
   assert.match(orbit, /`ci_status` is exactly `"success"`/);
+  assert.match(orbit, /`audit_fail_count` and `max_retries` are integer evidence/);
+  assert.match(orbit, /`phase` is exactly `"evolve"`/);
+  assert.match(orbit, /update the pipeline state to[\s\S]*set `"phase": "evolve"`/);
   assert.match(orbit, /CI failure[\s\S]*"ci_status": "failed"[\s\S]*STOP/);
   assert.match(orbit, /Only successful CI proceeds to Step 7/);
   assert.doesNotMatch(orbit, /phase_history.*ship.*status: complete/);
