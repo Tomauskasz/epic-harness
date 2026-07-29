@@ -1352,7 +1352,8 @@ fn build_evolved_injection(skills: &[(String, String)]) -> String {
 mod tests {
     use super::*;
     use serial_test::serial;
-    use std::io::Write;
+    use std::io::{Read, Write};
+    use std::net::Shutdown;
     use std::net::TcpListener;
     use std::path::PathBuf;
 
@@ -1811,14 +1812,45 @@ mod tests {
         );
     }
 
+    /// Consume the probe request before replying, as a real HTTP server does.
+    /// Dropping a TCP connection with unread request bytes can send a reset on
+    /// Windows, which makes a valid response intermittently disappear from the
+    /// probe and turns this fixture into a false foreign-listener test.
+    fn read_dashboard_probe_request(stream: &mut TcpStream) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("set test request timeout");
+
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 256];
+            let read = stream.read(&mut chunk).expect("read health request");
+            assert!(read > 0, "health probe closed before completing request");
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        assert!(
+            request.starts_with(b"GET / HTTP/1.0\r\n"),
+            "unexpected dashboard health request: {}",
+            String::from_utf8_lossy(&request)
+        );
+    }
+
     fn one_shot_http_server(response: String) -> (u16, std::thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let port = listener.local_addr().expect("listener address").port();
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept health request");
+            read_dashboard_probe_request(&mut stream);
             stream
                 .write_all(response.as_bytes())
                 .expect("write health response");
+            stream
+                .shutdown(Shutdown::Write)
+                .expect("gracefully finish health response");
         });
         (port, handle)
     }
@@ -1847,14 +1879,17 @@ mod tests {
             "HTTP/1.0 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
-        let (port, server) = one_shot_http_server(response);
+        const PROBE_REPETITIONS: usize = 100;
+        for _ in 0..PROBE_REPETITIONS {
+            let (port, server) = one_shot_http_server(response.clone());
 
-        assert_eq!(
-            dashboard_status(port),
-            DashboardStatus::Epic,
-            "a dashboard from any version must be recognised as ours"
-        );
-        server.join().expect("test server");
+            assert_eq!(
+                dashboard_status(port),
+                DashboardStatus::Epic,
+                "a dashboard from any version must be recognised as ours"
+            );
+            server.join().expect("test server");
+        }
     }
 
     #[test]
@@ -1899,6 +1934,7 @@ mod tests {
         let port = listener.local_addr().expect("listener address").port();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept health request");
+            read_dashboard_probe_request(&mut stream);
             stream
                 .write_all(b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n")
                 .expect("write headers");
