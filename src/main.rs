@@ -474,8 +474,8 @@ fn main() {
         },
     };
 
-    // stdout output is chosen by EVENT, not by host. Claude Code, Codex and
-    // Antigravity all send `hook_event_name` and all read the same structured
+    // stdout output is chosen by EVENT, not by host. Claude Code and Codex
+    // both send `hook_event_name` and read the same structured
     // shapes, so this arm is the live path on every supported host. The `else`
     // arm is the no-event-name fallback (direct CLI runs), not "Claude Code".
     if input.hook_event_name.is_some() {

@@ -17,6 +17,27 @@ fn read_json(path: &Path) -> serde_json::Value {
         .unwrap_or_else(|e| panic!("{} must be valid JSON: {e}", path.display()))
 }
 
+fn read_yaml(path: &Path) -> serde_yaml::Value {
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+    serde_yaml::from_str(&raw)
+        .unwrap_or_else(|e| panic!("{} must be valid YAML: {e}", path.display()))
+}
+
+fn issue_template_options(template: &serde_yaml::Value, id: &str) -> Vec<&str> {
+    template["body"]
+        .as_sequence()
+        .expect("issue template body must be a YAML sequence")
+        .iter()
+        .find(|field| field["id"].as_str() == Some(id))
+        .unwrap_or_else(|| panic!("issue template must contain {id} field"))["attributes"]["options"]
+        .as_sequence()
+        .unwrap_or_else(|| panic!("{id} field must declare dropdown options"))
+        .iter()
+        .map(|option| option.as_str().expect("dropdown options must be strings"))
+        .collect()
+}
+
 /// Every `"command"` string in a hooks manifest.
 fn hook_commands(manifest: &serde_json::Value) -> Vec<String> {
     let mut out = vec![];
@@ -274,4 +295,47 @@ fn current_host_claims_match_the_two_plugin_manifests() {
             "current host contract must not claim Antigravity support: {path}"
         );
     }
+
+    let bug_report = read_yaml(&root.join(".github/ISSUE_TEMPLATE/bug_report.yml"));
+    assert_eq!(
+        issue_template_options(&bug_report, "integration"),
+        ["Claude Code", "Codex", "Other"],
+        "bug reports must offer only supported product hosts"
+    );
+
+    let feature_request = read_yaml(&root.join(".github/ISSUE_TEMPLATE/feature_request.yml"));
+    assert!(
+        issue_template_options(&feature_request, "area")
+            .contains(&"Integrations (Claude Code and Codex)"),
+        "feature requests must name only supported product hosts"
+    );
+
+    for path in [
+        "src/main.rs",
+        "src/evolve/cli.rs",
+        "src/evolve/synthesis.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(path))
+            .unwrap_or_else(|error| panic!("{path} must be readable: {error}"));
+        for unsupported in [
+            "Agy",
+            "agy",
+            "Antigravity",
+            "Cursor",
+            "OpenCode",
+            "Gemini",
+            "Cline",
+            "Aider",
+        ] {
+            assert!(
+                !source.contains(unsupported),
+                "current host-facing source must not claim unsupported host {unsupported}: {path}"
+            );
+        }
+    }
+
+    assert!(
+        !root.join("registry/rules/epic-harness.md").exists(),
+        "the stale Cline rule must not remain as a current integration artifact"
+    );
 }

@@ -4,7 +4,7 @@
 //! failure. This module records a **pending-synthesis manifest** for each
 //! seeded skill, carrying the session's REAL failure evidence (error snippets,
 //! category counts, detected patterns) plus the template body. A host agent
-//! (claude/codex/agy) — using ITS OWN subagent mechanism, with no model
+//! (Claude Code or Codex) — using its own subagent mechanism, with no model
 //! specified — reads the manifest, synthesizes a better body, and hands it back
 //! via `epic-harness evolve accept-synth`, which runs the synthesized body
 //! through the exact same gates as template content: `validate_body`, the

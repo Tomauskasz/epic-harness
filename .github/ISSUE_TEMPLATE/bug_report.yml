@@ -34,12 +34,7 @@ body:
       label: Integration
       options:
         - Claude Code
-        - Cursor
         - Codex
-        - Gemini CLI
-        - OpenCode
-        - Cline
-        - Aider
         - Other
     validations:
       required: true

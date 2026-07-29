@@ -38,7 +38,7 @@ body:
         - Skills (auto-trigger)
         - Hooks (guard, observe, polish, resume)
         - Memory (harness mem)
-        - Integrations (Claude Code, Cursor, etc.)
+        - Integrations (Claude Code and Codex)
         - CLI (epic install, telemetry, etc.)
         - Other
     validations:

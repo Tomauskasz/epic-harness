@@ -2,7 +2,7 @@
 //!
 //! `epic-harness evolve accept-synth` is the consume side of the
 //! pending-synthesis manifest protocol (`src/evolve/synthesis.rs`). A host
-//! agent (claude/codex/agy, using its own subagent mechanism with no model
+//! agent (Claude Code or Codex, using its own subagent mechanism with no model
 //! specified) reads a pending manifest, synthesizes a better skill body from
 //! the evidence, and pipes the body here. We validate it, re-run the Critic
 //! falsifiability gate, overwrite the template skill, and mark the manifest
