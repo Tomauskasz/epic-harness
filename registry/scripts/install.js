@@ -391,14 +391,45 @@ function validatedGuardDeny(output) {
   return trimmed;
 }
 
-function runHook(event, subcommand) {
+function readHookInput() {
+  return new Promise((resolve, reject) => {
+    let input = "";
+    let settled = false;
+    const finish = () => {
+      if (!settled) {
+        settled = true;
+        resolve(input);
+      }
+    };
+
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      input += chunk;
+      try {
+        JSON.parse(input);
+        // Codex sends one JSON object. Dispatch as soon as it is complete: its
+        // stdin may remain open while it waits for the hook command to return.
+        process.stdin.pause();
+        process.stdin.destroy();
+        finish();
+      } catch {
+        // The JSON may be split across chunks. EOF preserves the existing
+        // malformed/empty-input path without guessing a timeout or truncation.
+      }
+    });
+    process.stdin.once("end", finish);
+    process.stdin.once("error", reject);
+  });
+}
+
+async function runHook(event, subcommand) {
   if (!HOOK_COMMANDS.get(event)?.has(subcommand)) {
     throw new Error(`unsupported hook command: ${event} ${subcommand}`);
   }
 
   const captureStdout =
     event === "PreToolUse" || STRUCTURED_CODEX_EVENTS.has(event);
-  const input = runnerProvenance(readFileSync(0, "utf8"));
+  const input = runnerProvenance(await readHookInput());
   const result = spawnSync(BINARY, [subcommand], {
     encoding: captureStdout ? "utf8" : undefined,
     shell: false,
@@ -499,7 +530,7 @@ async function main() {
   if (event === "SessionStart") {
     await ensureCompatibleRuntime();
   }
-  runHook(event, subcommand);
+  await runHook(event, subcommand);
 }
 
 if (
