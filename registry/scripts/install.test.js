@@ -464,6 +464,60 @@ echo {}`,
   }
 });
 
+test("SessionStart keeps installer stdout out of its single JSON response", () => {
+  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+  const versionFile = join(fixture.root, "version.txt");
+  writeFileSync(versionFile, PREVIOUS_VERSION);
+
+  try {
+    writeCommand(
+      fixture.bin,
+      "epic-harness",
+      `if [ "$1" = "version" ]; then
+  IFS= read -r version < "$EPIC_TEST_VERSION_FILE"
+  printf 'epic-harness %s runtime-revision %s\\n' "$version" "$EPIC_TEST_RUNTIME_REVISION" >&2
+  exit 0
+fi
+printf '%s\\n' '{}'`,
+      `if "%1"=="version" (
+  for /f "usebackq delims=" %%v in ("%EPIC_TEST_VERSION_FILE%") do echo epic-harness %%v runtime-revision %EPIC_TEST_RUNTIME_REVISION% 1>&2
+  exit /b 0
+)
+echo {}`,
+    );
+    writeCommand(
+      fixture.bin,
+      "cargo",
+      `if [ "$1" = "binstall" ] && [ "$2" = "--version" ]; then
+  exit 0
+fi
+printf '%s\\n' 'fixture installer stdout'
+printf '%s\\n' 'fixture installer diagnostic' >&2
+printf '%s\\n' '${PLUGIN_VERSION}' > "$EPIC_TEST_VERSION_FILE"`,
+      `if "%1"=="binstall" if "%2"=="--version" exit /b 0
+echo fixture installer stdout
+echo fixture installer diagnostic 1>&2
+> "%EPIC_TEST_VERSION_FILE%" echo ${PLUGIN_VERSION}`,
+    );
+
+    const result = runScript(
+      ["hook", "SessionStart", "resume"],
+      { ...fixture.env, EPIC_TEST_VERSION_FILE: versionFile },
+      JSON.stringify({ hook_event_name: "SessionStart", session_id: "session-1" }),
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(
+      assertSingleJsonObject(result.stdout, "SessionStart installer update"),
+      {},
+    );
+    assert.doesNotMatch(result.stderr, /fixture installer stdout/);
+    assert.match(result.stderr, /fixture installer diagnostic/);
+  } finally {
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+});
+
 test("bootstrap rejects versions outside the base or Codex-cachebuster contract", () => {
   for (const version of [
     `${PLUGIN_VERSION}+other.20260728181552`,
