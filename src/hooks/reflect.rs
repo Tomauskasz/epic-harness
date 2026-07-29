@@ -7,7 +7,6 @@ use std::sync::{
     LazyLock,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::{Duration, SystemTime};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -1447,23 +1446,44 @@ fn try_acquire_reflection_worker_lock(queue: &Path) -> io::Result<Option<Reflect
 }
 
 fn reflection_queue_files(queue: &Path, extension: &str) -> io::Result<Vec<PathBuf>> {
+    reflection_queue_files_with_limit(queue, extension, MAX_REFLECTION_QUEUE_SCAN)
+}
+
+fn reflection_queue_files_with_limit(
+    queue: &Path,
+    extension: &str,
+    candidate_limit: usize,
+) -> io::Result<Vec<PathBuf>> {
     let entries = match fs::read_dir(queue) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
+    reflection_queue_files_from_entries(
+        entries
+            .map(|entry| entry.and_then(|entry| Ok((entry.path(), entry.file_type()?.is_file())))),
+        extension,
+        candidate_limit,
+    )
+}
+
+fn reflection_queue_files_from_entries(
+    mut entries: impl Iterator<Item = io::Result<(PathBuf, bool)>>,
+    extension: &str,
+    candidate_limit: usize,
+) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        if entry.file_type()?.is_file()
-            && entry.path().extension().and_then(|ext| ext.to_str()) == Some(extension)
-        {
-            files.push(entry.path());
-            if files.len() == MAX_REFLECTION_QUEUE_SCAN {
-                break;
-            }
+    for _ in 0..MAX_REFLECTION_QUEUE_FILES {
+        let Some(entry) = entries.next() else {
+            break;
+        };
+        let (path, is_file) = entry?;
+        if is_file && path.extension().and_then(|ext| ext.to_str()) == Some(extension) {
+            files.push(path);
         }
     }
+    files.sort();
+    files.truncate(candidate_limit);
     Ok(files)
 }
 
@@ -1716,16 +1736,8 @@ fn recover_abandoned_reflection_claims(
         if path.with_extension("completed").exists() {
             continue;
         }
-        let pending = path.with_extension("pending");
-        match fs::remove_file(&pending) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        crate::team::codex::atomic_replace_file(&path, &pending)?;
-        if let Some(parent) = pending.parent() {
-            sync_directory(parent)?;
-        }
+        let fence = reflection_claim_fence(&path)?;
+        let _ = retry_or_dead_letter_reflection_job(&path, &fence)?;
         recovered += 1;
     }
     Ok(recovered)
@@ -1740,23 +1752,8 @@ fn recover_abandoned_reflection_claims_if_unlocked(queue: &Path) -> io::Result<u
 }
 
 fn pending_reflection_jobs(queue: &Path) -> io::Result<Vec<PathBuf>> {
-    let entries = match fs::read_dir(queue) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
     let mut pending = Vec::new();
-    let mut scanned = 0;
-    for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("pending") {
-            continue;
-        }
-        scanned += 1;
+    for path in reflection_queue_files_with_limit(queue, "pending", MAX_REFLECTION_QUEUE_FILES)? {
         let job = match fs::read(&path)
             .and_then(|bytes| {
                 serde_json::from_slice::<ReflectionJob>(&bytes).map_err(io::Error::other)
@@ -1772,14 +1769,11 @@ fn pending_reflection_jobs(queue: &Path) -> io::Result<Vec<PathBuf>> {
                     "[reflect] invalid pending reflection job {}: {error}",
                     path.display()
                 );
-                if scanned == MAX_REFLECTION_QUEUE_FILES {
-                    break;
-                }
                 continue;
             }
         };
         pending.push((job.attempts, path));
-        if pending.len() == MAX_REFLECTION_QUEUE_SCAN || scanned == MAX_REFLECTION_QUEUE_FILES {
+        if pending.len() == MAX_REFLECTION_QUEUE_SCAN {
             break;
         }
     }
@@ -1883,7 +1877,7 @@ fn enqueue_reflection(reflection_session_id: &str) -> io::Result<()> {
         };
         let _ = enqueue_reflection_job(&queue, &job)?;
         // A saturated queue is still a successful durable handoff. Completing
-        // workers dispatch the next pending job after releasing their slot.
+        // workers dispatch the next pending job after releasing worker.lock.
         let _ = spawn_pending_reflection_jobs(&queue)?;
     }
     Ok(())
@@ -3100,6 +3094,7 @@ fn detect_session_stack(observations: &[ObsRecord]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, SystemTime};
 
     #[cfg(windows)]
     #[test]
@@ -3436,14 +3431,74 @@ mod tests {
             )
             .unwrap();
         }
-        let claimed = queue.path().join("job_target.claimed");
-        fs::write(&claimed, "{}").unwrap();
+        let job = ReflectionJob {
+            session_id: "20260729_recovery-bound".into(),
+            project: "project-a".into(),
+            created_at: "2026-07-29T10:00:00Z".into(),
+            attempts: 0,
+            claim: None,
+        };
+        let pending = enqueue_reflection_job(queue.path(), &job).unwrap().unwrap();
+        let claimed = claim_reflection_job(&pending).unwrap().unwrap();
+        assert!(claimed.exists());
 
         assert_eq!(
             recover_abandoned_reflection_claims_if_unlocked(queue.path()).unwrap(),
             1
         );
-        assert!(claimed.with_extension("pending").is_file());
+        assert!(pending.is_file());
+    }
+
+    #[test]
+    fn abandoned_claim_recovery_counts_crashes_and_dead_letters_at_the_limit() {
+        let queue = tempfile::tempdir().unwrap();
+        let job = ReflectionJob {
+            session_id: "20260729_crash-loop".into(),
+            project: "project-a".into(),
+            created_at: "2026-07-29T10:00:00Z".into(),
+            attempts: 0,
+            claim: None,
+        };
+        let pending = enqueue_reflection_job(queue.path(), &job).unwrap().unwrap();
+
+        for attempt in 1..=MAX_REFLECTION_ATTEMPTS {
+            let claimed = claim_reflection_job(&pending).unwrap().unwrap();
+            assert_eq!(
+                recover_abandoned_reflection_claims_if_unlocked(queue.path()).unwrap(),
+                1
+            );
+
+            if attempt < MAX_REFLECTION_ATTEMPTS {
+                let recovered: ReflectionJob =
+                    serde_json::from_slice(&fs::read(&pending).unwrap()).unwrap();
+                assert_eq!(recovered.attempts, attempt);
+                assert!(recovered.claim.is_none());
+            } else {
+                assert!(!pending.exists());
+                let failed: ReflectionJob =
+                    serde_json::from_slice(&fs::read(claimed.with_extension("failed")).unwrap())
+                        .unwrap();
+                assert_eq!(failed.attempts, MAX_REFLECTION_ATTEMPTS);
+            }
+        }
+    }
+
+    #[test]
+    fn queue_scan_caps_total_entries_before_late_candidates() {
+        let mut entries = (0..MAX_REFLECTION_QUEUE_FILES)
+            .map(|index| Ok((PathBuf::from(format!("garbage-{index:03}.tmp")), true)))
+            .collect::<Vec<io::Result<(PathBuf, bool)>>>();
+        entries.push(Err(io::Error::other("late entry must not be visited")));
+
+        assert!(
+            reflection_queue_files_from_entries(
+                entries.into_iter(),
+                "pending",
+                MAX_REFLECTION_QUEUE_FILES,
+            )
+            .unwrap()
+            .is_empty()
+        );
     }
 
     #[test]
@@ -3986,13 +4041,21 @@ mod tests {
     #[test]
     fn abandoned_reflection_claim_returns_to_pending_queue() {
         let dir = tempfile::tempdir().unwrap();
-        let claimed = dir.path().join("job_session.claimed");
-        fs::write(&claimed, "{}").unwrap();
+        let job = ReflectionJob {
+            session_id: "20260729_abandoned".into(),
+            project: "project-a".into(),
+            created_at: "2026-07-29T10:00:00Z".into(),
+            attempts: 0,
+            claim: None,
+        };
+        let pending = enqueue_reflection_job(dir.path(), &job).unwrap().unwrap();
+        let claimed = claim_reflection_job(&pending).unwrap().unwrap();
+        assert!(claimed.exists());
 
         let recovered = recover_abandoned_reflection_claims_if_unlocked(dir.path()).unwrap();
 
         assert_eq!(recovered, 1);
-        assert!(claimed.with_extension("pending").exists());
+        assert!(pending.exists());
     }
 
     #[test]

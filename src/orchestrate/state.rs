@@ -372,7 +372,9 @@ pub(crate) fn try_acquire_lock(lock_path: &Path) -> io::Result<Option<fs::File>>
         return Ok(Some(file));
     }
     let error = io::Error::last_os_error();
-    if matches!(error.raw_os_error(), Some(libc::EAGAIN | libc::EWOULDBLOCK)) {
+    if error.kind() == io::ErrorKind::WouldBlock
+        || matches!(error.raw_os_error(), Some(code) if code == libc::EAGAIN || code == libc::EWOULDBLOCK)
+    {
         Ok(None)
     } else {
         Err(error)

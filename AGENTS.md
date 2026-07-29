@@ -416,12 +416,14 @@ under slow/remote hosts) is gone.
 
 `reflect` publishes each SessionEnd job only after it has synced a temporary
 file. Publication is no-clobber, so a partial write never appears as
-`*.pending`. Two worker slots process at most 64 queue candidates per scan.
-Each claim gets a fresh owned lease. Retry, completion, and dead-letter
-transitions use atomic replacement and sync the queue directory. Per-session
-database keys and typed file projections make crash recovery idempotent. Stale
-claims return to the queue. Malformed jobs and jobs that fail three times move
-to `*.failed`, which lets a later replay publish the same session again.
+`*.pending`. One persistent OS-held `worker.lock` serializes a project worker.
+Each scan visits at most 128 directory entries and selects deterministic,
+bounded candidates. Each claim gets a fresh owned lease and fence. Retry,
+completion, and dead-letter transitions use atomic replacement and sync the
+queue directory. Per-session database keys and typed file projections make
+crash recovery idempotent. Abandoned claims count as failed attempts; malformed
+jobs and jobs that fail three times move to `*.failed`, which lets a later
+replay publish the same session again.
 
 ## Evolved Skill Injection
 
@@ -548,7 +550,7 @@ _dispatch skill runs `epic mem recall` with current task context before invoking
 - `orchestrator/` — Multi-agent orchestration state (run.json, control.json, agents/{id}/)
 - `dispatch/` — Skill dispatch logs (JSONL)
 - `orbit/` — /orbit pipeline state files (PIPELINE-*.json)
-- `reflect-queue/` — Durable SessionEnd jobs and worker slots
+- `reflect-queue/` — Durable SessionEnd jobs and persistent worker lock
 - `eval/` — Eval config, baselines, and results (eval.yaml, baselines/*.json, results/*.json)
 - `pending_synth.jsonl` — Bounded host-synthesis backlog
 - `metrics.json` — Aggregate stats (score_history, trend, stagnation_count, skill_attribution)
