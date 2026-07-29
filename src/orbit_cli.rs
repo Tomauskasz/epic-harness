@@ -1,5 +1,11 @@
+//! CLI entrypoint for validated Orbit pipeline completion.
+//!
+//! Usage: `epic orbit complete`. The command locates the active pipeline and
+//! delegates its validation and atomic completion transition to `shared::orbit`.
+
 use std::path::Path;
 
+/// Run the `epic orbit` subcommand and return its process exit code.
 pub fn run(args: &[String]) -> i32 {
     let harness_dir = std::env::var_os("HARNESS_DIR")
         .filter(|path| !path.is_empty())

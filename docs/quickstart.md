@@ -73,10 +73,11 @@ irm https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harn
    **Or use `/orbit`** — runs spec → go → audit → ship autonomously in one command:
    ```
    /orbit
-   # Choose mode:
-   #   1. Interactive  — you run /discover + /spec, then say "orbit go"
-   #   2. Council auto-spec — 4-voice council generates spec, you approve
-   # After spec approval: fully autonomous until PR is merged
+   # The agent auto-detects and auto-approves Direct or Council mode:
+   #   Direct  — simple work; generates the spec
+   #   Council — complex work; 4-voice council generates the spec
+   # Interactive is used only when you explicitly opt in: run /discover + /spec,
+   # then say "orbit go". Three failed audits pause for your decision.
    ```
 
 3. **Skills trigger themselves.** When you touch auth code, the `secure` skill activates. When tests fail, `debug` kicks in. You don't call them.

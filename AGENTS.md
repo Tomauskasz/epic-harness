@@ -53,7 +53,7 @@ flowchart TD
 
 **State tracking**: `$HARNESS_DIR/orbit/PIPELINE-{timestamp}.json` — updated after every phase transition, survives context compaction.
 
-**Human checkpoints**: mode selection (interactive only when unclear), 3 failed audits (pause).
+**Human checkpoints**: explicit opt-in to interactive mode, 3 failed audits (pause). Direct and Council are auto-detected and auto-approved.
 
 **Evolve**: runs automatically after PR created + CI green. Skipped on abort.
 
@@ -150,8 +150,11 @@ Notes that are easy to get wrong:
   converts only a structured PreToolUse denial to exit 0 so Codex parses and
   enforces it; other failures remain nonzero.
 
-`epic team sync` writes native Codex agents as flat `~/.codex/agents/{team}-{agent}.toml`
-(`name`, `description`, `developer_instructions`). Claude-only frontmatter is dropped:
+`epic team sync` writes native Codex agents as flat, reversibly encoded owned
+`~/.codex/agents/{encoded-id}.toml` files (`name`, `description`,
+`developer_instructions`, and ownership metadata); it does not use ambiguous
+`{team}-{agent}` filenames. Only Claude Code and Codex receive native team-agent
+writes; Epic exports no team-agent files for unsupported hosts. Claude-only frontmatter is dropped:
 `model: sonnet` has no defensible Codex equivalent, and `tools:`/`skills:` are
 Claude/Epic concepts.
 
@@ -248,17 +251,26 @@ left the pause directive and conflict warnings permanently dead.
 
 ### Retention
 
-`db.retention_days` (default 90, `0` disables) deletes older observations at
-session end and sweeps stale `resume.*.lock` and `telemetry_error_count_*.txt`
-files older than 24h. Persisted `action` text is masked for credentials —
-keeping paths, which file-level pattern detection needs — and capped at 2 KB.
+`db.retention_days` (default 90) deletes older observations at session end and
+sweeps stale `resume.*.lock` and `telemetry_error_count_*.txt` files older than
+24h. `retention_days=0` returns before all deletion, marker, and lease work.
+Retention completes bounded, fallible scans before pruning, so a scan failure
+fails closed rather than partly deleting data. On Unix it opens the root by file
+descriptor and resolves children with `openat` plus `O_NOFOLLOW`, so a pathname
+swap cannot redirect a marker or lock operation. On Windows it rejects reparse
+points at both the root and leaf; because `std` has no Windows `openat`, an
+ancestor replacement after root validation remains the exact residual race.
+Persisted `action` text is masked for credentials — keeping paths, which
+file-level pattern detection needs — and capped at 2 KB.
 
 ### Orbit invariants
 
-`reflect` reports any pipeline marked `complete` whose own state contradicts it:
-`audit_fail_count` above `max_retries`, no concrete GitHub pull-request URL in
-`pr_url`, or `ci_status` other than `success`. Detection only — the orbit skill
-writes the file.
+`reflect` only reports any pipeline marked `complete` whose own state
+contradicts it: `audit_fail_count` above `max_retries`, no concrete GitHub
+pull-request URL in `pr_url`, or `ci_status` other than `success`. Detection
+never writes completion state. `epic orbit complete` is the sole validated
+atomic completion path: invalid state is byte-preserving, and an already-valid
+complete file is idempotently byte-preserving.
 
 `turn_id` is retained but is not yet used to model turn-scoped analysis.
 Project identity is a sanitized canonical project-root name plus a stable hash,
@@ -550,6 +562,15 @@ version tag. Update `Cargo.lock` with
 `cargo update -p epic-harness --precise x.y.z` after editing `Cargo.toml` — the
 `cargo publish` step of `release.yml` runs without `--allow-dirty`, so a stale
 lock fails the crates.io publish.
+
+### Tag release runbook
+
+The tag-release workflow must frozen-install dashboard dependencies, build the
+dashboard, and byte-compare `app/dist/index.html` with
+`assets/dashboard.html` before cargo-dist packages artifacts. It installs
+`cargo-dist` as `0.31.0` with `--locked`. Every `uses:` reference in
+`release.yml` must be a full 40-hex commit SHA with its readable version
+comment; do not replace those pins with tags.
 
 ### Dashboard rebuild (before tagging)
 

@@ -170,3 +170,9 @@ copy.
 | `~/.claude/settings.json` | Claude Code hooks config |
 | `~/.claude.json` | MCP server registration |
 | `.harness/guard-rules.yaml` (in project tree) | Project-local guard rules |
+
+## Host-Owned Generated Agents (not in ~/.harness)
+
+| Path | Writer | Purpose |
+|------|--------|---------|
+| `~/.codex/agents/{encoded-id}.toml` | `epic team sync` | Owned native Codex team agent (`name`, `description`, `developer_instructions`, and ownership metadata) |

@@ -197,14 +197,18 @@ Pipeline stages (`/spec`, `/go`, `/check`, `/ship`, `/discover`) are now **skill
 
 ## /orbit — Autonomous Pipeline
 
-`/orbit` wraps the entire pipeline into a single autonomous execution. Pick a mode — everything else is hands-off until the PR.
+`/orbit` wraps the entire pipeline into a single autonomous execution. The
+agent auto-detects and auto-approves Direct or Council mode; interactive mode
+is used only when you explicitly opt in. Everything else is hands-off until the
+PR.
 
 ```mermaid
 flowchart TD
-    START(["/orbit"]) --> MODE{"requirement?"}:::human
-    MODE -->|"unclear"| WAIT["Interactive\n/discover → /spec\nthen 'orbit go'"]:::human
-    MODE -->|"clear + complex"| COUNCIL["Council\n4-voice auto-spec"]:::auto
-    MODE -->|"clear + simple"| DIRECT["Direct\nauto-spec"]:::auto
+    START(["/orbit"]) --> MODE{"explicit interactive\nopt-in?"}:::human
+    MODE -->|"yes"| WAIT["Interactive\n/discover → /spec\nthen 'orbit go'"]:::human
+    MODE -->|"no: agent auto-detects"| CLASSIFY{"requirement?"}:::auto
+    CLASSIFY -->|"complex"| COUNCIL["Council\n4-voice auto-spec\nauto-approved"]:::auto
+    CLASSIFY -->|"simple"| DIRECT["Direct\nauto-spec\nauto-approved"]:::auto
     WAIT --> SPEC_LOAD["Load spec"]
     COUNCIL --> SPEC_LOAD
     DIRECT --> SPEC_LOAD
@@ -223,8 +227,8 @@ flowchart TD
     classDef auto  fill:#1a5c3a,stroke:#4caf7d,color:#fff
 ```
 
-**Purple** — human steps: mode selection (unclear → interactive), 3× check failure pause.
-**Green** — clear + complex → council auto-spec; clear + simple → direct build; both fully autonomous.
+**Purple** — human steps: explicit interactive opt-in, 3× audit failure pause.
+**Green** — the agent auto-detects and auto-approves Council for complex work or Direct for simple work; both are fully autonomous.
 
 State persisted in `$HARNESS_DIR/orbit/PIPELINE-{timestamp}.json` — survives context compaction.
 

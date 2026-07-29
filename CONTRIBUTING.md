@@ -6,7 +6,7 @@ Thanks for your interest in contributing!
 
 1. Fork the repository
 2. Clone your fork: `git clone https://github.com/<you>/epic-harness.git`
-3. Install: see [QUICKSTART.md](QUICKSTART.md)
+3. Install: see [Quick Start](docs/quickstart.md)
 4. Create a feature branch: `git checkout -b feat/your-feature`
 
 ## Development
