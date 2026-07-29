@@ -28,7 +28,6 @@
     "hooks/",
     "registry/presets/",
     "docs/",
-    "plugin.json",
     "runtime-revision.txt",
     "CLAUDE.md",
     "README.md",

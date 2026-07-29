@@ -235,6 +235,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `description` and `developer_instructions` keys. `model: sonnet` and Claude
   `tools:`/`skills:` are dropped rather than mapped to invented equivalents.
 
+## [0.8.3] — 2026-07-29
+
+### Fixed
+- **cargo-binstall now resolves cargo-dist archives correctly**: release
+  executables are at the archive root, and the Windows metadata now includes
+  the executable extension.
+
+### Changed
+- **Supported plugin hosts are Claude Code and Codex CLI**: removed the
+  unsupported root Agy/Antigravity manifest and its bare `PostInvocation`
+  reflection hook.
+- **cargo-dist owns release installers**: removed handwritten installer scripts
+  and their release upload step; installation docs now point to cargo-dist's
+  generated installers.
+
 ## [0.8.2] — 2026-07-09
 
 ### Changed

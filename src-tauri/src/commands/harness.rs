@@ -457,13 +457,6 @@ pub async fn get_integration_status() -> Result<Vec<IntegrationStatus>, String> 
             ],
         ),
         ("Codex", vec![format!("{home}/.codex/config.toml")]),
-        (
-            "Antigravity",
-            vec![format!("{home}/.gemini/config/mcp_config.json")],
-        ),
-        ("Cursor", vec![format!("{home}/.cursor/mcp.json")]),
-        ("Cline", vec![format!("{home}/.vscode/extensions")]),
-        ("Aider", vec![format!("{home}/.aider.conf.yml")]),
     ];
 
     let results = checks

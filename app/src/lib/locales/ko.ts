@@ -133,7 +133,7 @@ export default {
   onPostTool: '툴 호출 후 (async)', onPostEdit: '파일 편집 후',
   onPreCompact: '컨텍스트 압축 전', onSessionEnd: '세션 종료 시',
   pageIntegrations: '통합',
-  pageIntegrationsDesc: 'AI 코딩 툴 6개 통합 · 설정 파일은 integrations/ 폴더',
+  pageIntegrationsDesc: 'Claude Code 및 Codex 플러그인 통합',
   loadingIntegrations: '통합 상태 로딩 중…',
   statusInstalled: '설치됨', statusNotInstalled: '미설치',
   sharedResourcesTitle: '공유 리소스',

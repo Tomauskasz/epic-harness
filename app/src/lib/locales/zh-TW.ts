@@ -118,7 +118,7 @@ export default {
   onPostTool: '工具呼叫後（非同步）', onPostEdit: '檔案編輯後',
   onPreCompact: '情境壓縮前', onSessionEnd: '工作階段結束時',
   pageIntegrations: '整合',
-  pageIntegrationsDesc: '6個AI編碼工具整合 · 設定在integrations/資料夾',
+  pageIntegrationsDesc: 'Claude Code 和 Codex 外掛整合',
   loadingIntegrations: '正在載入整合狀態…',
   statusInstalled: '已安裝', statusNotInstalled: '未安裝',
   sharedResourcesTitle: '共享資源',

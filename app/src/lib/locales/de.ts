@@ -118,7 +118,7 @@ export default {
   onPostTool: 'Nach Werkzeugaufruf (async)', onPostEdit: 'Nach Dateibearbeitung',
   onPreCompact: 'Vor Kontext-Komprimierung', onSessionEnd: 'Beim Sitzungsende',
   pageIntegrations: 'Integrationen',
-  pageIntegrationsDesc: '6 KI-Coding-Tool-Integrationen · Konfigurationen in integrations/',
+  pageIntegrationsDesc: 'Claude Code- und Codex-Plugin-Integrationen',
   loadingIntegrations: 'Integrationsstatus wird geladen…',
   statusInstalled: 'Installiert', statusNotInstalled: 'Nicht installiert',
   sharedResourcesTitle: 'Gemeinsame Ressourcen',

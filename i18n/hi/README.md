@@ -94,14 +94,6 @@ codex plugin marketplace add epicsagas/plugins
 
 स्किल्स और एजेंट तुरंत उपलब्ध — कोई अतिरिक्त चरण आवश्यक नहीं।
 
-### agy (Antigravity CLI)
-
-```bash
-agy plugin install .
-```
-
-27 स्किल्स, hooks और `harness-mem` MCP सर्वर प्लगइन के `plugin.json` + `skills/` + `hooks.json` + `mcp_config.json` से ऑटो-डिस्कवर होते हैं।
-
 ### केवल बाइनरी (प्लगइन होस्ट के बिना)
 
 ```bash
@@ -114,13 +106,13 @@ Homebrew नहीं है? इंस्टॉलर स्क्रिप्�
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/epicsagas/epic-harness/releases/latest/download/install.sh | sh
+  https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harness-installer.sh | sh
 ```
 
 Windows:
 
 ```powershell
-irm https://github.com/epicsagas/epic-harness/releases/latest/download/install.ps1 | iex
+irm https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harness-installer.ps1 | iex
 ```
 
 बाइनरी पहली hook रन पर `~/.harness/config.toml` और `HARNESS.md` को ऑटो-सीड करता है — सेटअप विज़ार्ड या `install` चरण की कोई आवश्यकता नहीं।
@@ -405,10 +397,6 @@ Merge रणनीति: बदले गए एजेंट prompt करत�
 |------|-------------|----------|--------|--------|
 | **Claude Code** | ✓ पूर्ण | ✓ 3 कमांड (incl. /orbit) | ✓ 19 स्किल्स | Live |
 | **Codex CLI** | ✓ पूर्ण | ✓ 3 prompts (incl. /orbit) | ✓ 19 | — |
-| **Antigravity** | ✓ आंशिक¹ | ✓ 3 कमांड (incl. /orbit) | ✓ 19 | — |
-
-¹ केवल PreInvocation/PostInvocation — PreToolUse नहीं (guard/polish अनुपलब्ध)
-
 ---
 
 ## आर्किटेक्चर: 4-रिंग मॉडल

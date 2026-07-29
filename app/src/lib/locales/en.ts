@@ -126,7 +126,7 @@ export default {
   onPostTool: 'After tool call (async)', onPostEdit: 'After file edit',
   onPreCompact: 'Before context compact', onSessionEnd: 'On session end',
   pageIntegrations: 'Integrations',
-  pageIntegrationsDesc: '6 AI coding tool integrations · configs in integrations/',
+  pageIntegrationsDesc: 'Claude Code and Codex plugin integrations',
   loadingIntegrations: 'Loading integration status…',
   statusInstalled: 'Installed', statusNotInstalled: 'Not installed',
   sharedResourcesTitle: 'Shared Resources',

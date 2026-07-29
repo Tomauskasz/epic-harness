@@ -987,8 +987,8 @@ fn handle_harness_cmd(cmd: &str, harness_dir: &std::path::Path, project: Option<
                 .join(".codex/plugins/cache/epicsagas")
                 .exists();
             let codex_installed = codex_legacy || codex_plugin;
-            // null when not installed — matches Cursor/Cline/Aider so the
-            // dashboard never shows a phantom path for an absent Codex.
+            // Use null when Codex is absent so the dashboard does not show a
+            // phantom path.
             let codex_config_path: Option<&str> = if !codex_installed {
                 None
             } else if codex_plugin {
@@ -1006,22 +1006,11 @@ fn handle_harness_cmd(cmd: &str, harness_dir: &std::path::Path, project: Option<
                     "version": null
                 },
                 {
-                    "name": "Antigravity",
-                    "installed": std::path::Path::new(&home)
-                        .join(".gemini/config/mcp_config.json")
-                        .exists(),
-                    "config_path": "~/.gemini/config/mcp_config.json",
-                    "version": null
-                },
-                {
                     "name": "Codex",
                     "installed": codex_installed,
                     "config_path": codex_config_path,
                     "version": null
-                },
-                { "name": "Cursor", "installed": false, "config_path": null, "version": null },
-                { "name": "Cline",  "installed": false, "config_path": null, "version": null },
-                { "name": "Aider",  "installed": false, "config_path": null, "version": null }
+                }
             ]);
             integrations.to_string()
         }

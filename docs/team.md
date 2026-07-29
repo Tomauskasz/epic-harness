@@ -190,7 +190,7 @@ accumulates knowledge from every project that creates or links it.
 
 ## Agent Integration
 
-Each tool's `/team` command delegates to `epic team` (Claude Code, Codex, Antigravity). No team logic lives in the plugin layer — the CLI is the source of truth.
+Each supported tool's `/team` command delegates to `epic team` (Claude Code or Codex). No team logic lives in the plugin layer — the CLI is the source of truth.
 
 ---
 

@@ -107,14 +107,6 @@ codex plugin marketplace add epicsagas/plugins
 
 Skills und Agents sind sofort verfügbar — keine weiteren Schritte erforderlich.
 
-### agy (Antigravity CLI)
-
-```bash
-agy plugin install .
-```
-
-27 Skills, Hooks und der `harness-mem` MCP-Server werden automatisch aus `plugin.json` + `skills/` + `hooks.json` + `mcp_config.json` des Plugins erkannt.
-
 ### Nur Binary (ohne Plugin-Host)
 
 ```bash
@@ -127,13 +119,13 @@ Kein Homebrew? Verwenden Sie das Installationsskript:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/epicsagas/epic-harness/releases/latest/download/install.sh | sh
+  https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harness-installer.sh | sh
 ```
 
 Windows:
 
 ```powershell
-irm https://github.com/epicsagas/epic-harness/releases/latest/download/install.ps1 | iex
+irm https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harness-installer.ps1 | iex
 ```
 
 Das Binary legt `~/.harness/config.toml` und `HARNESS.md` beim ersten Hook-Aufruf automatisch an — kein Setup-Assistent, kein `install`-Schritt.
@@ -466,10 +458,6 @@ Alle Tools teilen dasselbe `~/.harness/projects/{slug}/`-Datenverzeichnis.
 |------|-------------|----------|--------|--------|
 | **Claude Code** | ✓ Vollständig | ✓ 3 Befehle (inkl. /orbit) | ✓ 26 Skills | Live |
 | **Codex CLI** | ✓ Vollständig | ✓ 3 Prompts (inkl. /orbit) | ✓ 26 | — |
-| **Antigravity** | ✓ Teilweise¹ | ✓ 3 Befehle (inkl. /orbit) | ✓ 26 | — |
-
-¹ Nur PreInvocation/PostInvocation — kein PreToolUse (guard/polish nicht verfügbar)
-
 ---
 
 ## Architektur: 4-Ring-Modell

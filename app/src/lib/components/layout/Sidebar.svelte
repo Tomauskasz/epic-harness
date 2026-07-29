@@ -69,7 +69,7 @@
       ringDot: false,
       items: [
         { id: 'memory', icon: '◆', label: 'harness-mem', badge: null },
-        { id: 'integrations', icon: '☷', label: 'Integrations', badge: '6' },
+        { id: 'integrations', icon: '☷', label: 'Integrations', badge: '2' },
       ],
     },
     {

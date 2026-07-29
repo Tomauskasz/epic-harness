@@ -118,7 +118,7 @@ export default {
   onPostTool: 'Após chamada de ferramenta (async)', onPostEdit: 'Após edição de arquivo',
   onPreCompact: 'Antes da compactação de contexto', onSessionEnd: 'Ao encerrar sessão',
   pageIntegrations: 'Integrações',
-  pageIntegrationsDesc: '6 integrações de ferramentas de IA · configs em integrations/',
+  pageIntegrationsDesc: 'Integrações de plugins Claude Code e Codex',
   loadingIntegrations: 'Carregando status de integração…',
   statusInstalled: 'Instalado', statusNotInstalled: 'Não instalado',
   sharedResourcesTitle: 'Recursos compartilhados',

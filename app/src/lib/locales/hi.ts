@@ -118,7 +118,7 @@ export default {
   onPostTool: 'टूल कॉल के बाद (async)', onPostEdit: 'फ़ाइल संपादन के बाद',
   onPreCompact: 'संदर्भ संपीड़न से पहले', onSessionEnd: 'सत्र समाप्त होने पर',
   pageIntegrations: 'एकीकरण',
-  pageIntegrationsDesc: '6 AI कोडिंग टूल एकीकरण · कॉन्फ़िग integrations/ में',
+  pageIntegrationsDesc: 'Claude Code और Codex प्लगइन एकीकरण',
   loadingIntegrations: 'एकीकरण स्थिति लोड हो रही है…',
   statusInstalled: 'स्थापित', statusNotInstalled: 'स्थापित नहीं',
   sharedResourcesTitle: 'साझा संसाधन',

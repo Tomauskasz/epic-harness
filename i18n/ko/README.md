@@ -107,14 +107,6 @@ codex plugin marketplace add epicsagas/plugins
 
 스킬과 에이전트를 즉시 사용할 수 있습니다 — 추가 단계가 필요 없습니다.
 
-### agy (Antigravity CLI)
-
-```bash
-agy plugin install .
-```
-
-27개 스킬, 훅, `harness-mem` MCP 서버가 플러그인의 `plugin.json` + `skills/` + `hooks.json` + `mcp_config.json`에서 자동 발견됩니다.
-
 ### 바이너리만 (플러그인 호스트 없음)
 
 ```bash
@@ -127,13 +119,13 @@ Homebrew가 없다면 인스톨러 스크립트를 사용하세요:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/epicsagas/epic-harness/releases/latest/download/install.sh | sh
+  https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harness-installer.sh | sh
 ```
 
 Windows:
 
 ```powershell
-irm https://github.com/epicsagas/epic-harness/releases/latest/download/install.ps1 | iex
+irm https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harness-installer.ps1 | iex
 ```
 
 바이너리는 첫 훅 실행 시 `~/.harness/config.toml`과 `HARNESS.md`를 자동 시딩합니다 — 설정 마법사나 `install` 단계가 필요 없습니다.
@@ -466,10 +458,6 @@ epic team delete backend --global      # 조직 저장소에서 영구 삭제
 |------|-----------|--------|------|---------|
 | **Claude Code** | ✓ 전체 | ✓ 3개 명령어 (/orbit 포함) | ✓ 26개 스킬 | Live |
 | **Codex CLI** | ✓ 전체 | ✓ 3개 프롬프트 (/orbit 포함) | ✓ 26개 | — |
-| **Antigravity** | ✓ 부분¹ | ✓ 3개 명령어 (/orbit 포함) | ✓ 26개 | — |
-
-¹ PreInvocation/PostInvocation만 — PreToolUse 없음 (guard/polish 불가)
-
 ---
 
 ## 아키텍처: 4-Ring 모델

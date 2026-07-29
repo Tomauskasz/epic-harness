@@ -118,7 +118,7 @@ export default {
   onPostTool: 'ツール呼び出し後 (非同期)', onPostEdit: 'ファイル編集後',
   onPreCompact: 'コンテキスト圧縮前', onSessionEnd: 'セッション終了時',
   pageIntegrations: '統合',
-  pageIntegrationsDesc: 'AIコーディングツール6個の統合 · 設定はintegrations/フォルダ',
+  pageIntegrationsDesc: 'Claude Code と Codex のプラグイン統合',
   loadingIntegrations: '統合ステータスを読み込み中…',
   statusInstalled: 'インストール済み', statusNotInstalled: '未インストール',
   sharedResourcesTitle: '共有リソース',

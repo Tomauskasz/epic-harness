@@ -359,7 +359,7 @@ and is gone.
 Seeded skills start from static templates. `reflect` then emits a
 **pending-synthesis manifest** (`$HARNESS_DIR/pending_synth.jsonl`) for each
 seeded skill — failure evidence (masked error snippets per category, counts,
-detected patterns) plus the template body. A host agent (claude/codex/agy,
+detected patterns) plus the template body. A supported host agent (claude/codex,
 using its own subagent mechanism with no model specified) reads the manifest,
 synthesizes a better body, and applies it via:
 
@@ -539,14 +539,13 @@ When creating a new release tag, update ALL of the following to the same version
 | `Cargo.toml` | `version = "x.y.z"` | `0.4.3` |
 | `Cargo.lock` | `epic-harness` package version | `0.4.3` |
 | `package.json` | `"version": "x.y.z"` | `0.4.3` |
-| `plugin.json` | `"version": "x.y.z"` | `0.4.3` |
 | `app/package.json` | `"version": "x.y.z"` | `0.4.3` |
 | `.claude-plugin/plugin.json` | `"version": "x.y.z"` | `0.4.3` |
 | `.codex-plugin/plugin.json` | `"version": "x.y.z"` | `0.4.3` |
 | Git tag | `vx.y.z` | `v0.4.3` |
 
-All eight must match before tagging. The manifest contract test enumerates the
-seven shipping version files and rejects runtime changes made after an existing
+All seven must match before tagging. The manifest contract test enumerates the
+six shipping version files and rejects runtime changes made after an existing
 version tag. Update `Cargo.lock` with
 `cargo update -p epic-harness --precise x.y.z` after editing `Cargo.toml` — the
 `cargo publish` step of `release.yml` runs without `--allow-dirty`, so a stale

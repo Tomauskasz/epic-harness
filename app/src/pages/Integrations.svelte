@@ -8,12 +8,8 @@
   let error = $state('');
 
   const INTEGRATIONS = [
-    { name: 'Claude Code', id: 'claude-code', description: 'Official Anthropic CLI', setup: 'make install → hooks/bin/', resources: ['8 commands', '12 skills', '4 agents', '6 hooks'] },
-    { name: 'Codex', id: 'codex', description: 'OpenAI Codex CLI', setup: 'copy integrations/codex/', resources: ['hooks.json', 'config.toml', '8 prompts', '7 skills'] },
-    { name: 'Gemini CLI', id: 'gemini', description: 'Google Gemini CLI', setup: 'copy integrations/gemini/', resources: ['settings.json', 'GEMINI.md', '8 commands', '7 skills'] },
-    { name: 'Cursor', id: 'cursor', description: 'Cursor AI editor', setup: 'copy integrations/cursor/', resources: ['hooks.json', '8 commands', '4 agents'] },
-    { name: 'Cline', id: 'cline', description: 'VS Code AI assistant', setup: 'copy integrations/cline/', resources: ['5 hook scripts', 'rules/epic-harness.md'] },
-    { name: 'Aider', id: 'aider', description: 'AI pair programming CLI', setup: 'copy integrations/aider/', resources: ['.aider.conf.yml', 'CONVENTIONS.md'] },
+    { name: 'Claude Code', id: 'claude-code', description: 'Anthropic coding agent', setup: '/plugin install epic@epicsagas', resources: ['Skills', 'Hooks', 'MCP server'] },
+    { name: 'Codex', id: 'codex', description: 'OpenAI coding agent', setup: 'codex plugin marketplace add epicsagas/plugins', resources: ['Skills', 'Hooks', 'MCP server'] },
   ];
 
   const merged = $derived(
@@ -76,28 +72,6 @@
           </div>
         </div>
       {/each}
-    </div>
-
-    <!-- Shared Resources table -->
-    <div class="card">
-      <h3>{$tStore('sharedResourcesTitle')}</h3>
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th>{$tStore('colResource')}</th>
-            <th>Claude Code</th>
-            <th>Codex</th>
-            <th>Gemini</th>
-            <th>Cursor</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr><td>{$tStore('rowCommands')}</td><td>8</td><td>8</td><td>8</td><td>8</td></tr>
-          <tr><td>{$tStore('rowSkills')}</td><td>12</td><td>7</td><td>7</td><td>—</td></tr>
-          <tr><td>{$tStore('rowAgents')}</td><td>4</td><td>4</td><td>4</td><td>4</td></tr>
-          <tr><td>{$tStore('rowHooks')}</td><td>6</td><td>1</td><td>—</td><td>1</td></tr>
-        </tbody>
-      </table>
     </div>
   {/if}
 </div>

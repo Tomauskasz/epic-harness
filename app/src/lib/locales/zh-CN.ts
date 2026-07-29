@@ -118,7 +118,7 @@ export default {
   onPostTool: '工具调用后（异步）', onPostEdit: '文件编辑后',
   onPreCompact: '上下文压缩前', onSessionEnd: '会话结束时',
   pageIntegrations: '集成',
-  pageIntegrationsDesc: '6个AI编码工具集成 · 配置在integrations/文件夹',
+  pageIntegrationsDesc: 'Claude Code 和 Codex 插件集成',
   loadingIntegrations: '正在加载集成状态…',
   statusInstalled: '已安装', statusNotInstalled: '未安装',
   sharedResourcesTitle: '共享资源',

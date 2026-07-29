@@ -99,14 +99,6 @@ epic-harnessは**プラグイン**として配布されます — スキル、�
 
 バイナリ、スキル、フック、`harness-mem` MCPサーバーを一度に自動インストールします。
 
-### agy（Antigravity CLI）
-
-```bash
-agy plugin install .
-```
-
-27個のスキル、フック、`harness-mem` MCPサーバーがプラグインの `plugin.json` + `skills/` + `hooks.json` + `mcp_config.json` から自動検出されます。
-
 ### Codex CLI
 
 ```bash
@@ -127,13 +119,13 @@ Homebrewがない場合はインストーラースクリプトを使用:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/epicsagas/epic-harness/releases/latest/download/install.sh | sh
+  https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harness-installer.sh | sh
 ```
 
 Windows:
 
 ```powershell
-irm https://github.com/epicsagas/epic-harness/releases/latest/download/install.ps1 | iex
+irm https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harness-installer.ps1 | iex
 ```
 
 バイナリは初回フック実行時に `~/.harness/config.toml` と `HARNESS.md` を自動シードします — セットアップウィザードや `install` 手順は不要です。
@@ -466,10 +458,6 @@ epic team delete backend --global      # orgストアから永久に削除
 |------|-------------|----------|--------|--------|
 | **Claude Code** | ✓ フル | ✓ 3コマンド（/orbitを含む） | ✓ 26スキル | Live |
 | **Codex CLI** | ✓ フル | ✓ 3プロンプト（/orbitを含む） | ✓ 26 | — |
-| **Antigravity** | ✓ 部分¹ | ✓ 3コマンド（/orbitを含む） | ✓ 26 | — |
-
-¹ PreInvocation/PostInvocationのみ — PreToolUseなし（guard/polish利用不可）
-
 ---
 
 ## アーキテクチャ: 4-Ring モデル

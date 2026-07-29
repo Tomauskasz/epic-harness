@@ -88,7 +88,9 @@ After the session ends, the **evolve loop** analyzes what broke, generates targe
 
 > **First time?** Read the [Quick Start Guide (5 min)](docs/quickstart.md).
 
-epic-harness ships as a **plugin** — skills, hooks, and the `harness-mem` MCP server are loaded directly from the plugin layout (`skills/`, `hooks.json`, `mcp_config.json`). There is no `install` subcommand; each tool reads the plugin from disk.
+epic-harness supports **Claude Code** and **Codex CLI** plugins. Skills, hooks,
+and the `harness-mem` MCP server load from each host's plugin layout; there is
+no `install` subcommand.
 
 ### Claude Code (recommended)
 
@@ -110,15 +112,6 @@ installs the exact matching `epic-harness` binary and verifies its version
 before it runs `resume`. An install or compatibility failure stops the hook and
 reports the required version.
 
-### agy (Antigravity CLI)
-
-```bash
-agy plugin install https://github.com/epicsagas/epic-harness
-agy plugin enable epic
-```
-
-Skills (27), hooks, and the `harness-mem` MCP server are auto-discovered from the plugin's `plugin.json` + `skills/` + `hooks.json` + `mcp_config.json`.
-
 ### Binary-only (no plugin host)
 
 ```bash
@@ -130,22 +123,22 @@ cargo install epic-harness                   # build from source
 `cargo install` requires Rust 1.94 or newer. It embeds the checked-in dashboard
 asset and does not require Node.js or `pnpm`.
 
-No Homebrew? Use the installer script:
+No Homebrew? Use cargo-dist's generated installer:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/epicsagas/epic-harness/releases/latest/download/install.sh | sh
+  https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harness-installer.sh | sh
 ```
 
 Windows:
 
 ```powershell
-irm https://github.com/epicsagas/epic-harness/releases/latest/download/install.ps1 | iex
+irm https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harness-installer.ps1 | iex
 ```
 
 The binary self-seeds `~/.harness/config.toml` and `HARNESS.md` on the first hook run — no setup wizard, no `install` step.
 
-> `epic-harness --version` to verify. Update with `brew upgrade epic-harness` or re-run the installer script.
+> `epic-harness --version` to verify. Update with `brew upgrade epic-harness` or re-run the cargo-dist installer.
 
 Prerequisites: **Git**. Source/binary installs also need the [Rust toolchain](https://rustup.rs).
 
@@ -506,12 +499,9 @@ All tools share the same `~/.harness/projects/{slug}/` data directory.
 | Tool | Ring 0 Hooks | Commands | Skills | Agents |
 |------|-------------|----------|--------|--------|
 | **Claude Code** | ✓ Full | ✓ 3 commands (incl. /orbit) | ✓ 26 skills | Live |
-| **Codex CLI** | ✓ Full | ✓ 3 prompts (incl. /orbit) | ✓ 26 | Generated² |
-| **Antigravity** | ✓ Partial¹ | ✓ 3 commands (incl. /orbit) | ✓ 26 | — |
+| **Codex CLI** | ✓ Full | ✓ 3 prompts (incl. /orbit) | ✓ 26 | Generated¹ |
 
-¹ PreInvocation/PostInvocation only — no PreToolUse (guard/polish unavailable)
-
-² `epic team sync` writes native Codex custom agents (flat `~/.codex/agents/*.toml` with
+¹ `epic team sync` writes native Codex custom agents (flat `~/.codex/agents/*.toml` with
 `name`/`description`/`developer_instructions`). Epic registers Codex
 `SubagentStart` and `SubagentStop`, retains the host agent ID/type, and updates
 live orchestration state for native Codex subagents.

@@ -195,10 +195,6 @@ test("all package and plugin version owners agree", () => {
       JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version,
     ],
     [
-      "plugin.json",
-      JSON.parse(readFileSync(join(ROOT, "plugin.json"), "utf8")).version,
-    ],
-    [
       "app/package.json",
       JSON.parse(readFileSync(join(ROOT, "app", "package.json"), "utf8"))
         .version,
@@ -376,10 +372,34 @@ test("npm package includes the hook runners and canonical runtime revision", () 
   const packed = JSON.parse(result.stdout);
   const files = new Set(packed[0]?.files?.map((file) => file.path));
   for (const path of [
+    "hooks/hooks.json",
     "registry/scripts/install.js",
     "registry/scripts/run-hook.cmd",
     "runtime-revision.txt",
   ]) {
     assert.ok(files.has(path), `${path} is missing from the npm artifact`);
   }
+  assert.ok(!files.has("plugin.json"), "removed Agy manifest must not ship");
+});
+
+test("dashboard source advertises only the supported plugin hosts", () => {
+  const integrations = readFileSync(
+    join(ROOT, "app", "src", "pages", "Integrations.svelte"),
+    "utf8",
+  );
+  const status = readFileSync(
+    join(ROOT, "src-tauri", "src", "commands", "harness.rs"),
+    "utf8",
+  );
+  const httpStatus = readFileSync(join(ROOT, "src", "serve.rs"), "utf8");
+  const httpStatusHandler = httpStatus
+    .split('"get_integration_status" =>')[1]
+    ?.split('"get_graph" =>')[0];
+
+  assert.match(integrations, /name: 'Claude Code'/);
+  assert.match(integrations, /name: 'Codex'/);
+  assert.doesNotMatch(integrations, /Gemini|Cursor|Cline|Aider|Antigravity/);
+  assert.doesNotMatch(status, /Antigravity|Cursor|Cline|Aider/);
+  assert.ok(httpStatusHandler, "HTTP integration-status handler must exist");
+  assert.doesNotMatch(httpStatusHandler, /Antigravity|Cursor|Cline|Aider/);
 });

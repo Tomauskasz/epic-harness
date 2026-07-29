@@ -1,16 +1,18 @@
 # epic-harness — Quick Start
 
-5 minutes from zero to your first self-evolving Claude Code session.
+5 minutes from zero to your first self-evolving Claude Code or Codex session.
 
 ## Prerequisites
 
-- [Claude Code](https://docs.claude.com/en/docs/claude-code) installed
+- [Claude Code](https://docs.claude.com/en/docs/claude-code) or Codex CLI installed
 - Git
 - [Rust toolchain](https://rustup.rs) (for source/binary install — plugin marketplace doesn't need this)
 
 ## Install
 
-epic-harness ships as a **plugin** — skills, hooks, and the `harness-mem` MCP server load directly from the plugin layout. There is no `install` step; the plugin self-seeds `~/.harness/config.toml` and `HARNESS.md` on the first session.
+epic-harness supports **Claude Code** and **Codex CLI** plugins. There is no
+`install` step; the plugin self-seeds `~/.harness/config.toml` and
+`HARNESS.md` on the first session.
 
 ### Claude Code (recommended)
 
@@ -20,12 +22,6 @@ epic-harness ships as a **plugin** — skills, hooks, and the `harness-mem` MCP 
 ```
 
 The binary is auto-installed and all hooks register in one step.
-
-### agy (Antigravity CLI)
-
-```bash
-agy plugin install .   # from a clone, or via marketplace
-```
 
 ### Codex CLI
 
@@ -38,6 +34,19 @@ codex plugin marketplace add epicsagas/plugins
 ```bash
 brew install epicsagas/tap/epic-harness      # macOS / Linux
 cargo binstall epic-harness                  # or build from source
+```
+
+Or use cargo-dist's generated installer:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harness-installer.sh | sh
+```
+
+Windows:
+
+```powershell
+irm https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harness-installer.ps1 | iex
 ```
 
 > **Telemetry**: anonymous usage reporting is on by default (opt-out). Disable with `epic-harness telemetry off` — see the README [Telemetry](../../README.md#telemetry) section for what is collected.

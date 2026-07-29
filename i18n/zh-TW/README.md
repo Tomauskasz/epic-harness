@@ -107,14 +107,6 @@ codex plugin marketplace add epicsagas/plugins
 
 技能和智能體立即可用 — 無需額外步驟。
 
-### agy（Antigravity CLI）
-
-```bash
-agy plugin install .
-```
-
-27 個技能、掛鉤和 `harness-mem` MCP 伺服器從外掛的 `plugin.json` + `skills/` + `hooks.json` + `mcp_config.json` 自動發現。
-
 ### 僅二進位（無外掛宿主）
 
 ```bash
@@ -127,13 +119,13 @@ cargo install epic-harness                   # 從原始碼建置
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/epicsagas/epic-harness/releases/latest/download/install.sh | sh
+  https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harness-installer.sh | sh
 ```
 
 Windows:
 
 ```powershell
-irm https://github.com/epicsagas/epic-harness/releases/latest/download/install.ps1 | iex
+irm https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harness-installer.ps1 | iex
 ```
 
 二進位檔案在首次掛鉤執行時自動播種 `~/.harness/config.toml` 和 `HARNESS.md` — 無需安裝精靈或 `install` 步驟。
@@ -466,10 +458,6 @@ epic team delete backend --global      # 從組織儲存中永久刪除
 |------|-------------|----------|--------|--------|
 | **Claude Code** | ✓ 完整 | ✓ 3 條命令（含 /orbit） | ✓ 26 個技能 | Live |
 | **Codex CLI** | ✓ 完整 | ✓ 3 條提示詞（含 /orbit） | ✓ 26 | — |
-| **Antigravity** | ✓ 部分¹ | ✓ 3 條命令（含 /orbit） | ✓ 26 | — |
-
-¹ 僅 PreInvocation/PostInvocation — 無 PreToolUse（guard/polish 不可用）
-
 ---
 
 ## 架構：4-Ring 模型

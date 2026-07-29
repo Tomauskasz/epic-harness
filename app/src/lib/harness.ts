@@ -607,10 +607,6 @@ async function browserFallback(cmd: string, args?: Record<string, unknown>): Pro
       return [
         { name: 'Claude Code', installed: true, config_path: '~/.claude/settings.json', version: null },
         { name: 'Codex', installed: false, config_path: null, version: null },
-        { name: 'Gemini CLI', installed: false, config_path: null, version: null },
-        { name: 'Cursor', installed: false, config_path: null, version: null },
-        { name: 'Cline', installed: false, config_path: null, version: null },
-        { name: 'Aider', installed: false, config_path: null, version: null },
       ] satisfies IntegrationStatus[];
 
     default:
