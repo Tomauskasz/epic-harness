@@ -939,33 +939,39 @@ async fn codex_node_runner_persists_one_complete_lifecycle() {
         .expect("project harness slug")
         .to_string();
 
-    let tool_use_id = "codex-lifecycle-read-1";
-    let observed = run_codex_hook(
-        root.path(),
-        &project,
-        "PostToolUse",
-        "observe",
-        &serde_json::json!({
-            "hook_event_name": "PostToolUse",
-            "session_id": session_id,
-            "turn_id": "codex-lifecycle-turn",
-            "tool_use_id": tool_use_id,
-            "tool_name": "Read",
-            "tool_input": {"file_path": "README.md"},
-            "tool_response": {"success": true, "content": "clean read response"},
-        })
-        .to_string(),
-    );
-    assert!(
-        observed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&observed.stderr)
-    );
-    assert!(
-        observed.stdout.is_empty(),
-        "PostToolUse must not emit a Codex response: {}",
-        String::from_utf8_lossy(&observed.stdout)
-    );
+    let tool_use_ids = [
+        "codex-lifecycle-read-1",
+        "codex-lifecycle-read-2",
+        "codex-lifecycle-read-3",
+    ];
+    for (index, tool_use_id) in tool_use_ids.iter().enumerate() {
+        let observed = run_codex_hook(
+            root.path(),
+            &project,
+            "PostToolUse",
+            "observe",
+            &serde_json::json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": session_id,
+                "turn_id": "codex-lifecycle-turn",
+                "tool_use_id": tool_use_id,
+                "tool_name": "Read",
+                "tool_input": {"file_path": format!("README-{index}.md")},
+                "tool_response": {"success": true, "content": "clean read response"},
+            })
+            .to_string(),
+        );
+        assert!(
+            observed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&observed.stderr)
+        );
+        assert!(
+            observed.stdout.is_empty(),
+            "PostToolUse must not emit a Codex response: {}",
+            String::from_utf8_lossy(&observed.stdout)
+        );
+    }
 
     let db_path = global_harness.join("harness.db");
     assert!(db_path.is_file(), "isolated operational database");
@@ -981,7 +987,7 @@ async fn codex_node_runner_persists_one_complete_lifecycle() {
         "SELECT session_id, project, tool_category, result, score, dim_success, dim_quality, \
          dim_cost, failure_category FROM observations WHERE tool_use_id = ?",
     )
-    .bind(tool_use_id)
+    .bind(tool_use_ids[0])
     .fetch_one(&database)
     .await
     .expect("persisted Read observation");
@@ -1023,6 +1029,24 @@ async fn codex_node_runner_persists_one_complete_lifecycle() {
             .try_get::<Option<String>, _>("failure_category")
             .expect("observation failure category"),
         None
+    );
+    let successful_reads: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM observations
+         WHERE session_id = ? AND project = ? AND tool_category = 'read' AND result = 'success'
+           AND score = 1.0 AND dim_success = 1.0 AND dim_quality = 1.0 AND dim_cost = 1.0
+           AND tool_use_id IN (?, ?, ?)",
+    )
+    .bind(&expected_session)
+    .bind(&expected_project)
+    .bind(tool_use_ids[0])
+    .bind(tool_use_ids[1])
+    .bind(tool_use_ids[2])
+    .fetch_one(&database)
+    .await
+    .expect("all successful Read observations");
+    assert_eq!(
+        successful_reads, 3,
+        "every Read must be scored as successful"
     );
 
     let snapshot = run_codex_hook(
@@ -1098,15 +1122,68 @@ async fn codex_node_runner_persists_one_complete_lifecycle() {
     );
     wait_for_completed_jobs(&harness.join("reflect-queue"), 1);
 
-    let reflected: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM reflection_sessions WHERE session_id = ? AND project = ?",
+    let metrics_applied: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reflection_metrics WHERE session_id = ? AND project = ?",
     )
     .bind(&expected_session)
     .bind(&expected_project)
     .fetch_one(&database)
     .await
-    .expect("reflection completion count");
-    assert_eq!(reflected, 1, "one durable reflection completion");
+    .expect("reflection metrics count");
+    assert_eq!(metrics_applied, 1, "one session-scoped metrics update");
+    let score_history = sqlx::query(
+        "SELECT observations, success_rate, avg_score, dim_success, dim_quality, dim_cost
+         FROM score_history WHERE project = ? ORDER BY id DESC LIMIT 1",
+    )
+    .bind(&expected_project)
+    .fetch_one(&database)
+    .await
+    .expect("project score history");
+    assert_eq!(
+        score_history
+            .try_get::<i64, _>("observations")
+            .expect("score history observations"),
+        3
+    );
+    for column in [
+        "success_rate",
+        "avg_score",
+        "dim_success",
+        "dim_quality",
+        "dim_cost",
+    ] {
+        assert_eq!(
+            score_history
+                .try_get::<f64, _>(column)
+                .expect("score history metric"),
+            1.0,
+            "{column}"
+        );
+    }
+    let evolution = sqlx::query(
+        "SELECT observations, success_rate, avg_score FROM evolution_records
+         WHERE session_id = ? AND project = ?",
+    )
+    .bind(&expected_session)
+    .bind(&expected_project)
+    .fetch_one(&database)
+    .await
+    .expect("session-scoped evolution record");
+    assert_eq!(
+        evolution
+            .try_get::<i64, _>("observations")
+            .expect("evolution observations"),
+        3
+    );
+    for column in ["success_rate", "avg_score"] {
+        assert_eq!(
+            evolution
+                .try_get::<f64, _>(column)
+                .expect("evolution metric"),
+            1.0,
+            "{column}"
+        );
+    }
     database.close().await;
 }
 
