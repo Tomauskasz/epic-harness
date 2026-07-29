@@ -269,10 +269,11 @@ file-level pattern detection needs — and capped at 2 KB.
 `reflect` only reports any pipeline marked `complete` whose own state
 contradicts it: missing or malformed integer retry evidence, `audit_fail_count`
 at or above `max_retries`, no concrete GitHub pull-request URL in `pr_url`,
-`ci_status` other than `success`, or `phase` other than `evolve`. Detection never
-writes completion state. `epic orbit complete` is the sole validated atomic
-completion path: invalid state is byte-preserving, and an already-valid complete
-file is idempotently byte-preserving.
+`ci_status` other than `success`, `phase` other than `evolve`, or no durable
+`evolution_session_id`. Detection never writes completion state. Only the
+SessionEnd reflection worker, after it records durable reflection completion,
+atomically completes pipeline ids observed in that session. `epic orbit complete`
+rejects because a manual CLI has no validated SessionEnd identity.
 
 `turn_id` is retained but is not yet used to model turn-scoped analysis.
 Project identity is a sanitized canonical project-root name plus a stable hash,

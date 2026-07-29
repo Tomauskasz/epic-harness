@@ -196,42 +196,111 @@ pub fn completion_violations(pipeline: &serde_json::Value) -> Vec<String> {
         violations.push("completed without ci_status=\"success\" evidence".to_string());
     }
 
+    if !pipeline
+        .get("evolution_session_id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|session_id| !session_id.trim().is_empty())
+    {
+        violations.push("completed without durable SessionEnd evolution evidence".to_string());
+    }
+
     violations
 }
 
-/// Mark the latest running Orbit pipeline complete after validating its evidence.
-///
-/// This is the only completion persistence path. It accepts a valid legacy
-/// completion unchanged, but never changes invalid state. The target must be a
-/// regular file below the regular `harness_dir/orbit` directory; valid writes
-/// are staged and atomically replaced.
+/// Reject manual Orbit completion because it has no validated SessionEnd identity.
 pub fn complete_pipeline_in(harness_dir: &Path) -> io::Result<()> {
-    let orbit_dir = regular_orbit_dir(harness_dir)?;
-    let (pipeline_path, state) = completion_candidate(&orbit_dir, harness_dir)?;
-    let status = state
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "Orbit pipeline has no status")
-        })?;
+    let _ = harness_dir;
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "Orbit completion is reserved for durable SessionEnd reflection",
+    ))
+}
 
-    if status == "complete" {
-        return ensure_valid_completion(&state);
+/// Atomically finish only pipelines observed in a SessionEnd reflection after
+/// that reflection's durable completion record has been committed.
+pub fn complete_pipelines_after_reflection_in(
+    harness_dir: &Path,
+    reflection_session_id: &str,
+    pipeline_ids: &[String],
+) -> io::Result<usize> {
+    if reflection_session_id.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reflection session identity is empty",
+        ));
     }
-
-    let mut completed = state;
-    let object = completed.as_object_mut().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Orbit pipeline state must be a JSON object",
-        )
-    })?;
-    object.insert(
-        "status".into(),
-        serde_json::Value::String("complete".into()),
-    );
-    ensure_valid_completion(&completed)?;
-    atomic_write_pipeline(&pipeline_path, harness_dir, &orbit_dir, &completed)
+    let orbit_dir = regular_orbit_dir(harness_dir)?;
+    let mut completed = 0;
+    for entry in fs::read_dir(&orbit_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("PIPELINE-") || !name.ends_with(".json") {
+            continue;
+        }
+        validate_pipeline_path(&path, harness_dir, &orbit_dir)?;
+        let content = fs::read_to_string(&path)?;
+        let mut state: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid Orbit pipeline {}: {error}", path.display()),
+            )
+        })?;
+        if state.get("status").and_then(serde_json::Value::as_str) != Some("running") {
+            continue;
+        }
+        let Some(id) = state.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !pipeline_ids
+            .iter()
+            .any(|candidate| normalize_pipeline_id(candidate) == normalize_pipeline_id(id))
+        {
+            continue;
+        }
+        let object = state.as_object_mut().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Orbit pipeline state must be a JSON object",
+            )
+        })?;
+        object.insert(
+            "status".into(),
+            serde_json::Value::String("complete".into()),
+        );
+        object.insert("phase".into(), serde_json::Value::String("evolve".into()));
+        object.insert(
+            "evolution_session_id".into(),
+            serde_json::Value::String(reflection_session_id.into()),
+        );
+        let evolve = serde_json::json!({
+            "phase": "evolve",
+            "status": "complete",
+            "session_id": reflection_session_id,
+        });
+        match object.get_mut("phase_history") {
+            Some(serde_json::Value::Array(history)) => history.push(evolve),
+            Some(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Orbit pipeline phase_history must be an array",
+                ));
+            }
+            None => {
+                object.insert(
+                    "phase_history".into(),
+                    serde_json::Value::Array(vec![evolve]),
+                );
+            }
+        }
+        ensure_valid_completion(&state)?;
+        atomic_write_pipeline(&path, harness_dir, &orbit_dir, &state)?;
+        completed += 1;
+    }
+    Ok(completed)
 }
 
 fn ensure_valid_completion(state: &serde_json::Value) -> io::Result<()> {
@@ -269,53 +338,6 @@ fn regular_orbit_dir(harness_dir: &Path) -> io::Result<PathBuf> {
         ));
     }
     Ok(orbit_dir)
-}
-
-fn completion_candidate(
-    orbit_dir: &Path,
-    harness_dir: &Path,
-) -> io::Result<(PathBuf, serde_json::Value)> {
-    let mut running = Vec::new();
-    let mut complete = Vec::new();
-    for entry in fs::read_dir(orbit_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !name.starts_with("PIPELINE-") || !name.ends_with(".json") {
-            continue;
-        }
-        let path = entry.path();
-        validate_pipeline_path(&path, harness_dir, orbit_dir)?;
-        let content = fs::read_to_string(&path)?;
-        let state: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("invalid Orbit pipeline {}: {error}", path.display()),
-            )
-        })?;
-        match state.get("status").and_then(serde_json::Value::as_str) {
-            Some("running") => running.push((name.to_owned(), path, state)),
-            Some("complete") => complete.push((name.to_owned(), path, state)),
-            _ => {}
-        }
-    }
-    let candidates = if running.is_empty() {
-        &mut complete
-    } else {
-        &mut running
-    };
-    candidates.sort_by(|left, right| left.0.cmp(&right.0));
-    candidates
-        .pop()
-        .map(|(_, path, state)| (path, state))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "no running or complete Orbit pipeline found",
-            )
-        })
 }
 
 fn validate_pipeline_path(path: &Path, harness_dir: &Path, orbit_dir: &Path) -> io::Result<()> {
@@ -489,6 +511,7 @@ mod completion_tests {
             "max_retries": 3,
             "pr_url": "https://github.com/o/r/pull/1",
             "ci_status": "success",
+            "evolution_session_id": "20260729_host",
             "phase_history": [{"phase": "ship", "status": "complete"}]
         });
         assert!(violations(&pipeline).is_empty());
@@ -538,7 +561,8 @@ mod completion_tests {
             "audit_fail_count": 5,
             "max_retries": 3,
             "pr_url": "https://github.com/o/r/pull/1",
-            "ci_status": "success"
+            "ci_status": "success",
+            "evolution_session_id": "20260729_host"
         });
         let v = violations(&pipeline);
         assert_eq!(v.len(), 1, "{v:?}");
@@ -547,7 +571,7 @@ mod completion_tests {
 
     #[test]
     fn completing_without_pr_or_ci_evidence_is_reported() {
-        let pipeline = json!({"status": "complete", "phase": "evolve", "audit_fail_count": 0, "max_retries": 3});
+        let pipeline = json!({"status": "complete", "phase": "evolve", "audit_fail_count": 0, "max_retries": 3, "evolution_session_id": "20260729_host"});
         let v = violations(&pipeline);
         assert_eq!(v.len(), 2, "{v:?}");
         assert!(v.iter().any(|message| message.contains("pull-request URL")));
@@ -561,6 +585,7 @@ mod completion_tests {
             "phase": "evolve",
             "audit_fail_count": 0,
             "max_retries": 3,
+            "evolution_session_id": "20260729_host",
             "phase_history": [{"phase": "ship", "status": "complete"}]
         });
         let found = violations(&pipeline);
@@ -569,7 +594,7 @@ mod completion_tests {
 
     #[test]
     fn a_blank_pr_url_is_not_evidence() {
-        let pipeline = json!({"status": "complete", "phase": "evolve", "audit_fail_count": 0, "max_retries": 3, "pr_url": "   ", "ci_status": "success"});
+        let pipeline = json!({"status": "complete", "phase": "evolve", "audit_fail_count": 0, "max_retries": 3, "pr_url": "   ", "ci_status": "success", "evolution_session_id": "20260729_host"});
         assert_eq!(violations(&pipeline).len(), 1);
     }
 
@@ -581,7 +606,8 @@ mod completion_tests {
             "audit_fail_count": 0,
             "max_retries": 3,
             "pr_url": "https://github.com/o/r/issues/1",
-            "ci_status": "success"
+            "ci_status": "success",
+            "evolution_session_id": "20260729_host"
         });
         assert_eq!(violations(&pipeline).len(), 1);
     }
@@ -593,7 +619,8 @@ mod completion_tests {
             "phase": "evolve",
             "audit_fail_count": 0,
             "max_retries": 3,
-            "pr_url": "https://github.com/o/r/pull/1"
+            "pr_url": "https://github.com/o/r/pull/1",
+            "evolution_session_id": "20260729_host"
         });
         let found = violations(&pipeline);
         assert_eq!(found.len(), 1, "{found:?}");
@@ -602,12 +629,12 @@ mod completion_tests {
 
     #[test]
     fn completion_evidence_violations_report_independently() {
-        let pipeline = json!({"status": "complete", "phase": "evolve", "audit_fail_count": 4, "max_retries": 3});
+        let pipeline = json!({"status": "complete", "phase": "evolve", "audit_fail_count": 4, "max_retries": 3, "evolution_session_id": "20260729_host"});
         assert_eq!(violations(&pipeline).len(), 3);
     }
 
     #[test]
-    fn complete_command_commits_a_valid_running_pipeline() {
+    fn reflection_completion_commits_an_observed_running_pipeline() {
         let harness = tempfile::tempdir().unwrap();
         let orbit = harness.path().join("orbit");
         fs::create_dir(&orbit).unwrap();
@@ -618,12 +645,21 @@ mod completion_tests {
         )
         .unwrap();
 
-        super::complete_pipeline_in(harness.path()).unwrap();
+        assert_eq!(
+            super::complete_pipelines_after_reflection_in(
+                harness.path(),
+                "20260729_host",
+                &["valid".into()],
+            )
+            .unwrap(),
+            1,
+        );
 
         let state: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(pipeline).unwrap()).unwrap();
         assert_eq!(state["status"], "complete");
         assert_eq!(state["phase"], "evolve");
+        assert_eq!(state["evolution_session_id"], "20260729_host");
     }
 
     #[test]
@@ -725,7 +761,7 @@ mod completion_tests {
     }
 
     #[test]
-    fn complete_command_is_idempotent_for_a_valid_legacy_completion() {
+    fn manual_completion_rejects_even_a_valid_legacy_completion() {
         let harness = tempfile::tempdir().unwrap();
         let orbit = harness.path().join("orbit");
         fs::create_dir(&orbit).unwrap();
@@ -733,7 +769,7 @@ mod completion_tests {
         let before = r#"{"id":"complete","status":"complete","phase":"evolve","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#;
         fs::write(&pipeline, before).unwrap();
 
-        super::complete_pipeline_in(harness.path()).unwrap();
+        assert!(super::complete_pipeline_in(harness.path()).is_err());
 
         assert_eq!(fs::read_to_string(pipeline).unwrap(), before);
     }
