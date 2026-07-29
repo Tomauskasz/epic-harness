@@ -280,6 +280,16 @@ fn installed_npx_args<'a>(package: &'a str, args: &'a [&'a str]) -> Vec<&'a str>
     installed_only
 }
 
+#[cfg(windows)]
+const fn npx_program() -> &'static str {
+    "npx.cmd"
+}
+
+#[cfg(not(windows))]
+const fn npx_program() -> &'static str {
+    "npx"
+}
+
 fn feedback_to_observe(
     file_path: &str,
     formatter: &str,
@@ -385,7 +395,7 @@ fn check_ts(targets: &[PathBuf], wd: &Path, deadline: Instant) -> io::Result<()>
         ));
     }
     let output = run_command_with_timeout(
-        "npx",
+        npx_program(),
         &["tsc", "--noEmit", "--pretty", "false"],
         wd,
         remaining.min(FORMATTER_TIMEOUT),
@@ -607,14 +617,14 @@ fn polish_targets(targets: &[PathBuf], wd: &Path) -> io::Result<()> {
         let _ = format_batch(
             &javascript,
             "biome",
-            "npx",
+            npx_program(),
             &["biome", "format", "--write"],
             wd,
             deadline,
         )?;
     } else if wd.join(".prettierrc").is_file() || wd.join(".prettierrc.json").is_file() {
         let args = installed_npx_args("prettier", &["--write"]);
-        let _ = format_batch(&javascript, "prettier", "npx", &args, wd, deadline)?;
+        let _ = format_batch(&javascript, "prettier", npx_program(), &args, wd, deadline)?;
     }
 
     let python = by_extension(&["py"]);
@@ -659,6 +669,7 @@ pub fn run(input: &HookInput) -> i32 {
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
@@ -986,6 +997,70 @@ mod tests {
         assert_eq!(
             installed_npx_args("prettier", &["--write"]),
             vec!["--no", "prettier", "--write"]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn npx_program_executes_path_provided_cmd_fixture() {
+        assert_eq!(npx_program(), "npx.cmd");
+
+        let dir = tempdir().unwrap();
+        let fixture_dir = dir.path().join("bin");
+        let invocation = dir.path().join("invocation.txt");
+        fs::create_dir(&fixture_dir).unwrap();
+        fs::write(
+            fixture_dir.join("npx.cmd"),
+            "@echo npx.cmd %* > \"%NPX_FIXTURE_OUTPUT%\"\r\n",
+        )
+        .unwrap();
+
+        let output = Command::new(npx_program())
+            .args(["tsc", "--noEmit"])
+            .current_dir(dir.path())
+            .env("PATH", &fixture_dir)
+            .env("NPX_FIXTURE_OUTPUT", &invocation)
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(
+            fs::read_to_string(invocation).unwrap().trim(),
+            "npx.cmd tsc --noEmit"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npx_program_executes_path_provided_unix_fixture() {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_eq!(npx_program(), "npx");
+
+        let dir = tempdir().unwrap();
+        let fixture_dir = dir.path().join("bin");
+        let invocation = dir.path().join("invocation.txt");
+        let fixture = fixture_dir.join("npx");
+        fs::create_dir(&fixture_dir).unwrap();
+        fs::write(
+            &fixture,
+            "#!/bin/sh\nprintf 'npx %s\\n' \"$*\" > \"$NPX_FIXTURE_OUTPUT\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fixture, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let output = Command::new(npx_program())
+            .args(["tsc", "--noEmit"])
+            .current_dir(dir.path())
+            .env("PATH", &fixture_dir)
+            .env("NPX_FIXTURE_OUTPUT", &invocation)
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(
+            fs::read_to_string(invocation).unwrap().trim(),
+            "npx tsc --noEmit"
         );
     }
 
