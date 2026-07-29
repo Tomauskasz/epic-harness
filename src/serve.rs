@@ -1086,12 +1086,32 @@ async fn dashboard_pipelines_from_store(
     pool: &sqlx::AnyPool,
     project: Option<&str>,
 ) -> std::io::Result<Vec<serde_json::Value>> {
-    crate::store::orbit_store::list_pipelines_scoped_pool(
+    let mut pipelines = crate::store::orbit_store::list_pipelines_scoped_pool(
         pool,
         project,
         MAX_DASHBOARD_PIPELINES as i64,
     )
-    .await
+    .await?;
+    for pipeline in &mut pipelines {
+        let durable = match (
+            pipeline.get("status").and_then(serde_json::Value::as_str),
+            pipeline
+                .get("evolution_session_id")
+                .and_then(serde_json::Value::as_str),
+            pipeline.get("project").and_then(serde_json::Value::as_str),
+            pipeline.get("id").and_then(serde_json::Value::as_str),
+        ) {
+            (Some("complete") | Some("shipped"), Some(session_id), Some(project), Some(id)) => {
+                crate::store::evolution::reflection_pipeline_completed_pool(
+                    pool, session_id, project, id,
+                )
+                .await?
+            }
+            _ => false,
+        };
+        pipeline["_durable_evolution"] = serde_json::Value::Bool(durable);
+    }
+    Ok(pipelines)
 }
 
 #[cfg(test)]

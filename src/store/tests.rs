@@ -33,6 +33,8 @@ async fn schema_creates_all_tables() {
         "orch_runs",
         "orbit_pipelines",
         "promotion_counters",
+        "reflection_pipeline_ids",
+        "reflection_sessions",
         "score_history",
         "sessions",
         "skill_attribution",

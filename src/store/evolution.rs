@@ -30,6 +30,30 @@ pub async fn mark_reflection_completed_pool(
     session_id: &str,
     project: &str,
 ) -> io::Result<()> {
+    mark_reflection_completed_with_pipelines_pool(pool, session_id, project, &[]).await
+}
+
+/// Atomically commit a reflection replay boundary and the exact Orbit pipeline
+/// ids observed in that SessionEnd. The mapping is required to finish Orbit
+/// after a later retry: JSONL fallback observations may no longer be readable
+/// once the completion checkpoint itself has committed.
+pub async fn mark_reflection_completed_with_pipelines_pool(
+    pool: &AnyPool,
+    session_id: &str,
+    project: &str,
+    pipeline_ids: &[String],
+) -> io::Result<()> {
+    let mut ids = pipeline_ids.to_vec();
+    ids.sort();
+    ids.dedup();
+    if ids.iter().any(|id| id.is_empty()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reflection pipeline identity is empty",
+        ));
+    }
+
+    let mut transaction = pool.begin().await.map_err(super::sqlx_err)?;
     sqlx::query(
         "INSERT INTO reflection_sessions (session_id, project, completed_at)
          VALUES (?, ?, ?)
@@ -38,10 +62,72 @@ pub async fn mark_reflection_completed_pool(
     .bind(session_id)
     .bind(project)
     .bind(crate::shared::helpers::now_iso())
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(super::sqlx_err)?;
+    for pipeline_id in ids {
+        sqlx::query(
+            "INSERT INTO reflection_pipeline_ids (session_id, project, pipeline_id)
+             VALUES (?, ?, ?)
+             ON CONFLICT (session_id, project, pipeline_id) DO NOTHING",
+        )
+        .bind(session_id)
+        .bind(project)
+        .bind(pipeline_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(super::sqlx_err)?;
+    }
+    transaction.commit().await.map_err(super::sqlx_err)?;
     Ok(())
+}
+
+/// Return the exact pipeline ids durably associated with one completed
+/// SessionEnd reflection. Never derive this from normalized ids or from a
+/// best-effort observation projection.
+pub async fn reflection_pipeline_ids_pool(
+    pool: &AnyPool,
+    session_id: &str,
+    project: &str,
+) -> io::Result<Vec<String>> {
+    sqlx::query_scalar(
+        "SELECT pipeline_id FROM reflection_pipeline_ids
+         WHERE session_id = ? AND project = ?
+         ORDER BY pipeline_id",
+    )
+    .bind(session_id)
+    .bind(project)
+    .fetch_all(pool)
+    .await
+    .map_err(super::sqlx_err)
+}
+
+/// True only when a completed SessionEnd record and its exact pipeline mapping
+/// both exist. A pipeline's self-reported `evolution_session_id` is not proof.
+pub async fn reflection_pipeline_completed_pool(
+    pool: &AnyPool,
+    session_id: &str,
+    project: &str,
+    pipeline_id: &str,
+) -> io::Result<bool> {
+    let found: Option<i64> = sqlx::query_scalar(
+        "SELECT 1
+         FROM reflection_pipeline_ids AS pipelines
+         JOIN reflection_sessions AS sessions
+           ON sessions.session_id = pipelines.session_id
+          AND sessions.project = pipelines.project
+         WHERE pipelines.session_id = ?
+           AND pipelines.project = ?
+           AND pipelines.pipeline_id = ?
+         LIMIT 1",
+    )
+    .bind(session_id)
+    .bind(project)
+    .bind(pipeline_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(super::sqlx_err)?;
+    Ok(found.is_some())
 }
 
 /// Insert an evolution record, scoped to `project`.
@@ -296,6 +382,32 @@ mod tests {
             !reflection_completed_pool(&pool, "session-a", "project-b")
                 .await
                 .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn reflection_completion_records_exact_pipeline_ids_for_replay() {
+        let pool = test_pool().await;
+
+        super::mark_reflection_completed_with_pipelines_pool(
+            &pool,
+            "session-a",
+            "project-a",
+            &["a/b".into()],
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            super::reflection_pipeline_completed_pool(&pool, "session-a", "project-a", "a/b")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !super::reflection_pipeline_completed_pool(&pool, "session-a", "project-a", "a?b")
+                .await
+                .unwrap(),
+            "a normalized collision must not inherit completion evidence"
         );
     }
 

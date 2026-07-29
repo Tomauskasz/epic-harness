@@ -190,7 +190,10 @@ identity and persisted session date.
 1. Verify `ci_status` is `"success"`, set `"phase": "awaiting_evolution"`, and
    leave `"status": "running"`. SessionEnd triggers the Ring 3 loop.
    Its durable worker analyzes observations, seeds evolved skills, updates metrics,
-   and is the only component that records `phase: "evolve"` and completion.
+   and is the only component that records `phase: "evolve"` and completion. It
+   accepts only the exact pipeline ids observed in that SessionEnd and requires
+   the existing `phase_history` array; it never repairs or invents pipeline
+   phase/history state.
 
    If `$HARNESS_DIR/pending_synth.jsonl` has records with `status: "pending"`,
    synthesize each — launch one subagent per manifest (use your host's subagent

@@ -145,6 +145,17 @@ pub fn normalize_pipeline_id(id: &str) -> String {
 /// self-consistent. Pipelines that are not complete are not checked — an
 /// in-flight pipeline is legitimately missing most of this.
 pub fn completion_violations(pipeline: &serde_json::Value) -> Vec<String> {
+    completion_violations_with_durable_evolution(pipeline, true)
+}
+
+/// Check completion invariants with separately verified SessionEnd evidence.
+/// A nonempty `evolution_session_id` is only self-assertion; callers that make
+/// a persistence or visibility decision must pass whether the exact
+/// `(project, session_id, pipeline_id)` mapping exists in durable storage.
+pub fn completion_violations_with_durable_evolution(
+    pipeline: &serde_json::Value,
+    durable_evolution: bool,
+) -> Vec<String> {
     let status = pipeline.get("status").and_then(|v| v.as_str());
     if !matches!(status, Some("complete") | Some("shipped")) {
         return Vec::new();
@@ -202,6 +213,11 @@ pub fn completion_violations(pipeline: &serde_json::Value) -> Vec<String> {
         .is_some_and(|session_id| !session_id.trim().is_empty())
     {
         violations.push("completed without durable SessionEnd evolution evidence".to_string());
+    } else if !durable_evolution {
+        violations.push(
+            "completed with an evolution_session_id that has no durable SessionEnd pipeline record"
+                .to_string(),
+        );
     }
 
     violations
@@ -221,6 +237,7 @@ pub fn complete_pipeline_in(harness_dir: &Path) -> io::Result<()> {
 pub fn complete_pipelines_after_reflection_in(
     harness_dir: &Path,
     reflection_session_id: &str,
+    project: &str,
     pipeline_ids: &[String],
 ) -> io::Result<usize> {
     if reflection_session_id.trim().is_empty() {
@@ -229,8 +246,36 @@ pub fn complete_pipelines_after_reflection_in(
             "reflection session identity is empty",
         ));
     }
+    let durable_pipeline_ids = crate::store::runtime::block_on(async {
+        let pool = crate::store::pool::harness_pool().await?;
+        crate::store::evolution::reflection_pipeline_ids_pool(&pool, reflection_session_id, project)
+            .await
+    })?;
+    let mut requested_pipeline_ids = pipeline_ids.to_vec();
+    requested_pipeline_ids.sort();
+    requested_pipeline_ids.dedup();
+    if durable_pipeline_ids != requested_pipeline_ids {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Orbit completion ids do not exactly match durable SessionEnd evidence",
+        ));
+    }
+    complete_pipelines_after_verified_reflection_in(
+        harness_dir,
+        reflection_session_id,
+        &requested_pipeline_ids,
+    )
+}
+
+fn complete_pipelines_after_verified_reflection_in(
+    harness_dir: &Path,
+    reflection_session_id: &str,
+    pipeline_ids: &[String],
+) -> io::Result<usize> {
     let orbit_dir = regular_orbit_dir(harness_dir)?;
-    let mut completed = 0;
+    let expected_ids: std::collections::BTreeSet<&str> =
+        pipeline_ids.iter().map(String::as_str).collect();
+    let mut pending = Vec::new();
     for entry in fs::read_dir(&orbit_dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -243,7 +288,7 @@ pub fn complete_pipelines_after_reflection_in(
         }
         validate_pipeline_path(&path, harness_dir, &orbit_dir)?;
         let content = fs::read_to_string(&path)?;
-        let mut state: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+        let state: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("invalid Orbit pipeline {}: {error}", path.display()),
@@ -255,12 +300,15 @@ pub fn complete_pipelines_after_reflection_in(
         let Some(id) = state.get("id").and_then(serde_json::Value::as_str) else {
             continue;
         };
-        if !pipeline_ids
-            .iter()
-            .any(|candidate| normalize_pipeline_id(candidate) == normalize_pipeline_id(id))
-        {
+        if !expected_ids.contains(id) {
             continue;
         }
+        validate_ready_for_reflection_completion(&state)?;
+        pending.push((path, state));
+    }
+
+    let mut completed = 0;
+    for (path, mut state) in pending {
         let object = state.as_object_mut().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -276,35 +324,34 @@ pub fn complete_pipelines_after_reflection_in(
             "evolution_session_id".into(),
             serde_json::Value::String(reflection_session_id.into()),
         );
-        let evolve = serde_json::json!({
-            "phase": "evolve",
-            "status": "complete",
-            "session_id": reflection_session_id,
-        });
-        match object.get_mut("phase_history") {
-            Some(serde_json::Value::Array(history)) => history.push(evolve),
-            Some(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Orbit pipeline phase_history must be an array",
-                ));
-            }
-            None => {
-                object.insert(
-                    "phase_history".into(),
-                    serde_json::Value::Array(vec![evolve]),
-                );
-            }
-        }
-        ensure_valid_completion(&state)?;
+        ensure_valid_completion(&state, true)?;
         atomic_write_pipeline(&path, harness_dir, &orbit_dir, &state)?;
         completed += 1;
     }
     Ok(completed)
 }
 
-fn ensure_valid_completion(state: &serde_json::Value) -> io::Result<()> {
-    let violations = completion_violations(state);
+fn validate_ready_for_reflection_completion(state: &serde_json::Value) -> io::Result<()> {
+    if state.get("phase").and_then(serde_json::Value::as_str) != Some("awaiting_evolution") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Orbit pipeline must explicitly be awaiting_evolution before SessionEnd completion",
+        ));
+    }
+    if !matches!(
+        state.get("phase_history"),
+        Some(serde_json::Value::Array(_))
+    ) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Orbit pipeline phase_history must already be an array",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_valid_completion(state: &serde_json::Value, durable_evolution: bool) -> io::Result<()> {
+    let violations = completion_violations_with_durable_evolution(state, durable_evolution);
     if violations.is_empty() {
         Ok(())
     } else {
@@ -419,7 +466,16 @@ fn atomic_write_pipeline(
 }
 
 pub fn pipeline_is_dashboard_visible(pipeline: &serde_json::Value) -> bool {
+    let completed = matches!(
+        pipeline.get("status").and_then(serde_json::Value::as_str),
+        Some("complete") | Some("shipped")
+    );
     completion_violations(pipeline).is_empty()
+        && (!completed
+            || pipeline
+                .get("_durable_evolution")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true))
 }
 
 /// Filter dashboard pipeline state to one project before sorting and limiting.
@@ -518,6 +574,28 @@ mod completion_tests {
     }
 
     #[test]
+    fn a_self_asserted_evolution_session_is_not_durable_completion_evidence() {
+        let pipeline = json!({
+            "status": "complete",
+            "phase": "evolve",
+            "audit_fail_count": 0,
+            "max_retries": 3,
+            "pr_url": "https://github.com/o/r/pull/1",
+            "ci_status": "success",
+            "evolution_session_id": "invented-session",
+            "phase_history": []
+        });
+
+        let violations = super::completion_violations_with_durable_evolution(&pipeline, false);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("no durable SessionEnd pipeline record")),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
     fn a_running_pipeline_is_not_checked() {
         // In-flight state is legitimately incomplete.
         let pipeline = json!({"status": "running", "audit_fail_count": 9, "max_retries": 3});
@@ -527,6 +605,21 @@ mod completion_tests {
     #[test]
     fn invalid_completion_is_hidden_from_dashboard_consumers() {
         let pipeline = json!({"status": "complete"});
+        assert!(!super::pipeline_is_dashboard_visible(&pipeline));
+    }
+
+    #[test]
+    fn completed_pipeline_without_durable_mapping_is_hidden_from_dashboard_consumers() {
+        let pipeline = json!({
+            "status": "complete",
+            "phase": "evolve",
+            "audit_fail_count": 0,
+            "max_retries": 3,
+            "pr_url": "https://github.com/o/r/pull/1",
+            "ci_status": "success",
+            "evolution_session_id": "invented-session",
+            "phase_history": []
+        });
         assert!(!super::pipeline_is_dashboard_visible(&pipeline));
     }
 
@@ -641,12 +734,12 @@ mod completion_tests {
         let pipeline = orbit.join("PIPELINE-20260729-valid.json");
         fs::write(
             &pipeline,
-            r#"{"id":"valid","status":"running","phase":"evolve","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#,
+            r#"{"id":"valid","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#,
         )
         .unwrap();
 
         assert_eq!(
-            super::complete_pipelines_after_reflection_in(
+            super::complete_pipelines_after_verified_reflection_in(
                 harness.path(),
                 "20260729_host",
                 &["valid".into()],
@@ -660,6 +753,107 @@ mod completion_tests {
         assert_eq!(state["status"], "complete");
         assert_eq!(state["phase"], "evolve");
         assert_eq!(state["evolution_session_id"], "20260729_host");
+    }
+
+    #[test]
+    fn reflection_completion_rejects_a_pipeline_that_is_not_awaiting_evolution_without_changing_bytes()
+     {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-20260729-not-ready.json");
+        let before = r#"{"id":"not-ready","status":"running","phase":"ship","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
+        fs::write(&pipeline, before).unwrap();
+
+        assert!(
+            super::complete_pipelines_after_verified_reflection_in(
+                harness.path(),
+                "20260729_host",
+                &["not-ready".into()],
+            )
+            .is_err()
+        );
+
+        assert_eq!(fs::read_to_string(pipeline).unwrap(), before);
+    }
+
+    #[test]
+    fn reflection_completion_requires_existing_phase_history_without_fabricating_one() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-20260729-no-history.json");
+        let before = r#"{"id":"no-history","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#;
+        fs::write(&pipeline, before).unwrap();
+
+        assert!(
+            super::complete_pipelines_after_verified_reflection_in(
+                harness.path(),
+                "20260729_host",
+                &["no-history".into()],
+            )
+            .is_err()
+        );
+
+        assert_eq!(fs::read_to_string(pipeline).unwrap(), before);
+    }
+
+    #[test]
+    fn reflection_completion_matches_the_exact_observed_pipeline_id() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-20260729-collision.json");
+        let before = r#"{"id":"a?b","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
+        fs::write(&pipeline, before).unwrap();
+
+        assert_eq!(
+            super::complete_pipelines_after_verified_reflection_in(
+                harness.path(),
+                "20260729_host",
+                &["a/b".into()],
+            )
+            .unwrap(),
+            0
+        );
+
+        assert_eq!(fs::read_to_string(pipeline).unwrap(), before);
+    }
+
+    #[test]
+    fn reflection_completion_retry_keeps_the_same_exact_pipeline_id_after_a_rejected_write() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-20260729-retry.json");
+        let rejected = r#"{"id":"retry/id","status":"running","phase":"ship","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
+        fs::write(&pipeline, rejected).unwrap();
+
+        assert!(
+            super::complete_pipelines_after_verified_reflection_in(
+                harness.path(),
+                "20260729_host",
+                &["retry/id".into()],
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(&pipeline).unwrap(), rejected);
+
+        fs::write(
+            &pipeline,
+            r#"{"id":"retry/id","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            super::complete_pipelines_after_verified_reflection_in(
+                harness.path(),
+                "20260729_host",
+                &["retry/id".into()],
+            )
+            .unwrap(),
+            1
+        );
     }
 
     #[test]

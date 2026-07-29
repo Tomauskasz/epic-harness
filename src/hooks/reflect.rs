@@ -2575,7 +2575,33 @@ fn run_reflection(reflection_session_id: &str) -> i32 {
                     }
                 };
                 let id = pl["id"].as_str().unwrap_or(name.trim_end_matches(".json"));
-                if !orbit_pipeline_is_persistable(&pl) {
+                let durable_evolution = match (
+                    pl.get("status").and_then(serde_json::Value::as_str),
+                    pl.get("evolution_session_id")
+                        .and_then(serde_json::Value::as_str),
+                    pl.get("id").and_then(serde_json::Value::as_str),
+                ) {
+                    (Some("complete") | Some("shipped"), Some(session_id), Some(id)) => {
+                        match crate::store::runtime::block_on(
+                            crate::store::evolution::reflection_pipeline_completed_pool(
+                                &pool,
+                                session_id,
+                                &project_slug(),
+                                id,
+                            ),
+                        ) {
+                            Ok(durable) => durable,
+                            Err(error) => {
+                                eprintln!(
+                                    "[reflect] failed to validate durable evolution for orbit {id}: {error}"
+                                );
+                                return 1;
+                            }
+                        }
+                    }
+                    _ => false,
+                };
+                if !orbit_pipeline_is_persistable(&pl, durable_evolution) {
                     eprintln!(
                         "[reflect] refusing to persist invalid completed orbit {}",
                         path.display()
@@ -2762,16 +2788,18 @@ fn mark_reflection_completed(
     project: &str,
     observations: &[ObsRecord],
 ) -> i32 {
+    let pipeline_ids = observed_pipeline_ids(observations);
     match crate::store::runtime::block_on(async {
         let pool = crate::store::pool::harness_pool().await?;
-        crate::store::evolution::mark_reflection_completed_pool(
+        crate::store::evolution::mark_reflection_completed_with_pipelines_pool(
             &pool,
             reflection_session_id,
             project,
+            &pipeline_ids,
         )
         .await
     }) {
-        Ok(()) => complete_observed_orbit_pipelines(reflection_session_id, observations),
+        Ok(()) => complete_recorded_orbit_pipelines(reflection_session_id, project),
         Err(error) => {
             eprintln!("[reflect] failed to mark reflection complete: {error}");
             1
@@ -2786,46 +2814,43 @@ fn mark_reflection_completed(
 /// Returns `(pipeline_id, violation)` pairs. See
 /// `shared::orbit::completion_violations` for what is checked and why.
 fn complete_recorded_orbit_pipelines(reflection_session_id: &str, project: &str) -> i32 {
-    let observations = match crate::store::runtime::block_on(async {
+    let pipeline_ids = match crate::store::runtime::block_on(async {
         let pool = crate::store::pool::harness_pool().await?;
-        crate::store::observations::query_obs_for_session_pool(
-            &pool,
-            reflection_session_id,
-            project,
-            MAX_REFLECTION_OBSERVATIONS,
-        )
-        .await
+        crate::store::evolution::reflection_pipeline_ids_pool(&pool, reflection_session_id, project)
+            .await
     }) {
-        Ok(observations) => observations,
+        Ok(pipeline_ids) => pipeline_ids,
         Err(error) => {
             eprintln!("[reflect] failed to recover Orbit completion evidence: {error}");
             return 1;
         }
     };
-    let records: Vec<ObsRecord> = observations
-        .into_iter()
-        .map(|observation| observation.record)
-        .collect();
-    complete_observed_orbit_pipelines(reflection_session_id, &records)
+    complete_recorded_orbit_pipeline_ids(reflection_session_id, project, &pipeline_ids)
 }
 
-fn complete_observed_orbit_pipelines(
-    reflection_session_id: &str,
-    observations: &[ObsRecord],
-) -> i32 {
+fn observed_pipeline_ids(observations: &[ObsRecord]) -> Vec<String> {
     let mut pipeline_ids: Vec<String> = observations
         .iter()
         .filter_map(|observation| observation.pipeline_id.clone())
         .collect();
     pipeline_ids.sort();
     pipeline_ids.dedup();
+    pipeline_ids
+}
+
+fn complete_recorded_orbit_pipeline_ids(
+    reflection_session_id: &str,
+    project: &str,
+    pipeline_ids: &[String],
+) -> i32 {
     if pipeline_ids.is_empty() {
         return 0;
     }
     match crate::shared::orbit::complete_pipelines_after_reflection_in(
         &harness_dir(),
         reflection_session_id,
-        &pipeline_ids,
+        project,
+        pipeline_ids,
     ) {
         Ok(0) => 0,
         Ok(completed) => {
@@ -2910,8 +2935,9 @@ fn orbit_completion_violations(pipelines: &[PathBuf]) -> Vec<(String, String)> {
     found
 }
 
-fn orbit_pipeline_is_persistable(pipeline: &serde_json::Value) -> bool {
-    crate::shared::orbit::completion_violations(pipeline).is_empty()
+fn orbit_pipeline_is_persistable(pipeline: &serde_json::Value, durable_evolution: bool) -> bool {
+    crate::shared::orbit::completion_violations_with_durable_evolution(pipeline, durable_evolution)
+        .is_empty()
 }
 
 /// Detect the dominant stack tags from a session's observations, used by R6
@@ -3433,7 +3459,7 @@ mod tests {
             "phase_history": [{"phase": "ship", "status": "complete"}]
         });
 
-        assert!(!orbit_pipeline_is_persistable(&pipeline));
+        assert!(!orbit_pipeline_is_persistable(&pipeline, false));
     }
 
     #[test]
@@ -3457,7 +3483,7 @@ mod tests {
     #[test]
     fn running_orbit_remains_persistable() {
         let pipeline = serde_json::json!({"status": "running", "phase": "go"});
-        assert!(orbit_pipeline_is_persistable(&pipeline));
+        assert!(orbit_pipeline_is_persistable(&pipeline, false));
     }
 
     #[test]
