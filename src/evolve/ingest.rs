@@ -12,10 +12,10 @@ use super::analysis::build_summary;
 pub async fn query_prev_pattern_types_async(pool: &AnyPool, session_node_id: &str) -> Vec<String> {
     let rows = sqlx::query(
         "SELECT n.tags FROM nodes n
-         JOIN edges e ON e.source = n.id
+         JOIN edges e ON e.target = n.id
          WHERE n.type = 'pattern'
          AND e.label = 'detected_in'
-         AND e.target IN (
+         AND e.source IN (
             SELECT e2.source FROM edges e2
             WHERE e2.target = ? AND e2.label = 'follows'
          )",
@@ -226,7 +226,29 @@ async fn ingest_to_memory_async(
         }
     }
 
-    // 8b-2. Resolution nodes: patterns resolved since last session
+    // 8b-2. Session chain: link to previous session before resolving patterns.
+    // Resolution lookup follows this edge to find the previous session's patterns.
+    if !session_node_id.is_empty() {
+        let prev_session = find_prev_session_async(pool, &session_node_id, &slug).await;
+
+        if let Some(prev_id) = prev_session {
+            let _ = store::append_edge_pool(
+                pool,
+                &store::Edge {
+                    id: store::new_uuid(),
+                    source: prev_id,
+                    target: session_node_id.clone(),
+                    relation: "follows".to_string(),
+                    weight: 0.3,
+                    ts: ts.clone(),
+                },
+            )
+            .await
+            .map(|_| edges_created += 1);
+        }
+    }
+
+    // 8b-3. Resolution nodes: patterns resolved since last session
     if !session_node_id.is_empty() {
         let prev_pattern_types = query_prev_pattern_types_async(pool, &session_node_id).await;
 
@@ -446,28 +468,7 @@ async fn ingest_to_memory_async(
         }
     }
 
-    // 8g. Session chain: link to previous session in same project
-    if !session_node_id.is_empty() {
-        let prev_session = find_prev_session_async(pool, &session_node_id, &slug).await;
-
-        if let Some(prev_id) = prev_session {
-            let _ = store::append_edge_pool(
-                pool,
-                &store::Edge {
-                    id: store::new_uuid(),
-                    source: prev_id,
-                    target: session_node_id.clone(),
-                    relation: "follows".to_string(),
-                    weight: 0.3,
-                    ts: ts.clone(),
-                },
-            )
-            .await
-            .map(|_| edges_created += 1);
-        }
-    }
-
-    // 8h. Same-tag edges: link non-session nodes that share tags
+    // 8g. Same-tag edges: link non-session nodes that share tags
     let pattern_only_ids: Vec<String> = pattern_node_ids.iter().map(|(id, _)| id.clone()).collect();
     let all_new_ids: Vec<&str> = pattern_only_ids
         .iter()
@@ -514,6 +515,7 @@ async fn ingest_to_memory_async(
 mod tests {
     use super::*;
     use crate::mem::store;
+    use sqlx::Row;
 
     async fn open_test_mem_pool() -> AnyPool {
         let pool = crate::store::pool::test_memory_pool().await;
@@ -786,6 +788,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ingest_creates_resolution_for_pattern_absent_from_following_session() {
+        let pool = open_test_mem_pool().await;
+        let slug = project_slug();
+        let first_analysis = SessionAnalysis {
+            success_rate: 0.1,
+            avg_score: 0.1,
+            ..Default::default()
+        };
+        let second_analysis = SessionAnalysis {
+            success_rate: 0.2,
+            avg_score: 0.2,
+            ..Default::default()
+        };
+        let pattern = DetectedPattern {
+            pattern_type: "repeated_same_error".into(),
+            description: "same error repeated".into(),
+            count: 3,
+            involved_files: vec!["src/evolve/ingest.rs".into()],
+            suggested_remediation: "inspect the root cause".into(),
+            implicated_components: vec![],
+        };
+
+        ingest_to_memory_async(&pool, &first_analysis, &[pattern]).await;
+        ingest_to_memory_async(&pool, &second_analysis, &[]).await;
+
+        let first_title = format!("session: {} 10% avg=0.1", slug);
+        let second_title = format!("session: {} 20% avg=0.2", slug);
+        let first_session_id: String = sqlx::query("SELECT id FROM nodes WHERE title = ?")
+            .bind(first_title)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .try_get(0)
+            .unwrap();
+        let second_session_id: String = sqlx::query("SELECT id FROM nodes WHERE title = ?")
+            .bind(second_title)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .try_get(0)
+            .unwrap();
+        let pattern_id: String = sqlx::query("SELECT id FROM nodes WHERE type = 'pattern'")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .try_get(0)
+            .unwrap();
+        let resolution_rows = sqlx::query("SELECT id FROM nodes WHERE type = 'resolution'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolution_rows.len(),
+            1,
+            "omitting the prior pattern must create one resolution"
+        );
+        let resolution_id: String = resolution_rows[0].try_get(0).unwrap();
+
+        let edges = store::read_edges_pool(&pool, 5000).await.unwrap();
+        let detected_in: Vec<_> = edges
+            .iter()
+            .filter(|edge| edge.relation == "detected_in")
+            .collect();
+        assert_eq!(detected_in.len(), 1);
+        assert_eq!(detected_in[0].source, first_session_id);
+        assert_eq!(detected_in[0].target, pattern_id);
+        let follows: Vec<_> = edges
+            .iter()
+            .filter(|edge| edge.relation == "follows")
+            .collect();
+        assert_eq!(follows.len(), 1);
+        assert_eq!(follows[0].source, first_session_id);
+        assert_eq!(follows[0].target, second_session_id);
+        let resolved_in: Vec<_> = edges
+            .iter()
+            .filter(|edge| edge.relation == "resolved_in")
+            .collect();
+        assert_eq!(resolved_in.len(), 1);
+        assert_eq!(resolved_in[0].source, resolution_id);
+        assert_eq!(resolved_in[0].target, second_session_id);
+    }
+
+    #[tokio::test]
     async fn resolution_node_created_when_pattern_absent_in_current_session() {
         let pool = open_test_mem_pool().await;
         let slug = "res-test-proj";
@@ -827,13 +912,13 @@ mod tests {
         };
         store::write_node_pool(&pool, &pattern_node).await.unwrap();
 
-        // 4. Edge: pattern -> prev_session (detected_in)
+        // 4. Edge: prev_session -> pattern (detected_in)
         store::append_edge_pool(
             &pool,
             &store::Edge {
                 id: store::new_uuid(),
-                source: pattern_id.clone(),
-                target: prev_session_id.clone(),
+                source: prev_session_id.clone(),
+                target: pattern_id.clone(),
                 relation: "detected_in".into(),
                 weight: 1.0,
                 ts: "2026-01-01T00:00:00Z".into(),
@@ -1018,8 +1103,8 @@ mod tests {
             &pool,
             &store::Edge {
                 id: store::new_uuid(),
-                source: pattern_id,
-                target: prev_session_id.clone(),
+                source: prev_session_id.clone(),
+                target: pattern_id,
                 relation: "detected_in".into(),
                 weight: 1.0,
                 ts: "2026-01-01T00:00:00Z".into(),
