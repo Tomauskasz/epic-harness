@@ -449,6 +449,15 @@ test("npm package includes the hook runners and every plugin manifest target", (
       );
     }
   }
+  for (const path of [
+    "registry/scripts/install.test.js",
+    "registry/scripts/manifest.test.js",
+    "Cargo.toml",
+    "Cargo.lock",
+    "pnpm-lock.yaml",
+  ]) {
+    assert.ok(!files.has(path), `${path} is source-only and must not ship in the npm artifact`);
+  }
   assert.ok(!files.has("plugin.json"), "removed Agy manifest must not ship");
 });
 
