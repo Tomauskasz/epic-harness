@@ -22,7 +22,7 @@
 //! gaps — the digester prefers pipeline grouping, so the seed and regression
 //! fixtures collapse to the same `task_id="PIPE-1"` regardless of wall-clock.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use epic_harness::evolve;
 use epic_harness::evolve::seesaw::DEFAULT_TOLERANCE;
@@ -57,6 +57,37 @@ fn load_history(json: &str) -> Vec<EvolutionRecord> {
     serde_json::from_str(json).unwrap_or_else(|e| panic!("history fixture parse failed: {e}"))
 }
 
+/// Task digests serialize only their session-local summary; cross-session
+/// regression state belongs to the seesaw registry.
+#[test]
+fn task_digest_serialization_matches_current_contract() {
+    let observations = load_jsonl(SESSION_N_SEED);
+    let digests = evolve::digest_session(&observations, "fixture-project/session-seed")
+        .expect("fixture namespace is valid");
+
+    let serialized = serde_json::to_value(&digests[0]).expect("digest serializes");
+    let keys: BTreeSet<_> = serialized
+        .as_object()
+        .expect("digest serializes to an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        BTreeSet::from([
+            "evidence_excerpts",
+            "failure_categories",
+            "implicated_components",
+            "observation_count",
+            "outcome",
+            "task_id",
+            "token_estimate",
+            "tool_trajectory",
+        ]),
+        "serialized task digest fields changed: {serialized}"
+    );
+}
+
 // ── Scenario 1: seesaw catches a per-task regression ────────────────────────
 
 /// The seed session solves PIPE-1 perfectly (score 1.0); the regression session
@@ -71,10 +102,10 @@ fn scenario_seesaw_catches_regression() {
 
     // Task identity is driven by pipeline_id, so both sessions digest to the
     // SAME task_id="PIPE-1" — the precondition for a seesaw regression.
-    let seed_digests = evolve::digest_session(&seed_obs, &[], "fixture-project/session-seed")
+    let seed_digests = evolve::digest_session(&seed_obs, "fixture-project/session-seed")
         .expect("fixture namespace is valid");
     let regression_digests =
-        evolve::digest_session(&regression_obs, &[], "fixture-project/session-regression")
+        evolve::digest_session(&regression_obs, "fixture-project/session-regression")
             .expect("fixture namespace is valid");
 
     // Sanity: exactly one segment each, both keyed on the stable pipeline id.
@@ -287,9 +318,8 @@ fn scenario_planner_recommends_exploration() {
 
     // A current failing digest (regression session) feeds the component heatmap.
     let regression_obs = load_jsonl(SESSION_REGRESSION);
-    let digests =
-        evolve::digest_session(&regression_obs, &[], "fixture-project/session-regression")
-            .expect("fixture namespace is valid");
+    let digests = evolve::digest_session(&regression_obs, "fixture-project/session-regression")
+        .expect("fixture namespace is valid");
     assert!(!digests.is_empty(), "regression must produce a digest");
 
     let landscape = evolve::build_landscape(&history, &digests, 2);
@@ -368,7 +398,6 @@ fn scenario_outcome_score_bounds() {
         implicated_components: vec![],
         evidence_excerpts: vec![],
         tool_trajectory: vec![],
-        iterations_seen: 0,
         token_estimate: 0,
         observation_count: 5,
     }]);
@@ -381,7 +410,6 @@ fn scenario_outcome_score_bounds() {
             implicated_components: vec![],
             evidence_excerpts: vec![],
             tool_trajectory: vec![],
-            iterations_seen: 0,
             token_estimate: 0,
             observation_count: 5,
         }])
@@ -401,7 +429,6 @@ fn scenario_outcome_score_bounds() {
         implicated_components: vec![],
         evidence_excerpts: vec![],
         tool_trajectory: vec![],
-        iterations_seen: 0,
         token_estimate: 0,
         observation_count: 4,
     }]);
@@ -427,7 +454,6 @@ fn scenario_outcome_score_bounds() {
         implicated_components: vec![],
         evidence_excerpts: vec![],
         tool_trajectory: vec![],
-        iterations_seen: 0,
         token_estimate: 0,
         observation_count: 0,
     }]);
@@ -470,10 +496,10 @@ fn scenario_task_identity_is_pipeline_stable() {
     let seed_obs = load_jsonl(SESSION_N_SEED);
     let regression_obs = load_jsonl(SESSION_REGRESSION);
 
-    let seed_digests = evolve::digest_session(&seed_obs, &[], "fixture-project/session-seed")
+    let seed_digests = evolve::digest_session(&seed_obs, "fixture-project/session-seed")
         .expect("fixture namespace is valid");
     let regression_digests =
-        evolve::digest_session(&regression_obs, &[], "fixture-project/session-regression")
+        evolve::digest_session(&regression_obs, "fixture-project/session-regression")
             .expect("fixture namespace is valid");
 
     // Every observation in both fixtures carries pipeline_id="PIPE-1"; the

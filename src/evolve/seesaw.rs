@@ -118,7 +118,6 @@ mod tests {
             implicated_components: vec![],
             evidence_excerpts: vec![],
             tool_trajectory: vec![],
-            iterations_seen: 0,
             token_estimate: 0,
             observation_count: count,
         }

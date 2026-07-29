@@ -3,7 +3,7 @@
 //! Reduces a session's raw `ObsRecord` stream into structured per-task
 //! [`TaskDigest`] summaries: binary outcome, ranked failure categories,
 //! implicated logical components, curated evidence excerpts, the tool
-//! trajectory, and a cross-iteration counter.
+//! trajectory, and session-local summary metrics.
 //!
 //! This is epic-harness's analog of HarnessX's Digester stage (paper §4.3).
 //! The raw observation stream is session-scoped; the digester re-segments it
@@ -48,15 +48,13 @@ enum SegmentId {
 
 /// Compress a session's observations into per-task digests.
 ///
-/// `prev_digest_task_ids` carries the set of task IDs seen in prior sessions so
-/// each digest's `iterations_seen` reflects cross-iteration persistence (paper
-/// §4.3: "each task's summary links to its history of prior outcomes"). Pass
-/// an empty slice for a cold start. `fallback_task_namespace` must contain the
-/// caller's stable project/session identity; local fallback labels are never
-/// safe to persist by themselves.
+/// `fallback_task_namespace` must contain the caller's stable project/session
+/// identity; local fallback labels are never safe to persist by themselves.
+/// Stable `pipeline_id` values are the recurring task identities used by the
+/// seesaw registry for cross-session regression tracking; fallback IDs are
+/// session-namespaced and therefore do not recur across sessions.
 pub fn digest_session(
     observations: &[ObsRecord],
-    prev_digest_task_ids: &[String],
     fallback_task_namespace: &str,
 ) -> Result<Vec<TaskDigest>, MissingFallbackNamespace> {
     if fallback_task_namespace.trim().is_empty() {
@@ -75,16 +73,12 @@ pub fn digest_session(
     }
 
     let segments = segment_observations(&evaluated);
-    let prev_seen: HashMap<&str, u32> = prev_digest_task_ids
-        .iter()
-        .map(|id| (id.as_str(), 1u32))
-        .collect();
 
     Ok(segments
         .into_iter()
         .map(|(segment_id, seg)| {
             let task_id = task_id_for_segment(&segment_id, fallback_task_namespace);
-            build_digest(&task_id, &seg, &prev_seen)
+            build_digest(&task_id, &seg)
         })
         .collect())
 }
@@ -163,7 +157,7 @@ fn segment_by_time_gap(observations: &[ObsRecord]) -> Vec<(SegmentId, Vec<&ObsRe
 }
 
 /// Build a single digest from a segment's records.
-fn build_digest(task_id: &str, seg: &[&ObsRecord], prev_seen: &HashMap<&str, u32>) -> TaskDigest {
+fn build_digest(task_id: &str, seg: &[&ObsRecord]) -> TaskDigest {
     let total = seg.len() as u32;
     // Success = no failure_category (matches analysis.rs convention). A record
     // with a failure_category counts as a failed step regardless of its score.
@@ -186,8 +180,6 @@ fn build_digest(task_id: &str, seg: &[&ObsRecord], prev_seen: &HashMap<&str, u32
     let evidence_excerpts = curate_excerpts(seg);
     let tool_trajectory = tool_sequence(seg);
     let token_estimate = estimate_tokens(seg);
-    let iterations_seen = prev_seen.get(task_id).copied().unwrap_or(0);
-
     TaskDigest {
         task_id: task_id.to_string(),
         outcome,
@@ -195,7 +187,6 @@ fn build_digest(task_id: &str, seg: &[&ObsRecord], prev_seen: &HashMap<&str, u32
         implicated_components,
         evidence_excerpts,
         tool_trajectory,
-        iterations_seen,
         token_estimate,
         observation_count: total as u64,
     }
@@ -364,7 +355,7 @@ mod tests {
     #[test]
     fn empty_session_yields_no_digests() {
         assert!(
-            digest_session(&[], &[], "test-project/test-session")
+            digest_session(&[], "test-project/test-session")
                 .expect("namespace is valid")
                 .is_empty()
         );
@@ -377,7 +368,7 @@ mod tests {
             rec("Edit", "edit", Some(1.0), None),
         ];
         let digests =
-            digest_session(&obs, &[], "test-project/test-session").expect("namespace is valid");
+            digest_session(&obs, "test-project/test-session").expect("namespace is valid");
         assert_eq!(digests.len(), 1);
         assert!(matches!(digests[0].outcome, TaskOutcome::Success));
         assert_eq!(digests[0].observation_count, 2);
@@ -391,7 +382,7 @@ mod tests {
             rec("Bash", "bash", Some(0.0), Some("type_error")),
         ];
         let digests =
-            digest_session(&obs, &[], "test-project/test-session").expect("namespace is valid");
+            digest_session(&obs, "test-project/test-session").expect("namespace is valid");
         assert!(matches!(
             digests[0].outcome,
             TaskOutcome::PartialFailure {
@@ -413,7 +404,7 @@ mod tests {
         let mut b = rec("Read", "read", Some(0.0), Some("syntax_error"));
         b.pipeline_id = Some("PIPE-2".into());
         let digests =
-            digest_session(&[a, b], &[], "test-project/test-session").expect("namespace is valid");
+            digest_session(&[a, b], "test-project/test-session").expect("namespace is valid");
         assert_eq!(digests.len(), 2);
         let ids: Vec<&str> = digests.iter().map(|d| d.task_id.as_str()).collect();
         assert!(ids.contains(&"PIPE-1"));
@@ -425,7 +416,7 @@ mod tests {
         let mut observation = rec("Read", "read", Some(1.0), None);
         observation.pipeline_id = Some("session".into());
 
-        let digests = digest_session(&[observation], &[], "test-project/test-session")
+        let digests = digest_session(&[observation], "test-project/test-session")
             .expect("namespace is valid");
 
         assert_eq!(digests[0].task_id, "session");
@@ -437,19 +428,9 @@ mod tests {
         early.timestamp = "2026-06-16T10:00:00Z".into();
         let mut late = rec("Read", "read", Some(0.0), Some("type_error"));
         late.timestamp = "2026-06-16T11:00:00Z".into(); // 1h gap > 5min
-        let digests = digest_session(&[early, late], &[], "test-project/test-session")
+        let digests = digest_session(&[early, late], "test-project/test-session")
             .expect("namespace is valid");
         assert_eq!(digests.len(), 2);
-    }
-
-    #[test]
-    fn iterations_seen_reflects_prior_history() {
-        let obs = vec![rec("Read", "read", Some(0.0), Some("type_error"))];
-        let task_id = "test-project/test-session:session".to_string();
-        let digests = digest_session(&obs, &[task_id], "test-project/test-session")
-            .expect("namespace is valid");
-        // The fallback segment is session-namespaced; prior history bumps it.
-        assert_eq!(digests[0].iterations_seen, 1);
     }
 
     #[test]
@@ -469,8 +450,8 @@ mod tests {
         let mut o3 = rec("Bash", "bash", Some(0.0), Some("type_error"));
         o3.error_snippet =
             Some("a much longer and more verbose error message than the first".into());
-        let digests = digest_session(&[o, o2, o3], &[], "test-project/test-session")
-            .expect("namespace is valid");
+        let digests =
+            digest_session(&[o, o2, o3], "test-project/test-session").expect("namespace is valid");
         // 2 distinct excerpts (dup removed), shortest first.
         assert_eq!(digests[0].evidence_excerpts.len(), 2);
         assert_eq!(digests[0].evidence_excerpts[0], "type mismatch");
@@ -488,10 +469,10 @@ mod tests {
     fn fallback_segments_are_namespaced_by_the_real_session() {
         let observations = vec![rec("Read", "read", Some(1.0), None)];
 
-        let first = digest_session(&observations, &[], "project-a/session-one")
-            .expect("namespace is valid");
-        let second = digest_session(&observations, &[], "project-a/session-two")
-            .expect("namespace is valid");
+        let first =
+            digest_session(&observations, "project-a/session-one").expect("namespace is valid");
+        let second =
+            digest_session(&observations, "project-a/session-two").expect("namespace is valid");
 
         assert_eq!(first[0].task_id, "project-a/session-one:session");
         assert_eq!(second[0].task_id, "project-a/session-two:session");
@@ -503,7 +484,7 @@ mod tests {
         let observations = vec![rec("Read", "read", Some(1.0), None)];
 
         assert_eq!(
-            digest_session(&observations, &[], "").unwrap_err(),
+            digest_session(&observations, "").unwrap_err(),
             MissingFallbackNamespace
         );
     }
@@ -515,10 +496,10 @@ mod tests {
         let mut late = rec("Read", "read", Some(1.0), None);
         late.timestamp = "2026-06-16T11:00:00Z".into();
 
-        let first = digest_session(&[early.clone(), late.clone()], &[], "project-a/session-one")
+        let first = digest_session(&[early.clone(), late.clone()], "project-a/session-one")
             .expect("namespace is valid");
-        let second = digest_session(&[early, late], &[], "project-a/session-two")
-            .expect("namespace is valid");
+        let second =
+            digest_session(&[early, late], "project-a/session-two").expect("namespace is valid");
 
         assert_eq!(first[0].task_id, "project-a/session-one:segment-0");
         assert_eq!(first[1].task_id, "project-a/session-one:segment-1");
@@ -531,7 +512,7 @@ mod tests {
         let observations = vec![rec("Read", "read", None, None)];
 
         assert!(
-            digest_session(&observations, &[], "project-a/session-one")
+            digest_session(&observations, "project-a/session-one")
                 .expect("namespace is valid")
                 .is_empty()
         );
@@ -544,8 +525,8 @@ mod tests {
             rec("Read", "read", None, None),
         ];
 
-        let digests = digest_session(&observations, &[], "project-a/session-one")
-            .expect("namespace is valid");
+        let digests =
+            digest_session(&observations, "project-a/session-one").expect("namespace is valid");
 
         assert_eq!(digests[0].observation_count, 1);
         assert_eq!(digests[0].outcome, TaskOutcome::Success);

@@ -344,8 +344,6 @@ pub struct TaskDigest {
     pub evidence_excerpts: Vec<String>,
     /// Ordered sequence of tool categories used.
     pub tool_trajectory: Vec<String>,
-    /// Number of previous iterations this task was seen (cross-iteration persistence).
-    pub iterations_seen: u32,
     /// Estimated token count of the original trace segment.
     ///
     /// Scaffold (#81 item 3): populated by `digester::estimate_tokens` but not
@@ -418,6 +416,8 @@ pub struct AttemptedEdit {
 /// to prevent. The paper's seesaw is **per-task** (pass@2 binary flips). We
 /// therefore track a single best outcome score per task and reject any edit
 /// that drops a previously-solved task below its best minus tolerance.
+/// Regression tracking applies only to recurring stable pipeline IDs; fallback
+/// task IDs are session-namespaced and therefore never match across sessions.
 ///
 /// This is a deliberately coarse gate (the paper acknowledges even per-task
 /// seesaw is insufficient for sub-threshold drift; variant isolation in R6 is
