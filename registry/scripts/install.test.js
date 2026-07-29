@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import https from "node:https";
@@ -660,7 +660,7 @@ exit /b 99`,
   }
 });
 
-test("missing runtime emits one JSON object for every structured Codex event", () => {
+test("missing runtime fails without a synthetic guard denial", () => {
   for (const [event, subcommand] of STRUCTURED_HOOKS) {
     const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
 
@@ -689,12 +689,9 @@ exit /b 99`,
       );
 
       if (event === "PreToolUse") {
-        assert.equal(result.status, 2, result.stderr);
-        assert.equal(
-          assertSingleJsonObject(result.stdout, event).hookSpecificOutput
-            .permissionDecision,
-          "deny",
-        );
+        assert.notEqual(result.status, 0, result.stderr);
+        assert.notEqual(result.status, 2, result.stderr);
+        assert.equal(result.stdout, "");
       } else {
         assert.notEqual(result.status, 0, event);
         assert.deepEqual(assertSingleJsonObject(result.stdout, event), {});
@@ -706,7 +703,7 @@ exit /b 99`,
   }
 });
 
-test("failing runtime emits one JSON object for every structured Codex event", () => {
+test("failing runtime fails without a synthetic guard denial", () => {
   for (const [event, subcommand] of STRUCTURED_HOOKS) {
     const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
 
@@ -735,12 +732,9 @@ exit /b 17`,
       );
 
       if (event === "PreToolUse") {
-        assert.equal(result.status, 2, result.stderr);
-        assert.equal(
-          assertSingleJsonObject(result.stdout, event).hookSpecificOutput
-            .permissionDecision,
-          "deny",
-        );
+        assert.notEqual(result.status, 0, result.stderr);
+        assert.notEqual(result.status, 2, result.stderr);
+        assert.equal(result.stdout, "");
       } else {
         assert.equal(result.status, 17, event);
         assert.deepEqual(assertSingleJsonObject(result.stdout, event), {});
@@ -847,7 +841,7 @@ set /p EPIC_STDIN=
   }
 });
 
-test("a blocking PreToolUse runtime preserves exit two and deny JSON", () => {
+test("a structured PreToolUse guard denial preserves exit two and deny JSON", () => {
   const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
 
   try {
@@ -855,12 +849,12 @@ test("a blocking PreToolUse runtime preserves exit two and deny JSON", () => {
       fixture.bin,
       "epic-harness",
       `if [ "$1" = "guard" ]; then
-  printf '%s\\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"}}'
+  printf '%s\\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Guard-specific denial reason"}}'
   exit 2
 fi
 exit 99`,
       `if "%1"=="guard" (
-  echo {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"}}
+  echo {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Guard-specific denial reason"}}
   exit /b 2
 )
 exit /b 99`,
@@ -878,9 +872,57 @@ exit /b 99`,
         .hookSpecificOutput.permissionDecision,
       "deny",
     );
-    assert.match(result.stderr, /failed with exit code 2/i);
+    assert.equal(
+      assertSingleJsonObject(result.stdout, "blocking PreToolUse")
+        .hookSpecificOutput.permissionDecisionReason,
+      "Guard-specific denial reason",
+    );
+    assert.match(result.stderr, /denied the tool request/i);
   } finally {
     rmSync(fixture.root, { force: true, recursive: true });
+  }
+});
+
+test("a malformed or non-structured guard denial fails without a permission decision", () => {
+  const cases = [
+    ["malformed JSON", "not-json"],
+    ["non-object JSON", "[]"],
+    ["missing Codex hook event", '{"hookSpecificOutput":{"permissionDecision":"deny"}}'],
+    ["non-denial Codex output", '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'],
+  ];
+
+  for (const [label, output] of cases) {
+    const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+
+    try {
+      writeCommand(
+        fixture.bin,
+        "epic-harness",
+        `if [ "$1" = "guard" ]; then
+  printf '%s\\n' '${output}'
+  exit 2
+fi
+exit 99`,
+        `if "%1"=="guard" (
+  echo ${output}
+  exit /b 2
+)
+exit /b 99`,
+      );
+
+      const result = runScript(
+        ["hook", "PreToolUse", "guard"],
+        fixture.env,
+        '{"hook_event_name":"PreToolUse"}',
+      );
+
+      assert.notEqual(result.status, 0, `${label}: ${result.stderr}`);
+      assert.notEqual(result.status, 2, `${label}: ${result.stderr}`);
+      assert.equal(result.stdout, "", `${label}: no permission decision`);
+      assert.match(result.stderr, /invalid guard denial|failed with exit code/i, label);
+    } finally {
+      rmSync(fixture.root, { force: true, recursive: true });
+    }
   }
 });
 
@@ -896,11 +938,16 @@ test(
         join(ROOT, "registry", "scripts", "run-hook.cmd"),
         join(fixture.root, "registry", "scripts", "run-hook.cmd"),
       );
+      copyFileSync(
+        SCRIPT,
+        join(fixture.root, "registry", "scripts", "install.js"),
+      );
       writeCommand(
         fixture.bin,
-        "node",
-        "exit 99",
-        `echo {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Blocked by Epic Harness guard"}}
+        "epic-harness",
+        `printf '%s\\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Windows guard denial"}}'
+exit 2`,
+        `echo {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Windows guard denial"}}
 exit /b 2`,
       );
       const manifest = JSON.parse(
@@ -915,7 +962,7 @@ exit /b 2`,
           env: {
             ...fixture.env,
             PLUGIN_ROOT: fixture.root,
-            PATH: `${fixture.bin}${delimiter}${process.env.PATH}`,
+            PATH: `${fixture.bin}${delimiter}${dirname(process.execPath)}${delimiter}${process.env.PATH}`,
           },
           input:
             '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git push --force origin main"}}',
@@ -932,9 +979,9 @@ exit /b 2`,
         output.hookSpecificOutput.permissionDecision,
         "deny",
       );
-      assert.match(
+      assert.equal(
         output.hookSpecificOutput.permissionDecisionReason,
-        /Epic Harness guard/i,
+        "Windows guard denial",
       );
     } finally {
       rmSync(fixture.root, { force: true, recursive: true });
@@ -942,7 +989,75 @@ exit /b 2`,
   },
 );
 
-test("a missing PreToolUse runtime fails closed with exit two and deny JSON", () => {
+test(
+  "the Windows Codex command preserves guard runtime failures without a permission decision",
+  { skip: !IS_WINDOWS },
+  () => {
+    const cases = [
+      ["missing runtime", null],
+      ["runtime failure", { output: "runtime failure", status: 17 }],
+      ["malformed guard denial", { output: "not-json", status: 2 }],
+    ];
+    const manifest = JSON.parse(
+      readFileSync(join(ROOT, ".codex-plugin", "hooks.json"), "utf8"),
+    );
+    const command = manifest.hooks.PreToolUse[0].hooks[0].commandWindows;
+
+    for (const [label, runtime] of cases) {
+      const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+
+      try {
+        mkdirSync(join(fixture.root, "registry", "scripts"), { recursive: true });
+        copyFileSync(
+          join(ROOT, "registry", "scripts", "run-hook.cmd"),
+          join(fixture.root, "registry", "scripts", "run-hook.cmd"),
+        );
+        copyFileSync(
+          SCRIPT,
+          join(fixture.root, "registry", "scripts", "install.js"),
+        );
+        if (runtime) {
+          writeCommand(
+            fixture.bin,
+            "epic-harness",
+            `printf '%s\\n' '${runtime.output}'\nexit ${runtime.status}`,
+            `echo ${runtime.output}\nexit /b ${runtime.status}`,
+          );
+        }
+
+        const result = spawnSync(
+          join(
+            process.env.SystemRoot,
+            "System32",
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe",
+          ),
+          ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+          {
+            encoding: "utf8",
+            env: {
+              ...fixture.env,
+              PLUGIN_ROOT: fixture.root,
+              PATH: `${fixture.bin}${delimiter}${dirname(process.execPath)}${delimiter}${join(process.env.SystemRoot, "System32")}`,
+            },
+            input:
+              '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo wrapper-test"}}',
+          },
+        );
+
+        assert.equal(result.error, undefined, `${label}: ${result.error?.message}`);
+        assert.notEqual(result.status, 0, `${label}: ${result.stderr}`);
+        assert.notEqual(result.status, 2, `${label}: ${result.stderr}`);
+        assert.equal(result.stdout, "", `${label}: no permission decision`);
+      } finally {
+        rmSync(fixture.root, { force: true, recursive: true });
+      }
+    }
+  },
+);
+
+test("a missing PreToolUse runtime fails without a permission decision", () => {
   const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
 
   try {
@@ -952,12 +1067,9 @@ test("a missing PreToolUse runtime fails closed with exit two and deny JSON", ()
       '{"hook_event_name":"PreToolUse"}',
     );
 
-    assert.equal(result.status, 2, result.stderr);
-    assert.equal(
-      assertSingleJsonObject(result.stdout, "missing PreToolUse")
-        .hookSpecificOutput.permissionDecision,
-      "deny",
-    );
+    assert.notEqual(result.status, 0, result.stderr);
+    assert.notEqual(result.status, 2, result.stderr);
+    assert.equal(result.stdout, "");
     assert.match(result.stderr, /epic-harness.*not found/i);
   } finally {
     rmSync(fixture.root, { force: true, recursive: true });

@@ -23,8 +23,6 @@ const CARGO_PKG = "epic-harness";
 const INSTALLER_MAX_REDIRECTS = 5;
 const INSTALLER_REQUEST_TIMEOUT_MS = 15_000;
 const INSTALLER_TOTAL_TIMEOUT_MS = 60_000;
-const CODEX_GUARD_DENY =
-  '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Blocked by Epic Harness guard"}}';
 const STRUCTURED_CODEX_EVENTS = new Set([
   "SessionStart",
   "SubagentStop",
@@ -367,6 +365,32 @@ function runnerProvenance(input) {
   }
 }
 
+function validatedGuardDeny(output) {
+  const trimmed = output.trim();
+  if (!trimmed) return null;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  const hookSpecificOutput = parsed?.hookSpecificOutput;
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    hookSpecificOutput === null ||
+    typeof hookSpecificOutput !== "object" ||
+    Array.isArray(hookSpecificOutput) ||
+    hookSpecificOutput.hookEventName !== "PreToolUse" ||
+    hookSpecificOutput.permissionDecision !== "deny"
+  ) {
+    return null;
+  }
+  return trimmed;
+}
+
 function runHook(event, subcommand) {
   if (!HOOK_COMMANDS.get(event)?.has(subcommand)) {
     throw new Error(`unsupported hook command: ${event} ${subcommand}`);
@@ -387,19 +411,40 @@ function runHook(event, subcommand) {
   if (result.error?.code === "ENOENT") {
     throw new HookRunError(
       `${BINARY} not found while running ${event}`,
-      event === "PreToolUse" ? 2 : 1,
+      1,
     );
   }
   if (result.error) {
     throw new HookRunError(
       `${BINARY} ${subcommand} failed: ${result.error.message}`,
-      event === "PreToolUse" ? 2 : 1,
+      1,
+    );
+  }
+  if (event === "PreToolUse" && result.status === 2) {
+    const denial = validatedGuardDeny(result.stdout);
+    if (!denial) {
+      throw new HookRunError(
+        `${BINARY} ${subcommand} emitted an invalid guard denial`,
+        1,
+      );
+    }
+    process.stdout.write(`${denial}\n`);
+    throw new HookRunError(
+      `${BINARY} ${subcommand} denied the tool request`,
+      2,
     );
   }
   if (result.status !== 0) {
     throw new HookRunError(
       `${BINARY} ${subcommand} failed with exit code ${result.status}`,
-      event === "PreToolUse" ? 2 : (result.status ?? 1),
+      result.status ?? 1,
+    );
+  }
+
+  if (event === "PreToolUse" && result.stdout.trim()) {
+    throw new HookRunError(
+      `${BINARY} ${subcommand} emitted unexpected guard output`,
+      1,
     );
   }
 
@@ -433,9 +478,6 @@ function failureOutputForInvocation() {
   const [mode, event] = process.argv.slice(2);
   if (mode !== "hook") {
     return null;
-  }
-  if (event === "PreToolUse") {
-    return CODEX_GUARD_DENY;
   }
   if (STRUCTURED_CODEX_EVENTS.has(event)) {
     return "{}";
