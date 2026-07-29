@@ -130,7 +130,7 @@ fn memory_url() -> String {
 /// Build an `AnyPool` from a connection URL.
 ///
 /// Dispatches to the appropriate driver based on URL scheme:
-/// - `sqlite:` — WAL mode, foreign_keys=ON, busy_timeout=5s, file permissions 0o600
+/// - `sqlite:` — WAL mode and file permissions 0o600
 /// - `postgres:` — TLS required for non-local connections
 /// - `mysql:` — TLS required for non-local connections
 async fn build_pool(url: &str, max_connections: u32) -> io::Result<AnyPool> {
@@ -148,8 +148,7 @@ async fn build_pool(url: &str, max_connections: u32) -> io::Result<AnyPool> {
 /// Build a SQLite pool via AnyPoolOptions.
 ///
 /// Pre-creates the database file (AnyConnectOptions doesn't expose
-/// `create_if_missing`), then connects by URL. PRAGMAs are applied in
-/// `init_schema_pool()`.
+/// `create_if_missing`), then connects by URL and enables verified WAL mode.
 async fn build_sqlite_pool(url: &str, max_connections: u32) -> io::Result<AnyPool> {
     // Extract filesystem path for directory/permission setup.
     let db_path = url
@@ -187,6 +186,8 @@ async fn build_sqlite_pool(url: &str, max_connections: u32) -> io::Result<AnyPoo
         .await
         .map_err(io::Error::other)?;
 
+    enable_and_verify_wal(&pool).await?;
+
     // Set file permissions after pool opens the file.
     #[cfg(unix)]
     {
@@ -202,6 +203,30 @@ async fn build_sqlite_pool(url: &str, max_connections: u32) -> io::Result<AnyPoo
     }
 
     Ok(pool)
+}
+
+/// Persist WAL mode and fail pool construction if SQLite does not retain it.
+async fn enable_and_verify_wal(pool: &AnyPool) -> io::Result<()> {
+    let enabled: String = sqlx::query_scalar("PRAGMA journal_mode = WAL")
+        .fetch_one(pool)
+        .await
+        .map_err(io::Error::other)?;
+    if !enabled.eq_ignore_ascii_case("wal") {
+        return Err(io::Error::other(format!(
+            "SQLite refused WAL mode (reported {enabled:?})"
+        )));
+    }
+
+    let verified: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(pool)
+        .await
+        .map_err(io::Error::other)?;
+    if !verified.eq_ignore_ascii_case("wal") {
+        return Err(io::Error::other(format!(
+            "SQLite WAL mode did not persist (reported {verified:?})"
+        )));
+    }
+    Ok(())
 }
 
 /// Build a PostgreSQL pool with TLS enforced per `CONFIG.db.tls_mode`.
@@ -562,11 +587,40 @@ mod tests {
         assert_eq!(row.try_get::<i64, _>(0).unwrap(), 1);
         assert!(db_path.exists());
 
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+
         #[cfg(unix)]
         {
             let mode = fs::metadata(&db_path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[tokio::test]
+    async fn build_pool_upgrades_an_existing_delete_mode_database_to_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("existing.db");
+        let url = format!("sqlite:{}", db_path.display());
+
+        fs::File::create(&db_path).unwrap();
+        let legacy_pool = AnyPoolOptions::new().connect(&url).await.unwrap();
+        let legacy_mode: String = sqlx::query_scalar("PRAGMA journal_mode = DELETE")
+            .fetch_one(&legacy_pool)
+            .await
+            .unwrap();
+        assert_eq!(legacy_mode, "delete");
+        legacy_pool.close().await;
+
+        let pool = build_pool(&url, 1).await.unwrap();
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
     }
 
     #[test]

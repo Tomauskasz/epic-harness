@@ -51,7 +51,7 @@ pub async fn init_schema_pool(pool: &AnyPool) -> io::Result<()> {
         return Ok(());
     }
 
-    // PRAGMAs are set in pool.rs build_sqlite_pool() — no need to set here.
+    // SQLite pool construction enables and verifies WAL before schema initialization.
 
     for ddl in DDL_SQLITE.split(';') {
         let trimmed = ddl.trim();

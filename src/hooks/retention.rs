@@ -10,7 +10,7 @@
 
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 use std::{collections::HashSet, fs::OpenOptions};
 
@@ -22,16 +22,14 @@ use super::common::*;
 /// session, so an in-flight lock is never removed.
 const RUNTIME_FILE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const GLOBAL_RETENTION_CADENCE: Duration = Duration::from_secs(60 * 60);
-const GLOBAL_RETENTION_LEASE_MAX_AGE: Duration = Duration::from_secs(15 * 60);
 
+/// Held OS lock for one global retention sweep.
+///
+/// The `retention.lock` pathname intentionally persists: closing this handle
+/// releases ownership, including after process death, without ever unlinking a
+/// successor's lock file.
 struct RetentionLease {
-    path: PathBuf,
-}
-
-impl Drop for RetentionLease {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
+    _file: fs::File,
 }
 
 #[derive(Deserialize)]
@@ -220,38 +218,26 @@ fn try_acquire_global_retention_lease(
     }
 
     let lock = projects.join("retention.lock");
-    for _ in 0..2 {
-        match OpenOptions::new().write(true).create_new(true).open(&lock) {
-            Ok(mut file) => {
-                use std::io::Write;
-                file.write_all(crate::shared::helpers::now_iso().as_bytes())?;
-                file.sync_all()?;
-                return Ok(Some(RetentionLease { path: lock }));
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                let stale = lock
-                    .symlink_metadata()
-                    .map(|metadata| metadata.file_type().is_file())
-                    .unwrap_or(false)
-                    && lock
-                        .metadata()
-                        .and_then(|metadata| metadata.modified())
-                        .ok()
-                        .and_then(|modified| now.duration_since(modified).ok())
-                        .is_some_and(|age| age > GLOBAL_RETENTION_LEASE_MAX_AGE);
-                if !stale {
-                    return Ok(None);
-                }
-                match fs::remove_file(&lock) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
-            }
-            Err(error) => return Err(error),
-        }
+    if lock
+        .symlink_metadata()
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("retention lock is a symlink: {}", lock.display()),
+        ));
     }
-    Ok(None)
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(lock)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(RetentionLease { _file: file })),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(error)) => Err(error),
+    }
 }
 
 fn record_global_retention(projects: &Path) -> io::Result<()> {
@@ -393,8 +379,8 @@ pub(crate) fn prune_completed_reflection_jobs(
 /// Remove per-session scratch files that no live session can still be using.
 ///
 /// Covers the two that accumulate one-per-hook-process: telemetry error
-/// counters in `obs/` and resume locks in the harness root. `now` is a parameter
-/// so a test can move time forward instead of back-dating files.
+/// counters in `obs/`, plus resume locks and event markers in the harness root.
+/// `now` is a parameter so a test can move time forward instead of back-dating files.
 pub(crate) fn sweep_runtime_files(harness: &Path, obs: &Path, now: SystemTime) -> usize {
     let stale = |p: &Path| -> bool {
         fs::metadata(p)
@@ -410,6 +396,7 @@ pub(crate) fn sweep_runtime_files(harness: &Path, obs: &Path, now: SystemTime) -
     let mut removed = 0;
     let targets = [
         (harness, "resume.", ".lock"),
+        (harness, "resume.", ".event"),
         (obs, "telemetry_error_count_", ".txt"),
     ];
     for (dir, prefix, suffix) in targets {
@@ -464,14 +451,16 @@ mod tests {
         fs::create_dir(&obs).unwrap();
 
         let lock = harness.join("resume.20260101_1234.lock");
+        let event = harness.join("resume.20260101_1234.session-start.event");
         let counter = obs.join("telemetry_error_count_20260101_1234.txt");
         let unrelated = harness.join("config.toml");
-        for p in [&lock, &counter, &unrelated] {
+        for p in [&lock, &event, &counter, &unrelated] {
             File::create(p).unwrap();
         }
 
-        assert_eq!(sweep_runtime_files(harness, &obs, later()), 2);
+        assert_eq!(sweep_runtime_files(harness, &obs, later()), 3);
         assert!(!lock.exists());
+        assert!(!event.exists());
         assert!(!counter.exists());
         assert!(unrelated.exists(), "unrelated files must not be touched");
     }
@@ -598,6 +587,39 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "the cadence marker suppresses repeated global scans"
+        );
+    }
+
+    #[test]
+    fn retention_lease_blocks_concurrent_owner_and_is_reused_after_release() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        let first = try_acquire_global_retention_lease(&projects, SystemTime::now())
+            .unwrap()
+            .expect("first caller owns the lease");
+        assert!(
+            try_acquire_global_retention_lease(&projects, SystemTime::now())
+                .unwrap()
+                .is_none(),
+            "a concurrently held lease must not be acquired twice"
+        );
+
+        let lock = projects.join("retention.lock");
+        assert!(lock.exists(), "the lease path is durable while held");
+        drop(first);
+        assert!(
+            lock.exists(),
+            "releasing a lease must not delete the persistent coordination path"
+        );
+
+        let successor = try_acquire_global_retention_lease(&projects, SystemTime::now())
+            .unwrap()
+            .expect("the released lease can be reused");
+        assert!(lock.exists(), "the successor retains the coordination path");
+        drop(successor);
+        assert!(
+            lock.exists(),
+            "releasing the successor keeps the durable path"
         );
     }
 
