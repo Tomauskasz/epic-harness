@@ -337,6 +337,13 @@ Observation files use `session_{date}_{host-session-id}.jsonl`. The sanitized
 host session ID is stable across hook processes and isolates concurrent host
 sessions.
 
+Each project reflection queue uses a persistent OS advisory lock
+(`reflect-queue/worker.lock`) held from abandoned-claim recovery through
+claim, reflection, and settlement. The OS releases it on worker death on Unix
+and Windows; mtime and removable slot files are not ownership signals. Claims
+carry a fresh fence token, and completion/retry must present that token so a
+superseded worker cannot move a replacement claim.
+
 ## Cold-Start Presets
 
 On first session with no evolved skills, stack-appropriate preset skills auto-apply for detected stacks (Go, Java, Kotlin, Node.js, PHP, Python, Ruby, Rust).
