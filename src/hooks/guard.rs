@@ -829,7 +829,7 @@ pub fn run(input: &HookInput) -> i32 {
         let tool_name = input.tool_name.as_deref().unwrap_or("");
 
         if is_write_tool(tool_name) {
-            let orch_dir = orchestrator_dir();
+            let mut orch_dir = orchestrator_dir();
 
             // control.json pause check — blocks the tool call entirely
             let agent_id = current_agent_id();
@@ -847,8 +847,13 @@ pub fn run(input: &HookInput) -> i32 {
                     }
                     Ok(false) => {}
                     Err(error) => {
-                        hint("guard", &format!("BLOCKED: invalid control state: {error}"));
-                        return 2;
+                        hint(
+                            "guard",
+                            &format!(
+                                "orchestration control state unavailable: {error}; continuing without orchestration context"
+                            ),
+                        );
+                        orch_dir = None;
                     }
                 }
             }

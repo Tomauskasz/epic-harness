@@ -521,6 +521,68 @@ fn invalid_codex_guard_inputs_fail_closed_with_exit_two() {
 }
 
 #[test]
+fn guard_continues_safety_evaluation_when_control_state_is_unavailable() {
+    let root = tempfile::tempdir().expect("temp root");
+    let project = project_path(root.path());
+    fs::create_dir_all(&project).expect("project");
+    let session_id = "control-state";
+    establish_host_session_state(root.path(), &project, session_id);
+    let harness = harness_path(root.path(), &project);
+    let orchestrator = harness.join("orchestrator");
+    fs::create_dir_all(&orchestrator).expect("orchestrator");
+    let control = orchestrator.join("control.json");
+    let environment = [("HARNESS_DIR", harness.as_os_str())];
+    let benign_write = r#"{"hook_event_name":"PreToolUse","session_id":"control-state","tool_name":"Write","tool_input":{"file_path":"src/main.rs"}}"#;
+
+    fs::write(&control, r#"{"pause":"#).expect("malformed control state");
+    let malformed = run_hook_with_env(root.path(), &project, "guard", benign_write, &environment);
+    assert_eq!(malformed.status.code(), Some(0));
+    assert!(malformed.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&malformed.stderr)
+            .contains("orchestration control state unavailable"),
+        "the orchestration problem must remain visible: {}",
+        String::from_utf8_lossy(&malformed.stderr)
+    );
+
+    fs::remove_file(&control).expect("remove malformed control state");
+    fs::create_dir(&control).expect("unreadable control state directory");
+    let unreadable = run_hook_with_env(root.path(), &project, "guard", benign_write, &environment);
+    assert_eq!(unreadable.status.code(), Some(0));
+    assert!(unreadable.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&unreadable.stderr)
+            .contains("orchestration control state unavailable"),
+        "the orchestration problem must remain visible: {}",
+        String::from_utf8_lossy(&unreadable.stderr)
+    );
+
+    fs::remove_dir(&control).expect("remove unreadable control state directory");
+    fs::write(&control, r#"{"pause":"#).expect("malformed control state");
+    let dangerous_input = concat!(
+        r#"{"hook_event_name":"PreToolUse","session_id":"control-state","tool_name":"Write","tool_input":{"file_path":"src/main.rs","command":"git push --"#,
+        r#"force origin main"}}"#,
+    );
+    let dangerous = run_hook_with_env(
+        root.path(),
+        &project,
+        "guard",
+        dangerous_input,
+        &environment,
+    );
+    assert_eq!(dangerous.status.code(), Some(2));
+    let deny: serde_json::Value =
+        serde_json::from_slice(&dangerous.stdout).expect("guard deny JSON");
+    assert_eq!(deny["hookSpecificOutput"]["permissionDecision"], "deny");
+
+    fs::write(&control, r#"{"pause":true}"#).expect("pause directive");
+    let paused = run_hook_with_env(root.path(), &project, "guard", benign_write, &environment);
+    assert_eq!(paused.status.code(), Some(2));
+    let deny: serde_json::Value = serde_json::from_slice(&paused.stdout).expect("guard deny JSON");
+    assert_eq!(deny["hookSpecificOutput"]["permissionDecision"], "deny");
+}
+
+#[test]
 fn non_start_hooks_reject_missing_host_session_state() {
     let root = tempfile::tempdir().expect("temp root");
     let project = project_path(root.path());
