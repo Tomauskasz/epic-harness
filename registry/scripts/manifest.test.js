@@ -412,7 +412,7 @@ test("runtime owners do not retain the removed bundled hook binary", () => {
   }
 });
 
-test("npm package includes the hook runners and canonical runtime revision", () => {
+test("npm package includes the hook runners and every plugin manifest target", () => {
   const result = spawnSync("npm", ["pack", "--dry-run", "--json"], {
     cwd: ROOT,
     encoding: "utf8",
@@ -431,6 +431,21 @@ test("npm package includes the hook runners and canonical runtime revision", () 
     "runtime-revision.txt",
   ]) {
     assert.ok(files.has(path), `${path} is missing from the npm artifact`);
+  }
+
+  for (const manifestPath of [
+    ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+  ]) {
+    const manifest = JSON.parse(readFileSync(join(ROOT, manifestPath), "utf8"));
+    for (const target of [manifest.skills, manifest.mcpServers, manifest.hooks].filter(Boolean)) {
+      const artifactPath = target.replace(/^\.\//, "").replace(/\/$/, "");
+      assert.ok(
+        files.has(artifactPath) ||
+          [...files].some((path) => path.startsWith(`${artifactPath}/`)),
+        `${manifestPath} target ${target} is missing from the npm artifact`,
+      );
+    }
   }
   assert.ok(!files.has("plugin.json"), "removed Agy manifest must not ship");
 });
