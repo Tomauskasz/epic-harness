@@ -446,24 +446,6 @@ pub fn list_files(dir: &Path, ext: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub fn copy_dir(src: &Path, dest: &Path) {
-    if !src.is_dir() {
-        return;
-    }
-    ensure_dir(dest);
-    if let Ok(entries) = fs::read_dir(src) {
-        for entry in entries.flatten() {
-            let src_path = entry.path();
-            let dest_path = dest.join(entry.file_name());
-            if src_path.is_dir() {
-                copy_dir(&src_path, &dest_path);
-            } else {
-                let _ = fs::copy(&src_path, &dest_path);
-            }
-        }
-    }
-}
-
 pub struct CopyResult {
     pub ok: u64,
     pub errors: u64,
@@ -492,7 +474,7 @@ pub(crate) fn validate_regular_tree(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Like `copy_dir` but counts successes and errors instead of silently ignoring failures.
+/// Copy a regular directory tree while counting successes and errors.
 pub fn copy_dir_counted(src: &Path, dest: &Path) -> CopyResult {
     fn copy_tree(src: &Path, dest: &Path, result: &mut CopyResult) -> io::Result<()> {
         ensure_private_dir(dest)?;
