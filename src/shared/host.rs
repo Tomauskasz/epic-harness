@@ -36,9 +36,6 @@ use super::types::HookInput;
 /// Whether plain text on stdout is picked up by the host as model context.
 static STDOUT_IS_CONTEXT: AtomicBool = AtomicBool::new(false);
 
-/// Set only by explicit runner provenance. Shared event names identify no host.
-static CODEX_RUNNER: AtomicBool = AtomicBool::new(false);
-
 /// SessionStart context must be emitted as one JSON object on Codex. Buffer
 /// the lines that `hint`/`raw` would otherwise print separately.
 static CAPTURE_SESSION_START: AtomicBool = AtomicBool::new(false);
@@ -92,13 +89,6 @@ pub fn init(input: &HookInput) {
         .unwrap_or(false);
     CAPTURE_SESSION_START.store(capture_session_start, Ordering::Relaxed);
     STDOUT_IS_CONTEXT.store(takes, Ordering::Relaxed);
-    CODEX_RUNNER.store(
-        input
-            .host
-            .as_deref()
-            .is_some_and(|host| host.eq_ignore_ascii_case("codex")),
-        Ordering::Relaxed,
-    );
     if let Ok(mut context) = SESSION_START_CONTEXT.lock() {
         context.clear();
     }
@@ -111,11 +101,6 @@ pub fn init(input: &HookInput) {
     if let Ok(mut slot) = HOST_AGENT_ID.write() {
         *slot = aid;
     }
-}
-
-/// True only when the runner explicitly declared the Codex host.
-pub fn is_codex_runner() -> bool {
-    CODEX_RUNNER.load(Ordering::Relaxed)
 }
 
 /// True when `hint`/`raw` should write to stdout so the model actually sees it.
@@ -285,23 +270,6 @@ mod tests {
         let _g = lock();
         init(&event(Some("SomeFutureEvent")));
         assert!(!stdout_is_context());
-    }
-
-    #[test]
-    fn codex_provenance_is_explicit_not_inferred_from_event() {
-        let _g = lock();
-        init(&HookInput {
-            hook_event_name: Some("PostToolUse".into()),
-            ..Default::default()
-        });
-        assert!(!is_codex_runner());
-
-        init(&HookInput {
-            host: Some("codex".into()),
-            hook_event_name: Some("PostToolUse".into()),
-            ..Default::default()
-        });
-        assert!(is_codex_runner());
     }
 
     // ── identity ────────────────────────────────────

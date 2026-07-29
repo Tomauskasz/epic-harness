@@ -43,101 +43,6 @@ static SILENT_OK_CMDS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\s*(mkdir|cp|mv|rm|chmod|chown|ln|touch|git\s+(add|checkout|switch|branch|stash|tag|remote)|cd|export|source|tsc\s+--noEmit)\b").unwrap()
 });
 
-/// Commands whose stdout is *file content*, not a report about the command.
-///
-/// Keyword classification cannot tell "this command failed" from "this command
-/// successfully printed a file that mentions TypeError". Reading a log, a diff or
-/// a test fixture used to be scored as a failed tool call, which is where the
-/// bulk of recorded failures came from. Without a structured exit status these
-/// calls record `unknown` instead of inventing a failure.
-///
-/// Commands that *report* on work (build, test, lint, package managers) are
-/// deliberately absent — their keywords are real evidence.
-static READ_ONLY_CMDS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"^\s*(sudo\s+)?(cat|bat|nl|head|tail|less|more|sed|awk|cut|sort|uniq|wc|tr|rg|grep|egrep|fgrep|ag|ack|find|fd|ls|tree|stat|file|jq|yq|xxd|od|strings|diff|comm|echo|printf|pwd|which|type|env|date|get-content|get-childitem|get-item|get-location|get-command|select-string|select-object|git\s+(diff|log|show|blame|status|ls-files|cat-file|rev-parse))\b",
-    )
-    .unwrap()
-});
-
-/// True when the command only reads and prints existing content.
-///
-/// Applies to the *first* command in a pipeline or `&&` chain: `cat x | grep y`
-/// is a read, but `cargo test | tail -5` is not — the leading command decides
-/// what the output is evidence about.
-fn is_read_only_command(command: &str) -> bool {
-    if command.trim().is_empty()
-        || command.contains("$(")
-        || command.contains('`')
-        || command.contains('>')
-    {
-        return false;
-    }
-
-    let mut segments = Vec::new();
-    let mut start = 0;
-    let mut single_quoted = false;
-    let mut double_quoted = false;
-    let chars: Vec<(usize, char)> = command.char_indices().collect();
-    let mut index = 0;
-    while index < chars.len() {
-        let (offset, character) = chars[index];
-        if character == '\\' || character == '`' {
-            index += 2;
-            continue;
-        }
-        match character {
-            '\'' if !double_quoted => single_quoted = !single_quoted,
-            '"' if !single_quoted => double_quoted = !double_quoted,
-            '|' if !single_quoted && !double_quoted => {
-                segments.push(&command[start..offset]);
-                if chars.get(index + 1).map(|(_, next)| *next) == Some('|') {
-                    start = chars[index + 1].0 + '|'.len_utf8();
-                    index += 1;
-                } else {
-                    start = offset + character.len_utf8();
-                }
-            }
-            ';' | '\n' if !single_quoted && !double_quoted => {
-                segments.push(&command[start..offset]);
-                start = offset + character.len_utf8();
-            }
-            '&' if !single_quoted && !double_quoted => {
-                segments.push(&command[start..offset]);
-                if chars.get(index + 1).map(|(_, next)| *next) == Some('&') {
-                    start = chars[index + 1].0 + '&'.len_utf8();
-                    index += 1;
-                } else {
-                    start = offset + character.len_utf8();
-                }
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-    if single_quoted || double_quoted {
-        return false;
-    }
-    segments.push(&command[start..]);
-    segments.into_iter().all(|segment| {
-        !segment.trim().is_empty() && READ_ONLY_CMDS.is_match(&segment.to_ascii_lowercase())
-    })
-}
-
-/// True when a call's output is content it fetched, not a report about itself.
-///
-/// `Read`, `Grep` and `Glob` return file text by definition, so a keyword in
-/// their output describes the file, not the call. Bash depends on which command
-/// ran. A genuine failure of these tools is still recorded whenever the host
-/// reports one — this only governs the no-evidence fallback.
-fn outputs_file_content(tool_category: &str, command: &str) -> bool {
-    match tool_category {
-        "read" | "grep" | "glob" => true,
-        "bash" => is_read_only_command(command),
-        _ => false,
-    }
-}
-
 /// Explicit success/failure the host reported, if the payload carries one.
 ///
 /// Returns `Some(true)` for a reported success, `Some(false)` for a reported
@@ -181,37 +86,13 @@ pub(crate) struct Outcome {
     pub failure: Option<&'static str>,
 }
 
-/// Decide a tool call's outcome from the strongest available evidence.
+/// Decide a tool call's outcome from structured host evidence.
 ///
-/// Precedence:
-/// 1. A structured status from the host — authoritative both ways.
-/// 2. With no structured status, a call whose output is fetched content
-///    (`outputs_file_content`) yields `unknown` on a keyword match rather than a
-///    fabricated failure. This is the case that produced most recorded failures.
-/// 3. Otherwise text can prove a failure, but clean text cannot prove success.
-///
-/// A reported failure still uses the text to pick a category, falling back to
-/// `runtime_error` when the text names nothing recognizable.
-#[cfg(test)]
-fn decide_outcome(
+/// A structured success or failure is authoritative. Text only categorizes an
+/// already-confirmed failure; without a structured status the outcome is unknown.
+fn decide_structured_outcome(
     reported: Option<bool>,
     text_failure: Option<&'static str>,
-    tool_category: &str,
-    command: &str,
-) -> Outcome {
-    decide_outcome_for_host(reported, text_failure, tool_category, command, false, false)
-}
-
-/// The only host-specific outcome rule is Codex's silent Bash response. The
-/// caller must supply explicit runner provenance; shared event names are not a
-/// host discriminator.
-fn decide_outcome_for_host(
-    reported: Option<bool>,
-    text_failure: Option<&'static str>,
-    tool_category: &str,
-    command: &str,
-    response_is_empty: bool,
-    is_codex_runner: bool,
 ) -> Outcome {
     match reported {
         Some(true) => Outcome {
@@ -222,37 +103,21 @@ fn decide_outcome_for_host(
             result: "error",
             failure: Some(text_failure.unwrap_or("runtime_error")),
         },
-        None => match text_failure {
-            // No structured status and nothing in the output that looks like a
-            // failure. The tool ran to completion and the host reported nothing
-            // wrong, which is the only success signal these hosts give us for
-            // most calls — very few responses carry `exit_code` or `is_error`.
-            //
-            // Treating this as `unknown` leaves almost everything unscored:
-            // measured on a live session, three of four observations (a `Write`
-            // and two `Bash` calls) recorded `unknown` with a NULL score, and
-            // `analyze()` filters on `score.is_some()`. Ring 3 then evolves from
-            // a quarter of the evidence and never reaches the seeding
-            // thresholds. `unknown` exists to replace a *fabricated failure*,
-            // not to discard a real success.
-            None if is_codex_runner && tool_category == "bash" && response_is_empty => Outcome {
-                result: "unknown",
-                failure: None,
-            },
-            None => Outcome {
-                result: "success",
-                failure: None,
-            },
-            Some(_) if outputs_file_content(tool_category, command) => Outcome {
-                result: "unknown",
-                failure: None,
-            },
-            Some(cat) => Outcome {
-                result: "error",
-                failure: Some(cat),
-            },
+        None => Outcome {
+            result: "unknown",
+            failure: None,
         },
     }
+}
+
+#[cfg(test)]
+fn decide_outcome(
+    reported: Option<bool>,
+    text_failure: Option<&'static str>,
+    _tool_category: &str,
+    _command: &str,
+) -> Outcome {
+    decide_structured_outcome(reported, text_failure)
 }
 
 /// Extract textual tool output without stringifying binary or structured Codex
@@ -743,14 +608,7 @@ pub fn run(input: &HookInput) -> i32 {
             .unwrap_or("");
 
         let text_failure = classify_failure(&combined);
-        let outcome = decide_outcome_for_host(
-            reported,
-            text_failure,
-            tool_cat,
-            command,
-            combined.trim().is_empty(),
-            crate::shared::host::is_codex_runner(),
-        );
+        let outcome = decide_structured_outcome(reported, text_failure);
 
         record.failure_category = outcome.failure.map(String::from);
         record.result = Some(outcome.result.into());
@@ -987,84 +845,17 @@ mod tests {
     }
 
     // ── decide_outcome ──────────────────────────────
-    // The reported regression: reading a file whose *content* mentions a failure
-    // was scored as a failed tool call. 66% of classified errors came from
-    // read-oriented commands.
-
     #[test]
-    fn reading_a_file_containing_failure_words_is_not_a_failure() {
-        for cmd in [
-            "cat build.log",
-            "sed -n '1,40p' src/main.rs",
-            "rg 'TypeError' src/",
-            "nl notes.md",
-            "git diff HEAD~1",
-            "find . -name '*.rs'",
-            "  sudo tail -n 200 /var/log/syslog",
+    fn failure_words_without_structured_status_are_unknown() {
+        for (category, command) in [
+            ("bash", "cargo test"),
+            ("read", ""),
+            ("write", ""),
+            ("edit", ""),
         ] {
-            let o = decide_outcome(None, Some("type_error"), "bash", cmd);
-            assert_eq!(o.result, "unknown", "{cmd} must not be scored as a failure");
-            assert!(o.failure.is_none(), "{cmd} must record no failure category");
-        }
-    }
-
-    #[test]
-    fn a_reporting_command_still_fails_on_its_own_keywords() {
-        // These commands report on work they performed; their keywords are real
-        // evidence and must keep producing a failure.
-        for cmd in ["cargo test", "npm run build", "pytest -q", "node main.js"] {
-            let o = decide_outcome(None, Some("test_fail"), "bash", cmd);
-            assert_eq!(o.result, "error", "{cmd} must stay a failure");
-            assert_eq!(o.failure, Some("test_fail"));
-        }
-    }
-
-    #[test]
-    fn content_reads_require_every_shell_segment_to_be_read_only() {
-        // A leading reader cannot prove later shell work only fetched content.
-        assert_eq!(
-            decide_outcome(None, Some("not_found"), "bash", "cat a.txt | grep foo").result,
-            "unknown"
-        );
-        assert_eq!(
-            decide_outcome(None, Some("test_fail"), "bash", "cargo test | tail -5").result,
-            "error"
-        );
-        for command in [
-            "cat build.log && cargo test",
-            "Get-Content build.log; Remove-Item build.log",
-            "cat build.log | tee copied.log",
-        ] {
-            assert_eq!(
-                decide_outcome(None, Some("runtime_error"), "bash", command).result,
-                "error",
-                "{command} must not be exempted by its first segment"
-            );
-        }
-    }
-
-    #[test]
-    fn conservative_powershell_read_commands_are_content_reads() {
-        for command in [
-            "Get-Content build.log",
-            "Get-Content build.log | Select-String TypeError",
-            "Get-ChildItem src | Select-Object Name",
-        ] {
-            let outcome = decide_outcome(None, Some("type_error"), "bash", command);
-            assert_eq!(outcome.result, "unknown", "{command}");
-            assert!(outcome.failure.is_none(), "{command}");
-        }
-    }
-
-    #[test]
-    fn content_reads_allow_shell_or_between_read_only_segments() {
-        for command in [
-            "cat build.log || echo retry",
-            "Get-Content build.log || echo retry",
-        ] {
-            let outcome = decide_outcome(None, Some("type_error"), "bash", command);
-            assert_eq!(outcome.result, "unknown", "{command}");
-            assert!(outcome.failure.is_none(), "{command}");
+            let outcome = decide_outcome(None, Some("test_fail"), category, command);
+            assert_eq!(outcome.result, "unknown", "{category} {command}");
+            assert_eq!(outcome.failure, None, "{category} {command}");
         }
     }
 
@@ -1096,14 +887,10 @@ mod tests {
     }
 
     #[test]
-    fn silent_bash_is_unknown_only_with_explicit_codex_provenance() {
-        let codex = decide_outcome_for_host(None, None, "bash", "echo hello", true, true);
-        assert_eq!(codex.result, "unknown");
-        assert!(codex.failure.is_none());
-
-        let unproven = decide_outcome_for_host(None, None, "bash", "echo hello", true, false);
-        assert_eq!(unproven.result, "success");
-        assert!(unproven.failure.is_none());
+    fn silent_bash_without_status_is_unknown() {
+        let outcome = decide_outcome(None, None, "bash", "echo hello");
+        assert_eq!(outcome.result, "unknown");
+        assert!(outcome.failure.is_none());
     }
 
     #[test]
@@ -1130,14 +917,9 @@ mod tests {
         assert_eq!(o.failure, Some("build_fail"));
     }
 
-    /// Regression: a clean call with no structured status is the common case —
-    /// most hosts send no `exit_code`/`is_error` at all. Scoring it `unknown`
-    /// left three of four observations in a live session unscored, and
-    /// `analyze()` only reads rows where `score.is_some()`, so Ring 3 starved.
-    /// `unknown` is for evidence that *looks* like failure but cannot be
-    /// trusted, not for the absence of any complaint.
+    /// A clean response without a structured status carries no outcome evidence.
     #[test]
-    fn clean_output_without_structured_status_is_a_success() {
+    fn clean_output_without_structured_status_is_unknown() {
         for (cat, cmd) in [
             ("bash", "cat a.txt"),
             ("bash", "cargo build"),
@@ -1146,28 +928,9 @@ mod tests {
             ("read", ""),
         ] {
             let o = decide_outcome(None, None, cat, cmd);
-            assert_eq!(o.result, "success", "{cat} {cmd}");
+            assert_eq!(o.result, "unknown", "{cat} {cmd}");
             assert_eq!(o.failure, None, "{cat} {cmd}");
         }
-    }
-
-    /// The narrow case `unknown` exists for: failure-looking text in output
-    /// that is *fetched content* rather than the call's own outcome.
-    #[test]
-    fn failure_text_in_fetched_content_stays_unknown() {
-        assert_eq!(
-            decide_outcome(None, Some("type_error"), "bash", "cat build.log").result,
-            "unknown"
-        );
-        assert_eq!(
-            decide_outcome(None, Some("type_error"), "read", "").result,
-            "unknown"
-        );
-        // ...but the same text from a build is a real failure.
-        assert_eq!(
-            decide_outcome(None, Some("type_error"), "bash", "cargo build").result,
-            "error"
-        );
     }
 
     #[test]
@@ -1197,27 +960,7 @@ mod tests {
     }
 
     #[test]
-    fn content_returning_tools_get_the_exemption_too() {
-        // Read/Grep/Glob return file text by definition, so a keyword in their
-        // output describes the file, not the call.
-        for cat in ["read", "grep", "glob"] {
-            let o = decide_outcome(None, Some("type_error"), cat, "");
-            assert_eq!(o.result, "unknown", "{cat} must not invent a failure");
-        }
-    }
-
-    #[test]
-    fn tools_that_report_on_their_own_work_do_not_get_the_exemption() {
-        for cat in ["edit", "write", "other"] {
-            let o = decide_outcome(None, Some("permission_denied"), cat, "");
-            assert_eq!(o.result, "error", "{cat} must stay a failure");
-        }
-    }
-
-    #[test]
-    fn a_reported_status_still_wins_for_content_tools() {
-        // The exemption only governs the no-evidence fallback; a host that
-        // reports a real Read failure is still believed.
+    fn a_reported_status_still_wins_for_every_tool() {
         assert_eq!(
             decide_outcome(Some(false), Some("not_found"), "read", "").result,
             "error"

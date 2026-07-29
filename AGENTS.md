@@ -183,23 +183,16 @@ and `agent_type`; `shared::host::init` records them once per process.
 
 ### Outcome evidence
 
-Tool success is no longer inferred from output text alone.
+Tool success is determined only by structured host status.
 
 1. A structured status in the response (`exit_code`, `is_error`, `success`,
-   `status`) is authoritative **both ways** — it can clear a false keyword match
-   as well as create a failure.
-2. Without one, a call whose output is *fetched content* — `Read`, `Grep`,
-   `Glob`, or a read-only Bash command — records `result: "unknown"` instead of a
-   failure. Reading a log that contains `TypeError` is not a failed tool call;
-   this pattern was 66% of all classified errors.
-3. Everything else keeps keyword classification, so build and test failures are
-   unaffected.
-4. No status **and** no failure text is a success, not an `unknown`. Few tool
-   responses carry `exit_code` or `is_error`, so this is the common case:
-   scoring it `unknown` left three of four observations in a live session
-   unscored, and `analyze()` only reads rows where `score.is_some()`. `unknown`
-   is for evidence that looks like failure but cannot be trusted — never for the
-   absence of any complaint.
+   `status`) is authoritative both ways: success clears keyword matches and
+   failure records an error.
+2. Without structured status, both clean output and failure-looking text record
+   `result: "unknown"` with no score or failure category. Output text cannot prove
+   a tool outcome.
+3. Text only categorizes a structured failure; unrecognized failure text falls
+   back to `runtime_error`.
 
 `unknown` observations are left unscored (`score`/`dimensions` NULL) and excluded
 from success rates via `ObsStats::evaluated()` — never counted as failures.
