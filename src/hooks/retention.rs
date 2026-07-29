@@ -1293,7 +1293,10 @@ mod tests {
         })
         .unwrap_err();
 
-        assert_eq!(error.kind(), io::ErrorKind::FilesystemLoop);
+        // `O_NOFOLLOW` reports the leaf symlink as the platform's stable
+        // `ELOOP` error. `ErrorKind::FilesystemLoop` is still unstable on
+        // Rust 1.94.
+        assert_eq!(error.raw_os_error(), Some(libc::ELOOP));
         assert_eq!(fs::read_to_string(sentinel).unwrap(), "sentinel");
     }
 
