@@ -86,19 +86,23 @@ async fn find_prev_session_async(
     session_node_id: &str,
     slug: &str,
 ) -> Option<String> {
-    let csv_proj = format!("%{slug}%");
-    sqlx::query(
-        "SELECT id FROM nodes WHERE type = 'session' AND id != ?
-         AND projects LIKE ?
-         ORDER BY updated DESC LIMIT 1",
+    let rows = sqlx::query(
+        "SELECT id, projects FROM nodes WHERE type = 'session' AND id != ?
+         ORDER BY updated DESC",
     )
     .bind(session_node_id)
-    .bind(&csv_proj)
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await
-    .ok()
-    .flatten()
-    .and_then(|r| r.try_get::<String, _>(0).ok())
+    .ok()?;
+
+    rows.into_iter().find_map(|row| {
+        let projects: String = row.try_get(1).ok()?;
+        store::util::split_csv(&projects)
+            .iter()
+            .any(|project| project == slug)
+            .then(|| row.try_get::<String, _>(0).ok())
+            .flatten()
+    })
 }
 
 /// Find the most recent previous session node for a project slug (sync wrapper).
@@ -662,6 +666,101 @@ mod tests {
         assert!(
             found,
             "follows edge must exist from prev to current session"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_chain_does_not_resolve_patterns_from_similarly_named_project() {
+        let pool = open_test_mem_pool().await;
+
+        let foobar_session_id = store::new_uuid();
+        let foobar_session = store::Node {
+            frontmatter: store::NodeFrontmatter {
+                id: foobar_session_id.clone(),
+                node_type: "session".into(),
+                title: "session: foobar 70%".into(),
+                tags: vec!["auto".into(), "session".into()],
+                projects: vec!["foobar".into()],
+                created: "2026-01-02T00:00:00Z".into(),
+                updated: "2026-01-02T00:00:00Z".into(),
+                ..Default::default()
+            },
+            body: "unrelated project session".into(),
+        };
+        store::write_node_pool(&pool, &foobar_session)
+            .await
+            .unwrap();
+
+        let foobar_pattern_id = store::new_uuid();
+        let foobar_pattern = store::Node {
+            frontmatter: store::NodeFrontmatter {
+                id: foobar_pattern_id.clone(),
+                node_type: "pattern".into(),
+                title: "foobar: repeated_same_error (3x)".into(),
+                tags: vec!["auto".into(), "repeated_same_error".into()],
+                projects: vec!["foobar".into()],
+                created: "2026-01-02T00:00:00Z".into(),
+                updated: "2026-01-02T00:00:00Z".into(),
+                ..Default::default()
+            },
+            body: "unrelated project pattern".into(),
+        };
+        store::write_node_pool(&pool, &foobar_pattern)
+            .await
+            .unwrap();
+        store::append_edge_pool(
+            &pool,
+            &store::Edge {
+                id: store::new_uuid(),
+                source: foobar_session_id,
+                target: foobar_pattern_id,
+                relation: "detected_in".into(),
+                weight: 1.0,
+                ts: "2026-01-02T00:00:00Z".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let foo_session_id = store::new_uuid();
+        let foo_session = store::Node {
+            frontmatter: store::NodeFrontmatter {
+                id: foo_session_id.clone(),
+                node_type: "session".into(),
+                title: "session: foo 80%".into(),
+                tags: vec!["auto".into(), "session".into()],
+                projects: vec!["foo".into()],
+                created: "2026-01-03T00:00:00Z".into(),
+                updated: "2026-01-03T00:00:00Z".into(),
+                ..Default::default()
+            },
+            body: "current project session".into(),
+        };
+        store::write_node_pool(&pool, &foo_session).await.unwrap();
+
+        if let Some(previous_session_id) =
+            find_prev_session_async(&pool, &foo_session_id, "foo").await
+        {
+            store::append_edge_pool(
+                &pool,
+                &store::Edge {
+                    id: store::new_uuid(),
+                    source: previous_session_id,
+                    target: foo_session_id.clone(),
+                    relation: "follows".into(),
+                    weight: 0.3,
+                    ts: "2026-01-03T00:00:00Z".into(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        assert!(
+            query_prev_pattern_types_async(&pool, &foo_session_id)
+                .await
+                .is_empty(),
+            "foo must not resolve a pattern from the similarly named foobar project"
         );
     }
 
