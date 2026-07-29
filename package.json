@@ -1,7 +1,7 @@
 {
   "name": "epic-harness",
   "version": "0.8.3",
-  "description": "8 commands, auto-trigger skills, self-evolving agent harness for Claude Code",
+  "description": "8 commands, auto-trigger skills, self-evolving agent harness for Claude Code and Codex",
   "author": "epicsagas",
   "license": "Apache-2.0",
   "type": "module",
@@ -13,6 +13,7 @@
   "bugs": "https://github.com/epicsagas/epic-harness/issues",
   "keywords": [
     "claude-code",
+    "codex",
     "plugin",
     "harness",
     "agent",

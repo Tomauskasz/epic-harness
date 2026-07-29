@@ -22,7 +22,7 @@
   <a href="https://buymeacoffee.com/epicsaga"><img alt="Buy Me a Coffee" src="https://img.shields.io/badge/buy_me_a_coffee-FFDD00?style=for-the-badge&labelColor=0d1117&logo=buymeacoffee&logoColor=black" /></a>
 </p>
 
-**30개 이상의 명령어를 3개 명령어 + 26개 자동 트리거 스킬로 통합**하고, 실패 패턴으로부터 **새로운 스킬을 스스로 진화**시키는 Claude Code 플러그인입니다.
+**30개 이상의 명령어를 3개 명령어 + 26개 자동 트리거 스킬로 통합**하고, 실패 패턴으로부터 **새로운 스킬을 스스로 진화**시키는 Claude Code 및 Codex CLI 플러그인입니다.
 
 <p align="center">
   <img src="../../assets/features.png" alt="epic harness 기능" width="100%" />
@@ -34,7 +34,7 @@
 
 ### 웹 대시보드 — 세션 시작 시 자동 실행
 
-eval 점수, 도구 통계, orbit 파이프라인, 진화 스킬, 훅 상태를 보여주는 10개 화면 실시간 메트릭. 첫 Claude Code 세션에서 자동으로 열립니다 — 수동 설정이 필요 없습니다.
+eval 점수, 도구 통계, orbit 파이프라인, 진화 스킬, 훅 상태를 보여주는 10개 화면 실시간 메트릭. 첫 Claude Code 또는 Codex 세션에서 자동으로 열립니다 — 수동 설정이 필요 없습니다.
 
 <p align="center">
   <img src="../../assets/dashboard.png" alt="Dashboard" width="49%" />
@@ -281,7 +281,7 @@ composite = 0.5 × tool_success + 0.3 × output_quality + 0.2 × execution_cost
 
 ```
 Observe (PostToolUse — 3축 스코어링)
-    ↓ obs/session_{id}.jsonl
+    ↓ SQLite harness.db(기본); obs/session_{id}.jsonl은 호환성 폴백
 Analyze (SessionEnd)
     ↓ 도구별, 확장자별 점수 + 패턴
 Propose (Solver — 점수별 단계적 처리: ≥0.90 건너뜀, ≥0.70 보통, <0.70 전체)
@@ -395,7 +395,7 @@ observe (100% 확인) → extract_instincts() → instinct 노드 (confidence �
 
 polish는 observe로 피드백됩니다: 포맷 실패 → `lint_fail`, TypeScript 에러 → `build_fail`. Edit→Error 쓰래싱은 에러가 polish에서 발생해도 감지됩니다.
 
-각 세션은 자체 `session_{date}_{host-session-id}.jsonl`에 기록 — 여러 동시 세션이 서로의 데이터를 손상시키지 않습니다.
+SQLite가 세션 관측의 기본 저장소이며 `session_{date}_{host-session-id}.jsonl`은 호환성 폴백입니다.
 
 ### 훅 프로파일
 
@@ -577,7 +577,7 @@ epic mem export --out ./docs/memory                    # Markdown 내보내기
 └── projects/{slug}/
     ├── memory/                # 프로젝트 패턴 및 규칙
     ├── sessions/              # 세션 스냅샷 (resume용)
-    ├── obs/                   # 도구 사용 관측 로그 (JSONL)
+    ├── obs/                   # 관측 호환성 폴백 (JSONL; SQLite가 기본)
     ├── evolved/               # 자동 진화 스킬
     │   ├── manifest.json
     │   └── {skill}/SKILL.md + meta.json

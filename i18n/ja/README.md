@@ -22,7 +22,7 @@
   <a href="https://buymeacoffee.com/epicsaga"><img alt="Buy Me a Coffee" src="https://img.shields.io/badge/buy_me_a_coffee-FFDD00?style=for-the-badge&labelColor=0d1117&logo=buymeacoffee&logoColor=black" /></a>
 </p>
 
-Claude Codeプラグインで、**30以上のコマンドを3個のコマンド + 26個の自動トリガースキルに統合**し、自分の失敗パターンから**新しいスキルを進化**させます。
+Claude Code / Codex CLIプラグインで、**30以上のコマンドを3個のコマンド + 26個の自動トリガースキルに統合**し、自分の失敗パターンから**新しいスキルを進化**させます。
 
 <p align="center">
   <img src="../../assets/features.png" alt="epic harness features" width="100%" />
@@ -34,7 +34,7 @@ Claude Codeプラグインで、**30以上のコマンドを3個のコマンド 
 
 ### Webダッシュボード — セッション開始時に自動起動
 
-evalスコア、ツール統計、orbitパイプライン、進化スキル、フックヘルスの10画面リアルタイムメトリクス。最初のClaude Codeセッションで自動的に開きます — 手動セットアップ不要。
+evalスコア、ツール統計、orbitパイプライン、進化スキル、フックヘルスの10画面リアルタイムメトリクス。最初のClaude CodeまたはCodexセッションで自動的に開きます — 手動セットアップ不要。
 
 <p align="center">
   <img src="../../assets/dashboard.png" alt="Dashboard" width="49%" />
@@ -281,7 +281,7 @@ composite = 0.5 × tool_success + 0.3 × output_quality + 0.2 × execution_cost
 
 ```
 Observe (PostToolUse — 3-axis scoring)
-    ↓ obs/session_{id}.jsonl
+    ↓ SQLite harness.db（主）; obs/session_{id}.jsonl は互換フォールバック
 Analyze (SessionEnd)
     ↓ per-tool, per-ext scores + patterns
 Propose (Solver — graduated by score: ≥0.90 skip, ≥0.70 moderate, <0.70 full)
@@ -395,7 +395,7 @@ observe (100% confirmed) → extract_instincts() → instinct node (confidence �
 
 Polishはobserveにフィードバックします: フォーマット失敗 → `lint_fail`、TypeScriptエラー → `build_fail`。polishからエラーが来る場合でも、Edit→Errorスラッシングが検出されます。
 
-各セッションは独自の `session_{date}_{host-session-id}.jsonl` を書き込みます — 複数の並行セッションが互いのデータを破損することはありません。
+SQLite がセッション観測の主ストアで、`session_{date}_{host-session-id}.jsonl` は互換フォールバックです。
 
 ### フックプロファイル
 
@@ -577,7 +577,7 @@ epic mem export --out ./docs/memory                    # Markdownにエクスポ
 └── projects/{slug}/
     ├── memory/                # プロジェクトパターンとルール
     ├── sessions/              # セッションスナップショット（resume用）
-    ├── obs/                   # ツール使用観察ログ（JSONL）
+    ├── obs/                   # 観測の互換フォールバック（JSONL; SQLite が主）
     ├── evolved/               # 自動進化スキル
     │   ├── manifest.json
     │   └── {skill}/SKILL.md + meta.json

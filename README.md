@@ -22,7 +22,7 @@
   <a href="https://buymeacoffee.com/epicsaga"><img alt="Buy Me a Coffee" src="https://img.shields.io/badge/buy_me_a_coffee-FFDD00?style=for-the-badge&labelColor=0d1117&logo=buymeacoffee&logoColor=black" /></a>
 </p>
 
-A Claude Code plugin that **consolidates 30+ commands into 3 commands + 26 auto-trigger skills**, and **evolves new skills** from your own failure patterns.
+A plugin for Claude Code and Codex that **consolidates 30+ commands into 3 commands + 26 auto-trigger skills**, and **evolves new skills** from your own failure patterns.
 
 <p align="center">
   <img src="./assets/features.png" alt="epic harness features" width="100%" />
@@ -301,7 +301,7 @@ Failure classification (9 types): `type_error` · `syntax_error` · `test_fail` 
 
 ```
 Observe (PostToolUse — 3-axis scoring)
-    ↓ obs/session_{id}.jsonl
+    ↓ SQLite harness.db (primary); obs/session_{id}.jsonl fallback
 Analyze (SessionEnd)
     ↓ per-tool, per-ext scores + patterns
 Propose (Solver — graduated by score: ≥0.90 skip, ≥0.70 moderate, <0.70 full)
@@ -447,9 +447,9 @@ Run invisibly on every session. Single Rust binary (`epic-harness`) with subcomm
 
 Polish feeds back into observe: format failure → `lint_fail`, TypeScript error → `build_fail`. Edit→Error thrashing gets detected even when errors come from polish.
 
-Each host session writes to `session_{date}_{host-session-id}.jsonl`. The
-sanitized host session ID stays stable across hook processes, so concurrent
-sessions remain separate without splitting one session into per-process files.
+SQLite stores observations by host session. The sanitized host session ID stays
+stable across hook processes, so concurrent sessions remain separate; JSONL is
+compatibility fallback data.
 
 ### Hook Profiles
 
@@ -640,7 +640,7 @@ All data lives in `~/.harness/` (home directory), not in your project root. Surv
 └── projects/{slug}/
     ├── memory/                # Project patterns and rules
     ├── sessions/              # Session snapshots (for resume)
-    ├── obs/                   # Tool usage observation logs (JSONL)
+    ├── obs/                   # Compatibility fallback observation logs (JSONL; SQLite is primary)
     ├── evolved/               # Auto-evolved skills
     │   ├── manifest.json
     │   └── {skill}/SKILL.md + meta.json

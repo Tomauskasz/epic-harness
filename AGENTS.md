@@ -529,7 +529,7 @@ _dispatch skill runs `epic mem recall` with current task context before invoking
 `~/.harness/projects/{slug}/` directory accumulates per-project memory, observations, evolved skills:
 - `memory/` — Project patterns and rules
 - `sessions/` — Session snapshots
-- `obs/` — Tool usage observation logs (JSONL, 3-axis scores)
+- `obs/` — JSONL compatibility fallback observation logs; SQLite `harness.db` owns primary observation records and scores
 - `evolved/` — Auto-evolved skills (pattern/tool/filetype/error based)
 - `evolved_backup/` — Best-state backup (for stagnation rollback)
 - `team/` — /team outputs
