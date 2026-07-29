@@ -144,10 +144,13 @@ Notes that are easy to get wrong:
   a missing binary on stderr without corrupting event output. SessionStart
   strips an optional `+codex.<cachebuster>` cache identity, then installs and
   verifies the exact base binary version and runtime revision before `resume`.
-- **SessionStart has one stdout payload.** The runner dispatches immediately
-  after it receives one complete JSON object instead of waiting for stdin EOF,
-  which Codex may hold while it waits for the hook. Installer children inherit
-  stderr for diagnostics but never stdout, preserving the one structured
+- **SessionStart has one stdout payload.** Only SessionStart dispatches after a
+  complete JSON object instead of waiting for stdin EOF, which Codex may hold
+  while it waits for the hook. Its incomplete input is bounded by a five-second
+  deadline and one MiB budget; every other hook reads through EOF and rejects
+  non-JSON trailing bytes. SessionStart installer, probe, and resume children
+  have a 30-second deadline, terminate their process tree on Windows, inherit
+  stderr for diagnostics, and never stdout, preserving the one structured
   SessionStart response.
 - **Windows overrides select `cmd.exe` explicitly and enter `run-hook.cmd`.**
   Codex may execute them through PowerShell, where `%PLUGIN_ROOT%` stays literal

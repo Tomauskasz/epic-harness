@@ -968,6 +968,158 @@ echo {"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"
   }
 });
 
+test("non-SessionStart hooks wait for EOF and reject bytes after their JSON input", async () => {
+  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+  const calls = join(fixture.root, "calls.txt");
+  const input = JSON.stringify({ hook_event_name: "PostToolUse", session_id: "eof-session" });
+
+  try {
+    writeCommand(
+      fixture.bin,
+      "epic-harness",
+      `if [ "$1" = "observe" ]; then
+  printf '%s\\n' called > "$EPIC_TEST_CALLS"
+  exit 0
+fi
+exit 99`,
+      `if "%1"=="observe" (
+  > "%EPIC_TEST_CALLS%" echo called
+  exit /b 0
+)
+exit /b 99`,
+    );
+
+    const child = spawn(process.execPath, [SCRIPT, "hook", "PostToolUse", "observe"], {
+      env: { ...fixture.env, EPIC_TEST_CALLS: calls },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    child.stdin.write(input);
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    assert.equal(child.exitCode, null, "PostToolUse must wait for stdin EOF");
+    assert.throws(() => readFileSync(calls, "utf8"));
+    child.stdin.end();
+
+    const result = await new Promise((resolve) => {
+      child.once("exit", (code, signal) => resolve({ code, signal }));
+    });
+    assert.equal(result.code, 0, result.signal ?? "PostToolUse failed");
+    assert.equal(readFileSync(calls, "utf8").trim(), "called");
+
+    const trailing = runScript(
+      ["hook", "PostToolUse", "observe"],
+      { ...fixture.env, EPIC_TEST_CALLS: calls },
+      `${input} trailing`,
+    );
+    assert.notEqual(trailing.status, 0, trailing.stderr);
+    assert.equal(trailing.stdout, "", "trailing input must not reach hook stdout");
+    assert.match(trailing.stderr, /invalid JSON input|trailing/i);
+  } finally {
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+});
+
+test("SessionStart bounds malformed held-open input and input byte growth", async () => {
+  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+
+  try {
+    writeCommand(
+      fixture.bin,
+      "epic-harness",
+      `if [ "$1" = "version" ]; then
+  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2
+  exit 0
+fi
+exit 99`,
+      `if "%1"=="version" (
+  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} 1>&2
+  exit /b 0
+)
+exit /b 99`,
+    );
+    const child = spawn(process.execPath, [SCRIPT, "hook", "SessionStart", "resume"], {
+      env: { ...fixture.env, EPIC_HOOK_SESSIONSTART_INPUT_TIMEOUT_MS: "40" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stdin.write('{"hook_event_name":"SessionStart"');
+    const result = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ timeout: true }), 750);
+      child.once("exit", (code, signal) => {
+        clearTimeout(timer);
+        resolve({ code, signal, timeout: false });
+      });
+    });
+    if (result.timeout) {
+      child.kill();
+      await new Promise((resolve) => child.once("close", resolve));
+    }
+    assert.equal(result.timeout, false, "held-open malformed input must time out");
+    assert.notEqual(result.code, 0, result.signal ?? "malformed input unexpectedly succeeded");
+    assert.deepEqual(assertSingleJsonObject(stdout, "SessionStart input timeout"), {});
+    assert.match(stderr, /input timed out/i);
+
+    const oversized = runScript(
+      ["hook", "SessionStart", "resume"],
+      { ...fixture.env, EPIC_HOOK_SESSIONSTART_INPUT_MAX_BYTES: "16" },
+      JSON.stringify({ hook_event_name: "SessionStart", session_id: "too-large" }),
+    );
+    assert.notEqual(oversized.status, 0, oversized.stderr);
+    assert.deepEqual(assertSingleJsonObject(oversized.stdout, "SessionStart oversized input"), {});
+    assert.match(oversized.stderr, /input exceeded .* byte/i);
+  } finally {
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+});
+
+for (const [environmentKey, manifestDir] of [
+  ["PLUGIN_ROOT", ".codex-plugin"],
+  ["CLAUDE_PLUGIN_ROOT", ".claude-plugin"],
+]) {
+  test(`${environmentKey} SessionStart bounds installer and resume children without corrupting stdout`, () => {
+    const fixture = makeFixture(environmentKey, manifestDir);
+
+    try {
+      writeCommand(
+        fixture.bin,
+        "cargo",
+        `if [ "$1" = "binstall" ] && [ "$2" = "--version" ]; then\n  exit 0\nfi\nprintf '%s\\n' 'installer child stdout'\nsleep 5`,
+        `if "%1"=="binstall" if "%2"=="--version" exit /b 0\necho installer child stdout\n"%SystemRoot%\\System32\\ping.exe" -n 6 127.0.0.1 >nul`,
+      );
+      const installer = runScript(
+        ["hook", "SessionStart", "resume"],
+        { ...fixture.env, EPIC_HOOK_SESSIONSTART_CHILD_TIMEOUT_MS: "250" },
+        JSON.stringify({ hook_event_name: "SessionStart" }),
+      );
+      assert.notEqual(installer.status, 0, installer.stderr);
+      assert.deepEqual(assertSingleJsonObject(installer.stdout, "installer timeout"), {});
+      assert.match(installer.stderr, /(?:installer|cargo-binstall).*timed out/i);
+
+      writeCommand(
+        fixture.bin,
+        "epic-harness",
+        `if [ "$1" = "version" ]; then\n  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2\n  exit 0\nfi\nprintf '%s\\n' 'resume child stdout'\nsleep 5`,
+        `if "%1"=="version" (\n  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} 1>&2\n  exit /b 0\n)\necho resume child stdout\n"%SystemRoot%\\System32\\ping.exe" -n 6 127.0.0.1 >nul`,
+      );
+      const resume = runScript(
+        ["hook", "SessionStart", "resume"],
+        { ...fixture.env, EPIC_HOOK_SESSIONSTART_CHILD_TIMEOUT_MS: "250" },
+        JSON.stringify({ hook_event_name: "SessionStart" }),
+      );
+      assert.notEqual(resume.status, 0, resume.stderr);
+      assert.deepEqual(assertSingleJsonObject(resume.stdout, "resume timeout"), {});
+      assert.match(resume.stderr, /resume.*timed out/i);
+      assert.doesNotMatch(resume.stdout, /child stdout/);
+    } finally {
+      rmSync(fixture.root, { force: true, recursive: true });
+    }
+  });
+}
+
 test("Codex runner preserves closed empty, malformed, and trailing input", () => {
   const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
   const stdinPath = join(fixture.root, "stdin.txt");
