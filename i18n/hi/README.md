@@ -22,7 +22,7 @@
   <a href="https://buymeacoffee.com/epicsaga"><img alt="Buy Me a Coffee" src="https://img.shields.io/badge/buy_me_a_coffee-FFDD00?style=for-the-badge&labelColor=0d1117&logo=buymeacoffee&logoColor=black" /></a>
 </p>
 
-एक Claude Code प्लगइन जो **30+ कमांड्स + 19 ऑटो-ट्रिगर स्किल्स में समेकित** करता है, **आप जो कर रहे हैं उसके आधार पर स्वचालित रूप से स्किल्स ट्रिगर करता है**, और **आपके अपने विफलता पैटर्न से नई स्किल्स विकसित करता है**।
+एक Claude Code और Codex CLI प्लगइन जो **30+ कमांड्स + 19 ऑटो-ट्रिगर स्किल्स में समेकित** करता है, **आप जो कर रहे हैं उसके आधार पर स्वचालित रूप से स्किल्स ट्रिगर करता है**, और **आपके अपने विफलता पैटर्न से नई स्किल्स विकसित करता है**।
 
 <p align="center">
   <img src="../../assets/features.png" alt="epic harness features" width="100%" />
@@ -255,7 +255,7 @@ composite = 0.5 × tool_success + 0.3 × output_quality + 0.2 × execution_cost
 
 ```
 Observe (PostToolUse — 3-अक्ष स्कोरिंग)
-    ↓ obs/session_{id}.jsonl
+    ↓ SQLite harness.db (प्राथमिक); obs/session_{id}.jsonl संगतता फ़ॉलबैक है
 Analyze (SessionEnd)
     ↓ प्रति-टूल, प्रति-ext स्कोर + पैटर्न
 Propose (Solver — स्कोर द्वारा graduated: ≥0.90 skip, ≥0.70 moderate, <0.70 full)
@@ -334,7 +334,7 @@ observe (100% confirmed) → extract_instincts() → instinct node (confidence �
 
 Polish observe में फीडबैक देता है: format विफलता → `lint_fail`, TypeScript error → `build_fail`। Edit→Error thrashing तब भी detect होता है जब errors polish से आते हैं।
 
-प्रत्येक सेशन अपना `session_{date}_{host-session-id}.jsonl` लिखता है — कई समवर्ती सेशन एक-दूसरे के डेटा को corrupt नहीं करेंगे।
+SQLite सेशन अवलोकनों का प्राथमिक स्टोर है; `session_{date}_{host-session-id}.jsonl` केवल संगतता फ़ॉलबैक है।
 
 ### Hook प्रोफ़ाइल
 
@@ -518,7 +518,7 @@ Lifecycle: 30+ दिन बिना access → 10% importance decay (floor 0.0
 └── projects/{slug}/
     ├── memory/                # प्रोजेक्ट patterns और rules
     ├── sessions/              # सेशन snapshots (resume के लिए)
-    ├── obs/                   # Tool usage observation logs (JSONL)
+    ├── obs/                   # JSONL संगतता फ़ॉलबैक अवलोकन लॉग (SQLite प्राथमिक है)
     ├── evolved/               # ऑटो-विकसित स्किल्स
     │   ├── manifest.json
     │   └── {skill}/SKILL.md + meta.json

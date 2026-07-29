@@ -22,7 +22,7 @@
   <a href="https://buymeacoffee.com/epicsaga"><img alt="Buy Me a Coffee" src="https://img.shields.io/badge/buy_me_a_coffee-FFDD00?style=for-the-badge&labelColor=0d1117&logo=buymeacoffee&logoColor=black" /></a>
 </p>
 
-Um plugin do Claude Code que **consolida mais de 30 comandos em 3 comandos + 26 skills de acionamento automático**, e **evolui novas habilidades** a partir dos seus próprios padrões de falha.
+Um plugin do Claude Code e Codex CLI que **consolida mais de 30 comandos em 3 comandos + 26 skills de acionamento automático**, e **evolui novas habilidades** a partir dos seus próprios padrões de falha.
 
 <p align="center">
   <img src="../../assets/features.png" alt="funcionalidades do epic harness" width="100%" />
@@ -34,7 +34,7 @@ Um plugin do Claude Code que **consolida mais de 30 comandos em 3 comandos + 26 
 
 ### Painel Web — inicia automaticamente no início da sessão
 
-10 telas com métricas em tempo real para pontuações de eval, estatísticas de ferramentas, pipelines do orbit, habilidades evoluídas e saúde dos hooks. Abre automaticamente com a primeira sessão do Claude Code — nenhuma configuração manual necessária.
+10 telas com métricas em tempo real para pontuações de eval, estatísticas de ferramentas, pipelines do orbit, habilidades evoluídas e saúde dos hooks. Abre automaticamente com a primeira sessão do Claude Code ou Codex — nenhuma configuração manual necessária.
 
 <p align="center">
   <img src="../../assets/dashboard.png" alt="Dashboard" width="49%" />
@@ -281,7 +281,7 @@ Classificação de falhas (9 tipos): `type_error` · `syntax_error` · `test_fai
 
 ```
 Observe (PostToolUse — pontuação em 3 eixos)
-    ↓ obs/session_{id}.jsonl
+    ↓ SQLite harness.db (primário); obs/session_{id}.jsonl como fallback de compatibilidade
 Analyze (SessionEnd)
     ↓ pontuações por ferramenta, por extensão + padrões
 Propose (Solver — graduado por pontuação: ≥0.90 pular, ≥0.70 moderado, <0.70 completo)
@@ -395,7 +395,7 @@ Executam de forma invisível em cada sessão. Binário único em Rust (`epic-har
 
 Polish realimenta observe: falha de formatação → `lint_fail`, erro de TypeScript → `build_fail`. O thrashing Edit→Error é detectado mesmo quando os erros vêm do polish.
 
-Cada sessão grava seu próprio `session_{date}_{host-session-id}.jsonl` — múltiplas sessões concorrentes não corrompem os dados umas das outras.
+SQLite armazena observações de sessão de forma primária; `session_{date}_{host-session-id}.jsonl` é apenas um fallback de compatibilidade.
 
 ### Perfis de Hook
 
@@ -577,7 +577,7 @@ Todos os dados ficam em `~/.harness/` (diretório home), não na raiz do seu pro
 └── projects/{slug}/
     ├── memory/                # Padrões e regras do projeto
     ├── sessions/              # Snapshots de sessão (para resume)
-    ├── obs/                   # Registros de observação de uso de ferramentas (JSONL)
+    ├── obs/                   # Fallback de compatibilidade de observações (JSONL; SQLite é primário)
     ├── evolved/               # Habilidades autoevoluídas
     │   ├── manifest.json
     │   └── {skill}/SKILL.md + meta.json

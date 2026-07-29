@@ -22,7 +22,7 @@
   <a href="https://buymeacoffee.com/epicsaga"><img alt="Buy Me a Coffee" src="https://img.shields.io/badge/buy_me_a_coffee-FFDD00?style=for-the-badge&labelColor=0d1117&logo=buymeacoffee&logoColor=black" /></a>
 </p>
 
-Un plugin Claude Code qui **consolide plus de 30 commandes en 3 commandes + 26 skills a declenchement automatique**, et **genere de nouvelles competences** a partir de vos propres schemas d'echec.
+Un plugin Claude Code et Codex CLI qui **consolide plus de 30 commandes en 3 commandes + 26 skills a declenchement automatique**, et **genere de nouvelles competences** a partir de vos propres schemas d'echec.
 
 <p align="center">
   <img src="./assets/features.png" alt="fonctionnalites epic harness" width="100%" />
@@ -34,7 +34,7 @@ Un plugin Claude Code qui **consolide plus de 30 commandes en 3 commandes + 26 s
 
 ### Tableau de bord web — se lance automatiquement au demarrage de la session
 
-10 ecrans de metriques en temps reel pour les scores eval, les statistiques d'outils, les pipelines orbit, les competences evoluees et l'etat des hooks. S'ouvre automatiquement lors de la premiere session Claude Code — aucune configuration manuelle necessaire.
+10 ecrans de metriques en temps reel pour les scores eval, les statistiques d'outils, les pipelines orbit, les competences evoluees et l'etat des hooks. S'ouvre automatiquement lors de la premiere session Claude Code ou Codex — aucune configuration manuelle necessaire.
 
 <p align="center">
   <img src="../../assets/dashboard.png" alt="Dashboard" width="49%" />
@@ -281,7 +281,7 @@ Classification des echecs (9 types) : `type_error` · `syntax_error` · `test_fa
 
 ```
 Observe (PostToolUse — notation sur 3 axes)
-    ↓ obs/session_{id}.jsonl
+    ↓ SQLite harness.db (primaire) ; obs/session_{id}.jsonl est un secours de compatibilité
 Analyze (SessionEnd)
     ↓ scores par outil, par extension + schemas
 Propose (Solver — gradue par score : ≥0.90 ignorer, ≥0.70 modere, <0.70 complet)
@@ -395,7 +395,7 @@ S'executent de maniere invisible a chaque session. Binaire Rust unique (`epic-ha
 
 Polish alimente observe : echec de formatage → `lint_fail`, erreur TypeScript → `build_fail`. Le va-et-vient Edition→Erreur est detecte meme lorsque les erreurs proviennent de polish.
 
-Chaque session ecrit son propre `session_{date}_{host-session-id}.jsonl` — des sessions concurrentes multiples ne corrompront pas les donnees des autres.
+SQLite stocke les observations de session en priorité ; `session_{date}_{host-session-id}.jsonl` n'est qu'un secours de compatibilité.
 
 ### Profils de hook
 
@@ -577,7 +577,7 @@ Toutes les donnees se trouvent dans `~/.harness/` (repertoire personnel), pas da
 └── projects/{slug}/
     ├── memory/                # Modeles et regles du projet
     ├── sessions/              # Instantanes de session (pour resume)
-    ├── obs/                   # Journaux d'observation d'utilisation des outils (JSONL)
+    ├── obs/                   # Secours de compatibilité des observations (JSONL ; SQLite est primaire)
     ├── evolved/               # Competences auto-evoluees
     │   ├── manifest.json
     │   └── {skill}/SKILL.md + meta.json

@@ -22,7 +22,7 @@
   <a href="https://buymeacoffee.com/epicsaga"><img alt="Buy Me a Coffee" src="https://img.shields.io/badge/buy_me_a_coffee-FFDD00?style=for-the-badge&labelColor=0d1117&logo=buymeacoffee&logoColor=black" /></a>
 </p>
 
-Ein Claude Code Plugin, das **30+ Befehle in 3 Befehle + 26 automatisch ausgelöste Skills konsolidiert** und **neue Skills entwickelt** aus Ihren eigenen Fehlermustern.
+Ein Claude Code- und Codex CLI-Plugin, das **30+ Befehle in 3 Befehle + 26 automatisch ausgelöste Skills konsolidiert** und **neue Skills entwickelt** aus Ihren eigenen Fehlermustern.
 
 <p align="center">
   <img src="../../assets/features.png" alt="Epic Harness Funktionen" width="100%" />
@@ -34,7 +34,7 @@ Ein Claude Code Plugin, das **30+ Befehle in 3 Befehle + 26 automatisch ausgelö
 
 ### Web-Dashboard — wird automatisch beim Session-Start gestartet
 
-10 Bildschirme mit Echtzeit-Metriken für Eval-Bewertungen, Tool-Statistiken, Orbit-Pipelines, entwickelte Skills und Hook-Zustand. Öffnet sich automatisch bei der ersten Claude Code-Session — kein manuelles Setup erforderlich.
+10 Bildschirme mit Echtzeit-Metriken für Eval-Bewertungen, Tool-Statistiken, Orbit-Pipelines, entwickelte Skills und Hook-Zustand. Öffnet sich automatisch bei der ersten Claude Code- oder Codex-Session — kein manuelles Setup erforderlich.
 
 <p align="center">
   <img src="../../assets/dashboard.png" alt="Dashboard" width="49%" />
@@ -281,7 +281,7 @@ Fehlerklassifizierung (9 Typen): `type_error` · `syntax_error` · `test_fail` �
 
 ```
 Observe (PostToolUse — 3-Achsen-Bewertung)
-    ↓ obs/session_{id}.jsonl
+    ↓ SQLite harness.db (primär); obs/session_{id}.jsonl als Kompatibilitäts-Fallback
 Analyze (SessionEnd)
     ↓ pro-Tool, pro-Erweiterung Bewertungen + Muster
 Propose (Solver — gestaffelt nach Bewertung: ≥0.90 überspringen, ≥0.70 moderat, <0.70 vollständig)
@@ -395,7 +395,7 @@ Laufen unsichtbar bei jeder Session. Ein einzelnes Rust-Binary (`epic-harness`) 
 
 Polish meldet Ergebnisse zurück an observe: Formatierungsfehler → `lint_fail`, TypeScript-Fehler → `build_fail`. Edit→Error-Thrashing wird sogar erkannt, wenn die Fehler aus polish stammen.
 
-Jede Session schreibt ihre eigene `session_{date}_{host-session-id}.jsonl` — mehrere gleichzeitige Sessions beschädigen nicht gegenseitig ihre Daten.
+SQLite speichert Sitzungsbeobachtungen primär; `session_{date}_{host-session-id}.jsonl` ist nur ein Kompatibilitäts-Fallback.
 
 ### Hook-Profile
 
@@ -577,7 +577,7 @@ Alle Daten befinden sich in `~/.harness/` (Home-Verzeichnis), nicht im Projektve
 └── projects/{slug}/
     ├── memory/                # Projektmuster und Regeln
     ├── sessions/              # Session-Snapshots (für Resume)
-    ├── obs/                   # Tool-Nutzungs-Beobachtungsprotokolle (JSONL)
+    ├── obs/                   # JSONL-Kompatibilitäts-Fallback für Beobachtungen (SQLite ist primär)
     ├── evolved/               # Automatisch entwickelte Skills
     │   ├── manifest.json
     │   └── {skill}/SKILL.md + meta.json

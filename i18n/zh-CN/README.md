@@ -22,7 +22,7 @@
   <a href="https://buymeacoffee.com/epicsaga"><img alt="Buy Me a Coffee" src="https://img.shields.io/badge/buy_me_a_coffee-FFDD00?style=for-the-badge&labelColor=0d1117&logo=buymeacoffee&logoColor=black" /></a>
 </p>
 
-一个 Claude Code 插件，**将 30+ 条命令整合为 3 个命令 + 26 个自动触发技能**，根据你正在做的事情**自动触发技能**，并从你的失败模式中**进化出新的技能**。
+一个 Claude Code 和 Codex CLI 插件，**将 30+ 条命令整合为 3 个命令 + 26 个自动触发技能**，根据你正在做的事情**自动触发技能**，并从你的失败模式中**进化出新的技能**。
 
 <p align="center">
   <img src="./assets/features.png" alt="epic harness features" width="100%" />
@@ -34,7 +34,7 @@
 
 ### Web 控制面板 — 会话启动时自动打开
 
-10 屏实时指标，覆盖 eval 评分、工具统计、orbit 流水线、进化技能和 hook 健康。首次 Claude Code 会话时自动打开 — 无需手动配置。
+10 屏实时指标，覆盖 eval 评分、工具统计、orbit 流水线、进化技能和 hook 健康。首次 Claude Code 或 Codex 会话时自动打开 — 无需手动配置。
 
 <p align="center">
   <img src="../../assets/dashboard.png" alt="Dashboard" width="49%" />
@@ -281,7 +281,7 @@ composite = 0.5 × tool_success + 0.3 × output_quality + 0.2 × execution_cost
 
 ```
 Observe（PostToolUse — 3 轴评分）
-    ↓ obs/session_{id}.jsonl
+    ↓ SQLite harness.db（主要）；obs/session_{id}.jsonl 为兼容性回退
 Analyze（SessionEnd）
     ↓ 按工具、按扩展名的评分 + 模式
 Propose（Solver — 按评分渐进：≥0.90 跳过，≥0.70 适度，<0.70 完整）
@@ -395,7 +395,7 @@ observe（100% 确认）→ extract_instincts() → instinct 节点（置信度 
 
 Polish 反馈到 observe：格式化失败 → `lint_fail`，TypeScript 错误 → `build_fail`。编辑→错误交替模式即使在错误来自 polish 时也能被检测到。
 
-每次会话写入自己的 `session_{date}_{host-session-id}.jsonl` — 多个并发会话不会互相破坏数据。
+SQLite 是会话观测的主要存储；`session_{date}_{host-session-id}.jsonl` 仅为兼容性回退。
 
 ### Hook 配置方案
 
@@ -577,7 +577,7 @@ epic mem export --out ./docs/memory                    # 导出为 Markdown
 └── projects/{slug}/
     ├── memory/                # 项目模式和规则
     ├── sessions/              # 会话快照（用于 resume）
-    ├── obs/                   # 工具使用观测日志（JSONL）
+    ├── obs/                   # 观测兼容性回退（JSONL；SQLite 为主要存储）
     ├── evolved/               # 自动进化技能
     │   ├── manifest.json
     │   └── {skill}/SKILL.md + meta.json

@@ -22,7 +22,7 @@
   <a href="https://buymeacoffee.com/epicsaga"><img alt="Buy Me a Coffee" src="https://img.shields.io/badge/buy_me_a_coffee-FFDD00?style=for-the-badge&labelColor=0d1117&logo=buymeacoffee&logoColor=black" /></a>
 </p>
 
-一個 Claude Code 外掛，將 30+ 條命令整合為 **3 條命令 + 26 個自動觸發技能**，並**從你自己的失敗模式中進化出新技能**。
+一個 Claude Code 和 Codex CLI 外掛，將 30+ 條命令整合為 **3 條命令 + 26 個自動觸發技能**，並**從你自己的失敗模式中進化出新技能**。
 
 <p align="center">
   <img src="../../assets/features.png" alt="epic harness 功能" width="100%" />
@@ -34,7 +34,7 @@
 
 ### Web 控制面板 — 會話啟動時自動開啟
 
-10 螢幕即時指標，涵蓋 eval 評分、工具統計、orbit 流水線、進化技能和掛鉤健康狀態。首次 Claude Code 會話時自動開啟 — 無需手動設定。
+10 螢幕即時指標，涵蓋 eval 評分、工具統計、orbit 流水線、進化技能和掛鉤健康狀態。首次 Claude Code 或 Codex 會話時自動開啟 — 無需手動設定。
 
 <p align="center">
   <img src="../../assets/dashboard.png" alt="Dashboard" width="49%" />
@@ -281,7 +281,7 @@ composite = 0.5 × tool_success + 0.3 × output_quality + 0.2 × execution_cost
 
 ```
 Observe (PostToolUse — 3-axis scoring)
-    ↓ obs/session_{id}.jsonl
+    ↓ SQLite harness.db（主要）；obs/session_{id}.jsonl 為相容性備援
 Analyze (SessionEnd)
     ↓ per-tool, per-ext scores + patterns
 Propose (Solver — graduated by score: ≥0.90 skip, ≥0.70 moderate, <0.70 full)
@@ -395,7 +395,7 @@ observe (100% confirmed) → extract_instincts() → instinct node (confidence �
 
 Polish 回饋至 observe：格式化失敗 → `lint_fail`，TypeScript 錯誤 → `build_fail`。即使錯誤來自 polish，Edit→Error 抖振也會被偵測到。
 
-每個工作階段寫入各自的 `session_{date}_{host-session-id}.jsonl` — 多個並行工作階段不會互相損壞資料。
+SQLite 是工作階段觀測的主要儲存；`session_{date}_{host-session-id}.jsonl` 僅為相容性備援。
 
 ### 掛鉤設定檔
 
@@ -577,7 +577,7 @@ epic mem export --out ./docs/memory                    # 匯出為 Markdown
 └── projects/{slug}/
     ├── memory/                # 專案模式和規則
     ├── sessions/              # 工作階段快照（用於恢復）
-    ├── obs/                   # 工具使用觀測日誌（JSONL）
+    ├── obs/                   # 觀測相容性備援（JSONL；SQLite 為主要儲存）
     ├── evolved/               # 自動進化的技能
     │   ├── manifest.json
     │   └── {skill}/SKILL.md + meta.json

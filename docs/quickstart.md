@@ -55,7 +55,7 @@ irm https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harn
 
 ## First Session
 
-1. **Open any project** in Claude Code. epic-harness auto-detects the stack (Node, Go, Python, Rust, …) and initializes your data directory in `~/.harness/projects/{slug}/` on the first session.
+1. **Open any project** in Claude Code or Codex. epic-harness auto-detects the stack (Node, Go, Python, Rust, …) and initializes your data directory in `~/.harness/projects/{slug}/` on the first session.
 
 2. **Try a command:**
 
@@ -93,7 +93,9 @@ ls ~/.harness/projects/
 /evolve status   # see your scores, trends, evolved skills
 ```
 
-If `metrics.json` exists and `obs/session_*.jsonl` is non-empty, observation is working.
+`~/.harness/harness.db` (SQLite) is the primary observation store. An
+`obs/session_*.jsonl` file is compatibility fallback data, not the primary
+verification signal.
 
 ## What Happens Next
 
@@ -105,8 +107,8 @@ If `metrics.json` exists and `obs/session_*.jsonl` is non-empty, observation is 
 
 | Symptom | Fix |
 |---------|-----|
-| Hooks not running | Verify the `epic` binary is in PATH (`which epic`); reinstall the plugin (`/plugin install epic@epicsagas`) and restart Claude Code |
-| `~/.harness/projects/` not created | Restart Claude Code session (resume hook initializes it) |
+| Hooks not running | Verify `epic-harness` is in PATH; reinstall the affected Claude Code or Codex plugin using the commands above, then restart that host |
+| `~/.harness/projects/` not created | Restart the Claude Code or Codex session (the resume hook initializes it) |
 | `/evolve status` empty | Need at least 1 completed session first |
 
 ## Next Steps
