@@ -534,7 +534,11 @@ warned:
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &link).unwrap();
         #[cfg(windows)]
-        std::os::windows::fs::symlink_file(&real, &link).unwrap();
+        match std::os::windows::fs::symlink_file(&real, &link) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(1314) => return,
+            Err(error) => panic!("create symlink fixture: {error}"),
+        }
 
         let result = scan_running_pipeline_in(dir.path());
         assert!(

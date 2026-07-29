@@ -673,6 +673,41 @@ mod tests {
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
+    fn test_command(dir: &Path) -> PathBuf {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let command = dir.join("test-command.sh");
+            fs::write(
+                &command,
+                "#!/bin/sh\n\
+                 if [ \"$1\" = \"--fail\" ]; then exit 1; fi\n\
+                 if [ \"$1\" = \"--success\" ]; then exit 0; fi\n\
+                 printf '%s' \"$1\"\n",
+            )
+            .unwrap();
+            let mut permissions = fs::metadata(&command).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&command, permissions).unwrap();
+            command
+        }
+
+        #[cfg(windows)]
+        {
+            let command = dir.join("test-command.cmd");
+            fs::write(
+                &command,
+                "@echo off\r\n\
+                 if \"%~1\"==\"--fail\" exit /b 1\r\n\
+                 if \"%~1\"==\"--success\" exit /b 0\r\n\
+                 echo %~1\r\n",
+            )
+            .unwrap();
+            command
+        }
+    }
+
     /// Verify that `try_exec_args` does NOT interpret shell metacharacters in
     /// the path argument.  A path containing `; touch INJECTED` would create
     /// a sentinel file if passed through `sh -c`; it must not happen here.
@@ -680,13 +715,13 @@ mod tests {
     fn try_exec_args_no_shell_injection() {
         let dir = tempdir().unwrap();
         let sentinel = dir.path().join("INJECTED");
+        let command = test_command(dir.path());
 
         // Malicious file_path that escapes a double-quoted shell argument and
         // runs `touch <sentinel>`.
         let malicious = format!("foo\"; touch {} ; echo \"", sentinel.to_string_lossy());
 
-        // "echo" always succeeds; we only care that the shell never ran.
-        let _ = try_exec_args("echo", &[&malicious], dir.path());
+        let _ = try_exec_args(command.to_str().unwrap(), &[&malicious], dir.path());
 
         assert!(
             !sentinel.exists(),
@@ -700,11 +735,11 @@ mod tests {
     #[test]
     fn try_exec_args_passes_path_as_literal_arg() {
         let dir = tempdir().unwrap();
+        let command = test_command(dir.path());
 
         let path_with_spaces = "file with spaces and 'quotes'.js";
 
-        // `printf '%s\n'` echoes each argument back unchanged.
-        let out = try_exec_args("printf", &["%s\n", path_with_spaces], dir.path());
+        let out = try_exec_args(command.to_str().unwrap(), &[path_with_spaces], dir.path());
 
         assert_eq!(
             out.as_deref().map(str::trim),
@@ -715,16 +750,17 @@ mod tests {
 
     #[test]
     fn try_exec_args_returns_none_on_nonzero_exit() {
-        // `false` command always exits with code 1
         let dir = tempdir().unwrap();
-        let result = try_exec_args("false", &[], dir.path());
+        let command = test_command(dir.path());
+        let result = try_exec_args(command.to_str().unwrap(), &["--fail"], dir.path());
         assert!(result.is_none(), "non-zero exit must return None");
     }
 
     #[test]
     fn try_exec_args_returns_some_on_success() {
         let dir = tempdir().unwrap();
-        let result = try_exec_args("true", &[], dir.path());
+        let command = test_command(dir.path());
+        let result = try_exec_args(command.to_str().unwrap(), &["--success"], dir.path());
         assert!(result.is_some(), "zero exit must return Some");
     }
 
@@ -817,7 +853,7 @@ mod tests {
         let targets = validate_targets(vec!["src/main.py".into()], dir.path()).unwrap();
         assert_eq!(
             targets,
-            vec![dir.path().join("src/main.py").canonicalize().unwrap()]
+            vec![canonical_for_compare(&dir.path().join("src/main.py")).unwrap()]
         );
     }
 
