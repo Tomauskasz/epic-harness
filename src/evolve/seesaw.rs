@@ -57,8 +57,15 @@ pub fn scores_from_digests(digests: &[TaskDigest]) -> HashMap<String, f64> {
     digests
         .iter()
         // A digest with no evaluated observations has no outcome evidence.
-        // Never let a vacant `Success` establish a solved-task baseline.
-        .filter(|d| d.observation_count > 0)
+        // The zero-step partial outcome is the explicit defensive failure
+        // case: score it as zero instead of discarding it as unknown.
+        .filter(|d| {
+            d.observation_count > 0
+                || matches!(
+                    d.outcome,
+                    TaskOutcome::PartialFailure { total_steps: 0, .. }
+                )
+        })
         .map(|d| {
             (
                 d.task_id.clone(),
