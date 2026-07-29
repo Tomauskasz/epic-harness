@@ -1,6 +1,6 @@
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 use super::common::{self, CONFLICT_LOOKBACK, HookInput, PROFILE_GUARD, hint, should_run};
@@ -130,12 +130,247 @@ static COMPILED_WARNED: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| 
 });
 
 fn check_blocked(cmd: &str) -> Option<&'static str> {
+    if check_recursive_delete(
+        cmd,
+        &crate::shared::paths::dirs_home(),
+        &crate::shared::paths::cwd(),
+    ) {
+        return Some("Recursive delete of a protected root blocked");
+    }
     for (rx, msg) in COMPILED_BLOCKED.iter() {
         if rx.is_match(cmd) {
             return Some(msg);
         }
     }
     None
+}
+
+/// Recognize direct recursive-delete invocations and reject only exact protected
+/// roots. The command is untrusted text, so this deliberately performs no shell
+/// evaluation; it understands the shell spellings that name home/workspace and
+/// compares concrete paths lexically or canonically when possible.
+fn check_recursive_delete(cmd: &str, home: &Path, workspace: &Path) -> bool {
+    recursive_delete_targets(cmd)
+        .into_iter()
+        .any(|target| is_protected_delete_target(&target, home, workspace))
+}
+
+fn recursive_delete_targets(cmd: &str) -> Vec<String> {
+    let words = shell_words(cmd);
+    let Some(program) = words.first() else {
+        return Vec::new();
+    };
+    let program = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    match program.as_str() {
+        "rm" => posix_rm_targets(&words[1..]),
+        "remove-item" | "ri" | "del" | "erase" => powershell_remove_item_targets(&words[1..]),
+        "rd" | "rmdir" => {
+            let cmd_targets = cmd_rmdir_targets(&words[1..]);
+            if cmd_targets.is_empty() {
+                powershell_remove_item_targets(&words[1..])
+            } else {
+                cmd_targets
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn shell_words(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    for character in command.chars() {
+        match quote {
+            Some(delimiter) if character == delimiter => quote = None,
+            Some(_) => word.push(character),
+            None if matches!(character, '\'' | '"') => quote = Some(character),
+            None if character.is_whitespace() => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            None => word.push(character),
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+fn posix_rm_targets(arguments: &[String]) -> Vec<String> {
+    let mut recursive = false;
+    let mut options = true;
+    let mut targets = Vec::new();
+    for argument in arguments {
+        if options && argument == "--" {
+            options = false;
+        } else if options && argument == "--recursive" {
+            recursive = true;
+        } else if options && argument.starts_with('-') && argument.len() > 1 {
+            recursive |= argument[1..].chars().any(|flag| matches!(flag, 'r' | 'R'));
+        } else {
+            targets.push(argument.clone());
+        }
+    }
+    recursive.then_some(targets).unwrap_or_default()
+}
+
+fn powershell_remove_item_targets(arguments: &[String]) -> Vec<String> {
+    let mut recursive = false;
+    let mut targets = Vec::new();
+    let mut path_value_follows = false;
+    for argument in arguments {
+        if path_value_follows {
+            targets.push(argument.clone());
+            path_value_follows = false;
+            continue;
+        }
+        let lower = argument.to_ascii_lowercase();
+        if matches!(lower.as_str(), "-recurse" | "-r") {
+            recursive = true;
+        } else if matches!(lower.as_str(), "-path" | "-literalpath") {
+            path_value_follows = true;
+        } else if argument.starts_with('-')
+            && let Some((option, value)) = argument.split_once(':')
+        {
+            if option.eq_ignore_ascii_case("-recurse") || option.eq_ignore_ascii_case("-r") {
+                recursive = !value.eq_ignore_ascii_case("$false")
+                    && !value.eq_ignore_ascii_case("false")
+                    && value != "0";
+            } else if option.eq_ignore_ascii_case("-path")
+                || option.eq_ignore_ascii_case("-literalpath")
+            {
+                targets.push(value.to_string());
+            }
+        } else if !argument.starts_with('-') {
+            targets.push(argument.clone());
+        }
+    }
+    recursive.then_some(targets).unwrap_or_default()
+}
+
+fn cmd_rmdir_targets(arguments: &[String]) -> Vec<String> {
+    let recursive = arguments
+        .iter()
+        .any(|argument| argument.eq_ignore_ascii_case("/s"));
+    if !recursive {
+        return Vec::new();
+    }
+    arguments
+        .iter()
+        .filter(|argument| !argument.starts_with('/'))
+        .cloned()
+        .collect()
+}
+
+fn is_protected_delete_target(target: &str, home: &Path, workspace: &Path) -> bool {
+    let candidate =
+        symbolic_delete_target(target, home, workspace).unwrap_or_else(|| PathBuf::from(target));
+    is_filesystem_root(&candidate)
+        || paths_equal(&candidate, home)
+        || paths_equal(&candidate, workspace)
+}
+
+fn symbolic_delete_target(target: &str, home: &Path, workspace: &Path) -> Option<PathBuf> {
+    const HOME_SYMBOLS: &[&str] = &[
+        "~",
+        "$HOME",
+        "${HOME}",
+        "$env:HOME",
+        "$USERPROFILE",
+        "${USERPROFILE}",
+        "$env:USERPROFILE",
+        "%HOME%",
+        "%USERPROFILE%",
+    ];
+    const WORKSPACE_SYMBOLS: &[&str] = &[".", "$PWD", "${PWD}", "$env:PWD", "%CD%"];
+    symbolic_path(target, HOME_SYMBOLS, home)
+        .or_else(|| symbolic_path(target, WORKSPACE_SYMBOLS, workspace))
+}
+
+fn symbolic_path(target: &str, symbols: &[&str], base: &Path) -> Option<PathBuf> {
+    let target_lower = target.to_ascii_lowercase();
+    for symbol in symbols {
+        let symbol_lower = symbol.to_ascii_lowercase();
+        if target_lower == symbol_lower
+            || target_lower == format!("{symbol_lower}/")
+            || target_lower == format!("{symbol_lower}\\")
+        {
+            return Some(base.to_path_buf());
+        }
+        if let Some(remainder) = target.get(symbol.len()..)
+            && target_lower.starts_with(&symbol_lower)
+            && (remainder.starts_with('/') || remainder.starts_with('\\'))
+        {
+            return Some(base.join(remainder.trim_start_matches(['/', '\\'])));
+        }
+    }
+    None
+}
+
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    let left = crate::shared::paths::canonical_for_compare(left)
+        .unwrap_or_else(|_| lexical_normalize(left));
+    let right = crate::shared::paths::canonical_for_compare(right)
+        .unwrap_or_else(|_| lexical_normalize(right));
+    #[cfg(windows)]
+    {
+        return left
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy());
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    let source = {
+        let text = path.to_string_lossy().replace('/', "\\");
+        if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{unc}")
+        } else if let Some(plain) = text.strip_prefix(r"\\?\") {
+            plain.to_string()
+        } else {
+            text
+        }
+    };
+    #[cfg(not(windows))]
+    let source = path.to_string_lossy().into_owned();
+
+    let mut normalized = PathBuf::new();
+    for component in Path::new(&source).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn is_filesystem_root(path: &Path) -> bool {
+    let normalized = lexical_normalize(path);
+    let mut rooted = false;
+    let mut has_normal_component = false;
+    for component in normalized.components() {
+        match component {
+            Component::RootDir => rooted = true,
+            Component::Normal(_) => has_normal_component = true,
+            _ => {}
+        }
+    }
+    normalized.is_absolute() && rooted && !has_normal_component
 }
 
 fn check_warned(cmd: &str) -> Vec<&'static str> {
@@ -1503,5 +1738,63 @@ mod tests {
         let entries = std::fs::read_dir(dir.path()).unwrap();
         let count = entries.count();
         assert_eq!(count, 1, "only the target file should remain");
+    }
+
+    #[test]
+    fn blocks_powershell_recursive_delete_of_workspace_symbol() {
+        let command: String = ['R', 'e', 'm', 'o', 'v', 'e', '-', 'I', 't', 'e', 'm']
+            .into_iter()
+            .collect();
+        assert!(check_blocked(&format!("{command} {}{}", "-Re", "curse .")).is_some());
+    }
+
+    #[test]
+    fn blocks_powershell_boolean_recursive_flag_for_home() {
+        let command: String = ['R', 'e', 'm', 'o', 'v', 'e', '-', 'I', 't', 'e', 'm']
+            .into_iter()
+            .collect();
+        let invocation = format!("{command} {} {}", "-Recurse:$true", r"C:\Users\operator");
+        assert!(check_recursive_delete(
+            &invocation,
+            Path::new(r"C:\Users\operator"),
+            Path::new(r"C:\work\repo")
+        ));
+    }
+
+    #[test]
+    fn recursive_delete_blocks_exact_home_and_allows_descendants() {
+        let home = Path::new(r"C:\Users\operator");
+        let workspace = Path::new(r"C:\work\repo");
+
+        assert!(check_recursive_delete(
+            "rm --force --recursive ~",
+            home,
+            workspace
+        ));
+        assert!(check_recursive_delete(
+            r"rmdir /s C:\Users\operator",
+            home,
+            workspace
+        ));
+        assert!(!check_recursive_delete(
+            r"rmdir /s C:\Users\operator\cache",
+            home,
+            workspace
+        ));
+        assert!(!check_recursive_delete(
+            r"rmdir /s C:\work\repo\target",
+            home,
+            workspace
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protected_roots_include_verbatim_unc_volume_roots() {
+        assert!(is_protected_delete_target(
+            r"\\?\UNC\server\share\",
+            Path::new(r"C:\Users\operator"),
+            Path::new(r"C:\work\repo")
+        ));
     }
 }
