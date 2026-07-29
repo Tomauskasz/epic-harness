@@ -67,29 +67,46 @@ pub(crate) fn run_preserving_session(
     active_session: Option<(&str, &str)>,
 ) -> io::Result<(u64, usize)> {
     let projects = harness_projects_root();
+    let harness = harness_dir();
+    let obs = obs_dir();
+    run_preserving_session_at(
+        active_session,
+        crate::config::CONFIG.db.retention_days,
+        &projects,
+        &harness,
+        &obs,
+    )
+}
+
+fn run_preserving_session_at(
+    active_session: Option<(&str, &str)>,
+    days: u64,
+    projects: &Path,
+    harness: &Path,
+    obs: &Path,
+) -> io::Result<(u64, usize)> {
+    if days == 0 {
+        return Ok((0, 0));
+    }
+
     let now = SystemTime::now();
-    let Some(_lease) = try_acquire_global_retention_lease(&projects, now)? else {
+    let Some(_lease) = try_acquire_global_retention_lease(projects, now)? else {
         return Ok((0, 0));
     };
 
     // Complete every bounded, fallible scan before any delete/prune operation.
-    let active_sessions = active_reflection_sessions(&projects, active_session)?;
-    let mut files = sweep_runtime_files(&harness_dir(), &obs_dir(), now);
-    let days = crate::config::CONFIG.db.retention_days;
-    if days == 0 {
-        record_global_retention(&projects)?;
-        return Ok((0, files));
-    }
+    let active_sessions = active_reflection_sessions(projects, active_session)?;
+    let mut files = sweep_runtime_files(harness, obs, now);
 
     let cutoff_day = days_ago(days);
     let rows = delete_old_rows(&cutoff_day, &active_sessions)?;
-    files += prune_observation_jsonl_excluding(&projects, &cutoff_day, &active_sessions)?;
+    files += prune_observation_jsonl_excluding(projects, &cutoff_day, &active_sessions)?;
     files += prune_completed_reflection_jobs(
-        &projects,
+        projects,
         Duration::from_secs(days.saturating_mul(24 * 60 * 60)),
         now,
     )?;
-    record_global_retention(&projects)?;
+    record_global_retention(projects)?;
     Ok((rows, files))
 }
 
@@ -695,6 +712,55 @@ mod tests {
                 later()
             ),
             0
+        );
+    }
+
+    #[test]
+    fn zero_day_retention_keeps_runtime_observations_and_completed_jobs() {
+        let dir = tempdir().unwrap();
+        let harness = dir.path().join("harness");
+        let obs = harness.join("obs");
+        let projects = dir.path().join("projects");
+        let project_obs = projects.join("project-a").join("obs");
+        let queue = projects.join("project-a").join("reflect-queue");
+        fs::create_dir_all(&obs).unwrap();
+        fs::create_dir_all(&project_obs).unwrap();
+        fs::create_dir_all(&queue).unwrap();
+
+        let runtime_lock = harness.join("resume.20260101_stale.lock");
+        let runtime_event = harness.join("resume.20260101_stale.event");
+        let telemetry = obs.join("telemetry_error_count_20260101_stale.txt");
+        let observation = project_obs.join("session_20260101_stale.jsonl");
+        let completed_job = queue.join("job_20260101_stale.completed");
+        for path in [
+            &runtime_lock,
+            &runtime_event,
+            &telemetry,
+            &observation,
+            &completed_job,
+        ] {
+            File::create(path).unwrap();
+        }
+
+        let retained = run_preserving_session_at(None, 0, &projects, &harness, &obs).unwrap();
+
+        assert_eq!(retained, (0, 0));
+        for path in [
+            &runtime_lock,
+            &runtime_event,
+            &telemetry,
+            &observation,
+            &completed_job,
+        ] {
+            assert!(
+                path.exists(),
+                "zero-day retention must keep {}",
+                path.display()
+            );
+        }
+        assert!(
+            !projects.join("retention.lock").exists(),
+            "disabled retention must not acquire a sweep lease"
         );
     }
 
