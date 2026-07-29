@@ -102,12 +102,13 @@ fn cached_orbit_state_common() -> Option<serde_json::Value> {
 /// Detect an active orbit pipeline by scanning PIPELINE-*.json files.
 /// Results are cached for 60 seconds to avoid a directory scan per hook call.
 /// Returns Some(pipeline_id) if a file with `"status": "running"` exists.
-/// The returned ID is normalized: only `a-z`, `0-9`, `-`, `_` are kept.
+/// Noncanonical ids are rejected rather than normalized into a colliding value.
 pub fn detect_active_orbit_id() -> Option<String> {
     let val = cached_orbit_state_common()?;
     val.get("id")
         .and_then(|v| v.as_str())
-        .map(normalize_pipeline_id)
+        .filter(|id| is_canonical_pipeline_id(id))
+        .map(str::to_owned)
 }
 
 /// Read the full pipeline state for an active orbit (uncached, authoritative).
@@ -132,6 +133,10 @@ pub fn normalize_pipeline_id(id: &str) -> String {
         .collect()
 }
 
+fn is_canonical_pipeline_id(id: &str) -> bool {
+    !id.is_empty() && id == normalize_pipeline_id(id)
+}
+
 /// Check the invariants a completed orbit pipeline is supposed to satisfy.
 ///
 /// The pipeline file is written by the orbit skill, so nothing in the harness
@@ -144,10 +149,6 @@ pub fn normalize_pipeline_id(id: &str) -> String {
 /// Returns one message per violated invariant; empty means the state is
 /// self-consistent. Pipelines that are not complete are not checked — an
 /// in-flight pipeline is legitimately missing most of this.
-pub fn completion_violations(pipeline: &serde_json::Value) -> Vec<String> {
-    completion_violations_with_durable_evolution(pipeline, true)
-}
-
 /// Check completion invariants with separately verified SessionEnd evidence.
 /// A nonempty `evolution_session_id` is only self-assertion; callers that make
 /// a persistence or visibility decision must pass whether the exact
@@ -267,6 +268,72 @@ pub fn complete_pipelines_after_reflection_in(
     )
 }
 
+/// Select exact observed pipeline ids that are ready for SessionEnd evolution.
+/// Ordinary in-flight phases are intentionally ignored: observing a pipeline
+/// while it is in `go` or `ship` must not turn it into a durable completion
+/// candidate. A matching `awaiting_evolution` pipeline is fully validated
+/// before the reflection completion marker is allowed to record its id.
+pub fn reflection_completion_candidates_in(
+    harness_dir: &Path,
+    observed_pipeline_ids: &[String],
+) -> io::Result<Vec<String>> {
+    if observed_pipeline_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let orbit_dir = regular_orbit_dir(harness_dir)?;
+    let observed: std::collections::BTreeSet<&str> =
+        observed_pipeline_ids.iter().map(String::as_str).collect();
+    let mut candidates = std::collections::BTreeSet::new();
+    for entry in fs::read_dir(&orbit_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("PIPELINE-") || !name.ends_with(".json") {
+            continue;
+        }
+        validate_pipeline_path(&path, harness_dir, &orbit_dir)?;
+        let content = fs::read_to_string(&path)?;
+        let state: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid Orbit pipeline {}: {error}", path.display()),
+            )
+        })?;
+        if state.get("status").and_then(serde_json::Value::as_str) != Some("running") {
+            continue;
+        }
+        let Some(id) = state.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        // Only a pipeline observed in this SessionEnd can influence its
+        // durable completion marker.  An unrelated old/noncanonical file
+        // must not poison another pipeline's reflection replay.
+        if !observed.contains(id) {
+            continue;
+        }
+        if !is_canonical_pipeline_id(id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Orbit pipeline id must be canonical before SessionEnd completion",
+            ));
+        }
+        if state.get("phase").and_then(serde_json::Value::as_str) != Some("awaiting_evolution") {
+            continue;
+        }
+        validate_ready_for_reflection_completion(&state)?;
+        if !candidates.insert(id.to_string()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate observed Orbit pipeline id: {id}"),
+            ));
+        }
+    }
+    Ok(candidates.into_iter().collect())
+}
+
 fn complete_pipelines_after_verified_reflection_in(
     harness_dir: &Path,
     reflection_session_id: &str,
@@ -276,6 +343,7 @@ fn complete_pipelines_after_verified_reflection_in(
     let expected_ids: std::collections::BTreeSet<&str> =
         pipeline_ids.iter().map(String::as_str).collect();
     let mut pending = Vec::new();
+    let mut matched_ids = std::collections::BTreeSet::new();
     for entry in fs::read_dir(&orbit_dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -303,7 +371,19 @@ fn complete_pipelines_after_verified_reflection_in(
         if !expected_ids.contains(id) {
             continue;
         }
+        if !is_canonical_pipeline_id(id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Orbit pipeline id must be canonical before SessionEnd completion",
+            ));
+        }
         validate_ready_for_reflection_completion(&state)?;
+        if !matched_ids.insert(id.to_string()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate durable Orbit pipeline id: {id}"),
+            ));
+        }
         pending.push((path, state));
     }
 
@@ -347,7 +427,23 @@ fn validate_ready_for_reflection_completion(state: &serde_json::Value) -> io::Re
             "Orbit pipeline phase_history must already be an array",
         ));
     }
-    Ok(())
+    let mut completed = state.clone();
+    let object = completed.as_object_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Orbit pipeline state must be a JSON object",
+        )
+    })?;
+    object.insert(
+        "status".into(),
+        serde_json::Value::String("complete".into()),
+    );
+    object.insert("phase".into(), serde_json::Value::String("evolve".into()));
+    object.insert(
+        "evolution_session_id".into(),
+        serde_json::Value::String("validated-session".into()),
+    );
+    ensure_valid_completion(&completed, true)
 }
 
 fn ensure_valid_completion(state: &serde_json::Value, durable_evolution: bool) -> io::Result<()> {
@@ -454,7 +550,7 @@ fn atomic_write_pipeline(
             let _ = fs::remove_file(&temporary);
             return Err(error);
         }
-        return Ok(());
+        return sync_orbit_directory(orbit_dir);
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
@@ -465,12 +561,32 @@ fn atomic_write_pipeline(
     ))
 }
 
+fn sync_orbit_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::File::open(path)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 pub fn pipeline_is_dashboard_visible(pipeline: &serde_json::Value) -> bool {
     let completed = matches!(
         pipeline.get("status").and_then(serde_json::Value::as_str),
         Some("complete") | Some("shipped")
     );
-    completion_violations(pipeline).is_empty()
+    completion_violations_with_durable_evolution(
+        pipeline,
+        !completed
+            || pipeline
+                .get("_durable_evolution")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true),
+    )
+    .is_empty()
         && (!completed
             || pipeline
                 .get("_durable_evolution")
@@ -554,9 +670,12 @@ pub fn sanitize_orbit_field(s: &str) -> String {
 
 #[cfg(test)]
 mod completion_tests {
-    use super::completion_violations as violations;
     use serde_json::json;
     use std::fs;
+
+    fn violations(pipeline: &serde_json::Value) -> Vec<String> {
+        super::completion_violations_with_durable_evolution(pipeline, true)
+    }
 
     #[test]
     fn a_clean_completion_reports_nothing() {
@@ -804,14 +923,14 @@ mod completion_tests {
         let orbit = harness.path().join("orbit");
         fs::create_dir(&orbit).unwrap();
         let pipeline = orbit.join("PIPELINE-20260729-collision.json");
-        let before = r#"{"id":"a?b","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
+        let before = r#"{"id":"a-b","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
         fs::write(&pipeline, before).unwrap();
 
         assert_eq!(
             super::complete_pipelines_after_verified_reflection_in(
                 harness.path(),
                 "20260729_host",
-                &["a/b".into()],
+                &["a_b".into()],
             )
             .unwrap(),
             0
@@ -821,19 +940,161 @@ mod completion_tests {
     }
 
     #[test]
+    fn candidate_selection_ignores_in_flight_phases_then_accepts_awaiting_evolution() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-20260729-later.json");
+        let in_flight = r#"{"id":"later","status":"running","phase":"ship","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
+        fs::write(&pipeline, in_flight).unwrap();
+
+        assert_eq!(
+            super::reflection_completion_candidates_in(harness.path(), &["later".into()]).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(fs::read_to_string(&pipeline).unwrap(), in_flight);
+
+        fs::write(
+            &pipeline,
+            r#"{"id":"later","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            super::reflection_completion_candidates_in(harness.path(), &["later".into()]).unwrap(),
+            vec!["later"]
+        );
+    }
+
+    #[test]
+    fn candidate_selection_without_observed_pipeline_does_not_require_an_orbit_directory() {
+        let harness = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            super::reflection_completion_candidates_in(harness.path(), &[]).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn candidate_selection_rejects_noncanonical_id_without_changing_bytes() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-20260729-noncanonical.json");
+        let before = r#"{"id":"a?b","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
+        fs::write(&pipeline, before).unwrap();
+
+        assert!(
+            super::reflection_completion_candidates_in(harness.path(), &["a?b".into()],).is_err()
+        );
+        assert_eq!(fs::read_to_string(pipeline).unwrap(), before);
+    }
+
+    #[test]
+    fn candidate_selection_rejects_malformed_ready_pipeline_without_changing_bytes() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-20260729-malformed.json");
+        let before = r#"{"id":"malformed","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":{}}"#;
+        fs::write(&pipeline, before).unwrap();
+
+        let error =
+            super::reflection_completion_candidates_in(harness.path(), &["malformed".into()])
+                .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(fs::read_to_string(pipeline).unwrap(), before);
+    }
+
+    #[test]
+    fn candidate_selection_rejects_duplicate_observed_ids_without_changing_bytes() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let first = orbit.join("PIPELINE-20260729-duplicate-a.json");
+        let second = orbit.join("PIPELINE-20260729-duplicate-b.json");
+        let state = r#"{"id":"duplicate","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
+        fs::write(&first, state).unwrap();
+        fs::write(&second, state).unwrap();
+
+        assert!(
+            super::reflection_completion_candidates_in(harness.path(), &["duplicate".into()])
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(first).unwrap(), state);
+        assert_eq!(fs::read_to_string(second).unwrap(), state);
+    }
+
+    #[test]
+    fn completion_rejects_duplicate_durable_ids_without_changing_bytes() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let first = orbit.join("PIPELINE-20260729-duplicate-a.json");
+        let second = orbit.join("PIPELINE-20260729-duplicate-b.json");
+        let state = r#"{"id":"duplicate","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
+        fs::write(&first, state).unwrap();
+        fs::write(&second, state).unwrap();
+
+        assert!(
+            super::complete_pipelines_after_verified_reflection_in(
+                harness.path(),
+                "20260729-session",
+                &["duplicate".into()],
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(first).unwrap(), state);
+        assert_eq!(fs::read_to_string(second).unwrap(), state);
+    }
+
+    #[test]
+    fn completion_ignores_an_unobserved_noncanonical_running_pipeline() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let ready = orbit.join("PIPELINE-20260729-ready.json");
+        let unrelated = orbit.join("PIPELINE-20260729-unrelated.json");
+        fs::write(
+            &ready,
+            r#"{"id":"ready","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#,
+        )
+        .unwrap();
+        let unrelated_before = r#"{"id":"a?b","status":"running","phase":"go"}"#;
+        fs::write(&unrelated, unrelated_before).unwrap();
+
+        assert_eq!(
+            super::complete_pipelines_after_verified_reflection_in(
+                harness.path(),
+                "20260729-session",
+                &["ready".into()],
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&fs::read_to_string(ready).unwrap()).unwrap()
+                ["evolution_session_id"],
+            "20260729-session"
+        );
+        assert_eq!(fs::read_to_string(unrelated).unwrap(), unrelated_before);
+    }
+
+    #[test]
     fn reflection_completion_retry_keeps_the_same_exact_pipeline_id_after_a_rejected_write() {
         let harness = tempfile::tempdir().unwrap();
         let orbit = harness.path().join("orbit");
         fs::create_dir(&orbit).unwrap();
         let pipeline = orbit.join("PIPELINE-20260729-retry.json");
-        let rejected = r#"{"id":"retry/id","status":"running","phase":"ship","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
+        let rejected = r#"{"id":"retry-id","status":"running","phase":"ship","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#;
         fs::write(&pipeline, rejected).unwrap();
 
         assert!(
             super::complete_pipelines_after_verified_reflection_in(
                 harness.path(),
                 "20260729_host",
-                &["retry/id".into()],
+                &["retry-id".into()],
             )
             .is_err()
         );
@@ -841,7 +1102,7 @@ mod completion_tests {
 
         fs::write(
             &pipeline,
-            r#"{"id":"retry/id","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#,
+            r#"{"id":"retry-id","status":"running","phase":"awaiting_evolution","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","phase_history":[]}"#,
         )
         .unwrap();
 
@@ -849,7 +1110,7 @@ mod completion_tests {
             super::complete_pipelines_after_verified_reflection_in(
                 harness.path(),
                 "20260729_host",
-                &["retry/id".into()],
+                &["retry-id".into()],
             )
             .unwrap(),
             1

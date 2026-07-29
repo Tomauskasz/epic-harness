@@ -1200,6 +1200,45 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn dashboard_returns_durably_completed_orbit_state_not_a_stale_running_row() {
+        let pool = crate::store::pool::test_memory_pool().await;
+        crate::store::schema::init_schema_pool(&pool).await.unwrap();
+        crate::store::evolution::mark_reflection_completed_with_pipelines_pool(
+            &pool,
+            "session-ready",
+            "selected",
+            &["ready".into()],
+        )
+        .await
+        .unwrap();
+        crate::store::orbit_store::upsert_pipeline_pool(
+            &pool,
+            "ready",
+            "selected",
+            "complete",
+            Some("evolve"),
+            None,
+            r#"{"id":"ready","status":"complete","phase":"evolve","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","evolution_session_id":"session-ready","phase_history":[]}"#,
+        )
+        .await
+        .unwrap();
+
+        let pipelines = dashboard_pipelines_from_store(&pool, Some("selected"))
+            .await
+            .unwrap();
+        let visible = crate::shared::orbit::dashboard_pipelines_for_project(
+            pipelines,
+            Some("selected"),
+            MAX_DASHBOARD_PIPELINES,
+        );
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0]["status"], "complete");
+        assert_eq!(visible[0]["phase"], "evolve");
+        assert_eq!(visible[0]["evolution_session_id"], "session-ready");
+    }
+
     #[test]
     fn orbit_dismiss_request_requires_exact_project_and_pipeline_identity() {
         assert!(parse_orbit_dismiss_request("/api/orbit/PIPELINE-123").is_err());

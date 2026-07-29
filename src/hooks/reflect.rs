@@ -2611,7 +2611,25 @@ fn run_reflection(reflection_session_id: &str) -> i32 {
 
     // 11.6a. Orbit completion invariants — report pipelines whose own state
     //        contradicts "complete" instead of trusting the flag.
-    for (id, violation) in orbit_completion_violations(&orbit_pipelines) {
+    for (id, violation) in orbit_completion_violations(&orbit_pipelines, |pipeline| {
+        let Some(session_id) = pipeline
+            .get("evolution_session_id")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return false;
+        };
+        let Some(id) = pipeline.get("id").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        crate::store::runtime::block_on(async {
+            let pool = crate::store::pool::harness_pool().await?;
+            crate::store::evolution::reflection_pipeline_completed_pool(
+                &pool, session_id, &slug, id,
+            )
+            .await
+        })
+        .unwrap_or(false)
+    }) {
         hint("reflect", &format!("Orbit {id}: {violation}"));
     }
 
@@ -2754,7 +2772,17 @@ fn mark_reflection_completed(
     project: &str,
     observations: &[ObsRecord],
 ) -> i32 {
-    let pipeline_ids = observed_pipeline_ids(observations);
+    let observed_pipeline_ids = observed_pipeline_ids(observations);
+    let pipeline_ids = match crate::shared::orbit::reflection_completion_candidates_in(
+        &harness_dir(),
+        &observed_pipeline_ids,
+    ) {
+        Ok(pipeline_ids) => pipeline_ids,
+        Err(error) => {
+            eprintln!("[reflect] failed to select Orbit completion candidates: {error}");
+            return 1;
+        }
+    };
     match crate::store::runtime::block_on(async {
         let pool = crate::store::pool::harness_pool().await?;
         crate::store::evolution::mark_reflection_completed_with_pipelines_pool(
@@ -2778,7 +2806,8 @@ fn mark_reflection_completed(
 /// Collect invariant violations across the bounded pipeline candidate set.
 ///
 /// Returns `(pipeline_id, violation)` pairs. See
-/// `shared::orbit::completion_violations` for what is checked and why.
+/// `shared::orbit::completion_violations_with_durable_evolution` for what is
+/// checked and why.
 fn complete_recorded_orbit_pipelines(reflection_session_id: &str, project: &str) -> i32 {
     let pipeline_ids = match crate::store::runtime::block_on(async {
         let pool = crate::store::pool::harness_pool().await?;
@@ -2818,8 +2847,21 @@ fn complete_recorded_orbit_pipeline_ids(
         project,
         pipeline_ids,
     ) {
-        Ok(0) => 0,
+        Ok(0) => match sync_completed_orbit_pipelines(reflection_session_id, project, pipeline_ids)
+        {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("[reflect] failed to sync completed Orbit pipeline: {error}");
+                1
+            }
+        },
         Ok(completed) => {
+            if let Err(error) =
+                sync_completed_orbit_pipelines(reflection_session_id, project, pipeline_ids)
+            {
+                eprintln!("[reflect] failed to sync completed Orbit pipeline: {error}");
+                return 1;
+            }
             hint(
                 "reflect",
                 &format!("Orbit: completed {completed} pipeline(s) after durable evolution"),
@@ -2831,6 +2873,111 @@ fn complete_recorded_orbit_pipeline_ids(
             1
         }
     }
+}
+
+fn sync_completed_orbit_pipelines(
+    reflection_session_id: &str,
+    project: &str,
+    pipeline_ids: &[String],
+) -> io::Result<()> {
+    let expected: std::collections::BTreeSet<&str> =
+        pipeline_ids.iter().map(String::as_str).collect();
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let pool = crate::store::runtime::block_on(crate::store::pool::harness_pool())?;
+    sync_completed_orbit_pipelines_in(
+        &harness_dir(),
+        &pool,
+        reflection_session_id,
+        project,
+        &expected,
+    )
+}
+
+fn sync_completed_orbit_pipelines_in(
+    harness: &Path,
+    pool: &sqlx::AnyPool,
+    reflection_session_id: &str,
+    project: &str,
+    expected: &std::collections::BTreeSet<&str>,
+) -> io::Result<()> {
+    let mut synced = std::collections::BTreeSet::new();
+    for path in all_orbit_pipeline_files(&harness.join("orbit"))? {
+        // A malformed unrelated pipeline must not poison an exact replay.
+        // If a mapped pipeline cannot be read, it remains absent from `synced`
+        // and the explicit missing-identity error below keeps the job retryable.
+        let Ok(content) = read_orbit_pipeline_file(&path) else {
+            continue;
+        };
+        let Ok(pipeline) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+        let Some(id) = pipeline.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !expected.contains(id)
+            || pipeline.get("status").and_then(serde_json::Value::as_str) != Some("complete")
+            || pipeline.get("phase").and_then(serde_json::Value::as_str) != Some("evolve")
+            || pipeline
+                .get("evolution_session_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(reflection_session_id)
+        {
+            continue;
+        }
+        crate::store::runtime::block_on(crate::store::orbit_store::upsert_pipeline_pool(
+            &pool,
+            id,
+            project,
+            "complete",
+            Some("evolve"),
+            pipeline.get("mode").and_then(serde_json::Value::as_str),
+            &content,
+        ))?;
+        synced.insert(id.to_string());
+    }
+    if synced.len() != expected.len() {
+        let missing: Vec<_> = expected
+            .iter()
+            .filter(|id| !synced.contains::<str>(*id))
+            .copied()
+            .collect();
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "completed Orbit pipeline file missing or inconsistent: {}",
+                missing.join(", ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Return every regular pipeline file when replaying an exact durable mapping.
+/// The dashboard/reporting view is bounded, but synchronization cannot omit a
+/// valid mapped file just because many newer pipeline files exist.
+fn all_orbit_pipeline_files(orbit_dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(orbit_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if entry.file_type()?.is_file() && name.starts_with("PIPELINE-") && name.ends_with(".json")
+        {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 fn orbit_pipeline_candidates(orbit_dir: &Path) -> io::Result<Vec<PathBuf>> {
@@ -2880,7 +3027,10 @@ fn read_orbit_pipeline_file(path: &Path) -> io::Result<String> {
     String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-fn orbit_completion_violations(pipelines: &[PathBuf]) -> Vec<(String, String)> {
+fn orbit_completion_violations(
+    pipelines: &[PathBuf],
+    mut has_durable_evolution: impl FnMut(&serde_json::Value) -> bool,
+) -> Vec<(String, String)> {
     let mut found = Vec::new();
     for path in pipelines {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -2893,7 +3043,10 @@ fn orbit_completion_violations(pipelines: &[PathBuf]) -> Vec<(String, String)> {
         let id = pipeline["id"]
             .as_str()
             .unwrap_or(name.trim_end_matches(".json"));
-        for v in crate::shared::orbit::completion_violations(&pipeline) {
+        for v in crate::shared::orbit::completion_violations_with_durable_evolution(
+            &pipeline,
+            has_durable_evolution(&pipeline),
+        ) {
             found.push((normalize_pipeline_id(id), v));
         }
     }
@@ -3317,6 +3470,69 @@ mod tests {
     }
 
     #[test]
+    fn orbit_pipeline_sync_candidates_include_files_beyond_the_dashboard_bound() {
+        let orbit = tempfile::tempdir().unwrap();
+        for index in 0..=MAX_ORBIT_PIPELINE_FILES {
+            fs::write(orbit.path().join(format!("PIPELINE-{index:03}.json")), "{}").unwrap();
+        }
+
+        assert_eq!(
+            all_orbit_pipeline_files(orbit.path()).unwrap().len(),
+            MAX_ORBIT_PIPELINE_FILES + 1
+        );
+    }
+
+    #[test]
+    fn sync_completed_orbit_pipeline_repairs_a_stale_store_row_beyond_the_dashboard_bound() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        for index in 0..=MAX_ORBIT_PIPELINE_FILES {
+            fs::write(
+                orbit.join(format!("PIPELINE-{index:03}.json")),
+                format!(r#"{{"id":"other-{index}","status":"running","phase":"go"}}"#),
+            )
+            .unwrap();
+        }
+        let completed = orbit.join("PIPELINE-000.json");
+        fs::write(
+            &completed,
+            r#"{"id":"ready","status":"complete","phase":"evolve","evolution_session_id":"session-ready"}"#,
+        )
+        .unwrap();
+        assert!(
+            !orbit_pipeline_candidates(&orbit)
+                .unwrap()
+                .contains(&completed),
+            "the bounded dashboard scan must exclude the oldest target"
+        );
+
+        let pool = crate::store::runtime::block_on(async {
+            let pool = crate::store::pool::test_memory_pool().await;
+            crate::store::schema::init_schema_pool(&pool).await?;
+            Ok::<_, io::Error>(pool)
+        })
+        .unwrap();
+        let expected = std::collections::BTreeSet::from(["ready"]);
+        sync_completed_orbit_pipelines_in(
+            harness.path(),
+            &pool,
+            "session-ready",
+            "project-a",
+            &expected,
+        )
+        .unwrap();
+
+        let stored = crate::store::runtime::block_on(
+            crate::store::orbit_store::list_pipelines_scoped_pool(&pool, Some("project-a"), 1),
+        )
+        .unwrap();
+        assert_eq!(stored[0]["id"], "ready");
+        assert_eq!(stored[0]["status"], "complete");
+        assert_eq!(stored[0]["phase"], "evolve");
+    }
+
+    #[test]
     fn orbit_pipeline_read_rejects_files_over_the_byte_bound() {
         let orbit = tempfile::tempdir().unwrap();
         let path = orbit.path().join("PIPELINE-too-large.json");
@@ -3427,7 +3643,7 @@ mod tests {
         fs::write(&path, before).unwrap();
 
         let violations =
-            orbit_completion_violations(&orbit_pipeline_candidates(dir.path()).unwrap());
+            orbit_completion_violations(&orbit_pipeline_candidates(dir.path()).unwrap(), |_| false);
 
         assert!(
             violations
@@ -3435,6 +3651,26 @@ mod tests {
                 .any(|(_, v)| v.contains("phase=\"evolve\""))
         );
         assert_eq!(fs::read_to_string(path).unwrap(), before);
+    }
+
+    #[test]
+    fn orbit_completion_detection_reports_an_invented_evolution_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("PIPELINE-invented.json");
+        fs::write(
+            &path,
+            r#"{"id":"invented","status":"complete","phase":"evolve","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success","evolution_session_id":"invented-session","phase_history":[]}"#,
+        )
+        .unwrap();
+
+        let violations =
+            orbit_completion_violations(&orbit_pipeline_candidates(dir.path()).unwrap(), |_| false);
+
+        assert!(
+            violations.iter().any(|(_, violation)| {
+                violation.contains("no durable SessionEnd pipeline record")
+            })
+        );
     }
 
     #[test]
