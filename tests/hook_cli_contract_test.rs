@@ -1,11 +1,14 @@
 //! Process-level Codex hook contracts. These tests exercise the compiled CLI
 //! with isolated HOME and project directories rather than internal helpers.
 
+use sqlx::Row;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::str::FromStr;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -93,6 +96,80 @@ fn run_hook_with_env(
         .unwrap_or_else(|error| panic!("run {command}: {error}"))
 }
 
+fn run_codex_hook(home: &Path, project: &Path, event: &str, command: &str, input: &str) -> Output {
+    let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let binary_dir = Path::new(BINARY)
+        .parent()
+        .expect("compiled binary directory");
+    let mut search_paths = vec![binary_dir.to_path_buf()];
+    search_paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let test_path = std::env::join_paths(search_paths).expect("runner PATH");
+
+    Command::new("node")
+        .arg(plugin_root.join("registry/scripts/install.js"))
+        .args(["hook", event, command])
+        .current_dir(project)
+        .env("HOME", home)
+        .env("PATH", test_path)
+        .env("PLUGIN_ROOT", plugin_root)
+        .env("EPIC_HOOK_PROFILE", "strict")
+        .env_remove("CLAUDE_PLUGIN_ROOT")
+        .env_remove("USERPROFILE")
+        .env_remove("HOMEDRIVE")
+        .env_remove("HOMEPATH")
+        .env_remove("HARNESS_ROOT")
+        .env_remove("HARNESS_DB_URL")
+        .env_remove("HARNESS_MEM_URL")
+        .env_remove("HARNESS_MEMORY_DB_URL")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output_with_stdin(input.as_bytes())
+        .unwrap_or_else(|error| panic!("run Codex {event} {command}: {error}"))
+}
+
+fn assert_codex_runner_binary_compatibility() {
+    let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let plugin: serde_json::Value = serde_json::from_slice(
+        &fs::read(plugin_root.join(".codex-plugin/plugin.json")).expect("Codex plugin manifest"),
+    )
+    .expect("valid Codex plugin manifest");
+    let plugin_version = plugin["version"].as_str().expect("plugin version");
+    let plugin_base_version = plugin_version
+        .split('+')
+        .next()
+        .expect("plugin base version");
+    assert_eq!(plugin_base_version, env!("CARGO_PKG_VERSION"));
+    let revision = fs::read_to_string(plugin_root.join("runtime-revision.txt"))
+        .expect("runtime revision fixture");
+    let revision = revision.trim();
+    assert!(!revision.is_empty(), "runtime revision fixture");
+
+    let output = Command::new(BINARY)
+        .arg("version")
+        .stdin(Stdio::null())
+        .output()
+        .expect("compiled binary version");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let version = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        version.contains(&format!(
+            "epic-harness {plugin_base_version} runtime-revision {revision}"
+        )),
+        "compiled binary and plugin fixture must agree before the runner can bootstrap: {version}"
+    );
+}
+
 trait OutputWithStdin {
     fn output_with_stdin(self, input: &[u8]) -> std::io::Result<Output>;
 }
@@ -126,6 +203,7 @@ fn wait_for_completed_jobs(queue: &Path, expected: usize) {
     }
 }
 
+#[cfg(unix)]
 fn wait_for_lines(path: &Path, expected: usize) {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -151,14 +229,12 @@ fn session_start_context(output: &Output) -> String {
         .to_string()
 }
 
-#[cfg(unix)]
 struct FakeDashboard {
     port: u16,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
-#[cfg(unix)]
 impl FakeDashboard {
     fn start() -> Self {
         Self::serving(format!(
@@ -170,6 +246,7 @@ impl FakeDashboard {
     /// A dashboard left behind by an earlier binary — the state every user is
     /// in immediately after an upgrade, since the server is detached and
     /// outlives the process that started it.
+    #[cfg(unix)]
     fn from_previous_version() -> Self {
         Self::serving(
             "<html><head><meta name=\"harness-version\" content=\"0.0.1-old\"></head></html>"
@@ -178,6 +255,7 @@ impl FakeDashboard {
     }
 
     /// Something else entirely on the port.
+    #[cfg(unix)]
     fn foreign() -> Self {
         Self::serving("<html><head><title>not epic</title></head></html>".to_string())
     }
@@ -222,7 +300,6 @@ impl FakeDashboard {
     }
 }
 
-#[cfg(unix)]
 impl Drop for FakeDashboard {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -735,6 +812,240 @@ fn startup_compact_resume_restores_context_without_duplicate_dashboard_opening()
         [expected_url.as_str()],
         "a healthy dashboard that was already opened must be reused"
     );
+}
+
+#[tokio::test]
+async fn codex_node_runner_persists_one_complete_lifecycle() {
+    assert_codex_runner_binary_compatibility();
+
+    let root = tempfile::tempdir().expect("temp root");
+    let project = project_path(root.path());
+    fs::create_dir_all(&project).expect("project");
+    let dashboard = FakeDashboard::start();
+    let global_harness = root.path().join(".harness");
+    fs::create_dir_all(&global_harness).expect("global harness");
+    fs::write(
+        global_harness.join("config.toml"),
+        format!(
+            "[dashboard]\nport = {}\nauto_open = false\n\n[evolution]\nattribution_holdout_modulus = 0\n",
+            dashboard.port
+        ),
+    )
+    .expect("isolated config");
+
+    let session_id = "codex-lifecycle-session";
+    let startup = run_codex_hook(
+        root.path(),
+        &project,
+        "SessionStart",
+        "resume",
+        &serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": session_id,
+            "source": "startup",
+        })
+        .to_string(),
+    );
+    assert!(
+        startup.status.success(),
+        "{}",
+        String::from_utf8_lossy(&startup.stderr)
+    );
+    let startup_json: serde_json::Value =
+        serde_json::from_slice(&startup.stdout).expect("valid SessionStart runner JSON");
+    assert_eq!(
+        startup_json["hookSpecificOutput"]["hookEventName"],
+        "SessionStart"
+    );
+    let _startup_context = session_start_context(&startup);
+
+    let state: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            global_harness
+                .join("session-state")
+                .join(format!("session_start.{session_id}.json")),
+        )
+        .expect("persisted host session identity"),
+    )
+    .expect("valid persisted host session identity");
+    let persisted_date = state["date"].as_str().expect("persisted session date");
+    let expected_session = format!("{persisted_date}_{session_id}");
+    let harness = harness_path(root.path(), &project);
+    let expected_project = harness
+        .file_name()
+        .and_then(|value| value.to_str())
+        .expect("project harness slug")
+        .to_string();
+
+    let tool_use_id = "codex-lifecycle-read-1";
+    let observed = run_codex_hook(
+        root.path(),
+        &project,
+        "PostToolUse",
+        "observe",
+        &serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": session_id,
+            "turn_id": "codex-lifecycle-turn",
+            "tool_use_id": tool_use_id,
+            "tool_name": "Read",
+            "tool_input": {"file_path": "README.md"},
+            "tool_response": {"success": true, "content": "clean read response"},
+        })
+        .to_string(),
+    );
+    assert!(
+        observed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&observed.stderr)
+    );
+    assert!(
+        observed.stdout.is_empty(),
+        "PostToolUse must not emit a Codex response: {}",
+        String::from_utf8_lossy(&observed.stdout)
+    );
+
+    let db_path = global_harness.join("harness.db");
+    assert!(db_path.is_file(), "isolated operational database");
+    let database = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::from_str(&format!("sqlite:{}", db_path.display()))
+                .expect("SQLite connection options"),
+        )
+        .await
+        .expect("open isolated operational database");
+    let observation = sqlx::query(
+        "SELECT session_id, project, tool_category, result, score, dim_success, dim_quality, \
+         dim_cost, failure_category FROM observations WHERE tool_use_id = ?",
+    )
+    .bind(tool_use_id)
+    .fetch_one(&database)
+    .await
+    .expect("persisted Read observation");
+    assert_eq!(
+        observation
+            .try_get::<String, _>("session_id")
+            .expect("observation session"),
+        expected_session
+    );
+    assert_eq!(
+        observation
+            .try_get::<String, _>("project")
+            .expect("observation project"),
+        expected_project
+    );
+    assert_eq!(
+        observation
+            .try_get::<String, _>("tool_category")
+            .expect("observation category"),
+        "read"
+    );
+    assert_eq!(
+        observation
+            .try_get::<String, _>("result")
+            .expect("observation result"),
+        "success"
+    );
+    for column in ["score", "dim_success", "dim_quality", "dim_cost"] {
+        assert_eq!(
+            observation
+                .try_get::<Option<f64>, _>(column)
+                .expect("observation score dimension"),
+            Some(1.0),
+            "{column}"
+        );
+    }
+    assert_eq!(
+        observation
+            .try_get::<Option<String>, _>("failure_category")
+            .expect("observation failure category"),
+        None
+    );
+
+    let snapshot = run_codex_hook(
+        root.path(),
+        &project,
+        "PreCompact",
+        "snapshot",
+        &serde_json::json!({
+            "hook_event_name": "PreCompact",
+            "session_id": session_id,
+            "conversation_summary": "CODEX_LIFECYCLE_SUMMARY_MARKER",
+            "pending_tasks": ["CODEX_LIFECYCLE_PENDING_MARKER"],
+            "context_usage": 0.82,
+        })
+        .to_string(),
+    );
+    assert!(
+        snapshot.status.success(),
+        "{}",
+        String::from_utf8_lossy(&snapshot.stderr)
+    );
+    let snapshots: Vec<PathBuf> = fs::read_dir(harness.join("sessions"))
+        .expect("session snapshots")
+        .map(|entry| entry.expect("snapshot entry").path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .collect();
+    assert_eq!(snapshots.len(), 1, "one compact snapshot");
+    let persisted_snapshot = fs::read_to_string(&snapshots[0]).expect("persisted snapshot");
+    assert!(persisted_snapshot.contains("CODEX_LIFECYCLE_SUMMARY_MARKER"));
+    assert!(persisted_snapshot.contains("CODEX_LIFECYCLE_PENDING_MARKER"));
+
+    let resumed = run_codex_hook(
+        root.path(),
+        &project,
+        "SessionStart",
+        "resume",
+        &serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": session_id,
+            "source": "resume",
+        })
+        .to_string(),
+    );
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let resumed_context = session_start_context(&resumed);
+    assert!(resumed_context.contains("CODEX_LIFECYCLE_SUMMARY_MARKER"));
+    assert!(resumed_context.contains("CODEX_LIFECYCLE_PENDING_MARKER"));
+
+    let ended = run_codex_hook(
+        root.path(),
+        &project,
+        "SessionEnd",
+        "reflect",
+        &serde_json::json!({
+            "hook_event_name": "SessionEnd",
+            "session_id": session_id,
+        })
+        .to_string(),
+    );
+    assert!(
+        ended.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ended.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&ended.stdout).expect("SessionEnd runner JSON")
+            ["continue"],
+        true
+    );
+    wait_for_completed_jobs(&harness.join("reflect-queue"), 1);
+
+    let reflected: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reflection_sessions WHERE session_id = ? AND project = ?",
+    )
+    .bind(&expected_session)
+    .bind(&expected_project)
+    .fetch_one(&database)
+    .await
+    .expect("reflection completion count");
+    assert_eq!(reflected, 1, "one durable reflection completion");
+    database.close().await;
 }
 
 #[test]
