@@ -5,6 +5,14 @@
 
 use std::path::PathBuf;
 
+use regex::Regex;
+
+fn release_workflow() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/release.yml");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()))
+}
+
 fn cargo_manifest() -> toml::Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let raw = std::fs::read_to_string(&path)
@@ -50,8 +58,7 @@ fn release_contains_no_unsupported_host_or_handwritten_installer_artifacts() {
         );
     }
 
-    let workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
-        .expect("release workflow must be readable");
+    let workflow = release_workflow();
     assert!(
         !workflow.contains("cp install.sh install.ps1 artifacts/"),
         "cargo-dist generates the release installers; do not upload handwritten copies"
@@ -60,9 +67,7 @@ fn release_contains_no_unsupported_host_or_handwritten_installer_artifacts() {
 
 #[test]
 fn tag_release_refreshes_and_verifies_the_dashboard_before_dist_build() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
-        .expect("release workflow must be readable");
+    let workflow = release_workflow();
 
     let frozen_install = workflow
         .find("pnpm install --frozen-lockfile")
@@ -86,6 +91,48 @@ fn tag_release_refreshes_and_verifies_the_dashboard_before_dist_build() {
     assert!(
         workflow.contains("node -e \"const { readFileSync } = require('node:fs');"),
         "use Node's built-in byte comparison so the release gate works on Windows, macOS, and Linux"
+    );
+}
+
+#[test]
+fn release_workflow_pins_actions_and_never_pipes_network_content_to_a_shell() {
+    let workflow = release_workflow();
+    let action_reference = Regex::new(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$")
+        .expect("action pin pattern must be valid");
+
+    let mut actions = 0;
+    for line in workflow.lines() {
+        let trimmed = line.trim_start();
+        let Some(reference) = trimmed
+            .strip_prefix("- uses:")
+            .or_else(|| trimmed.strip_prefix("uses:"))
+        else {
+            continue;
+        };
+
+        actions += 1;
+        let (reference, version_comment) = reference
+            .trim()
+            .split_once('#')
+            .expect("every release action pin must retain its readable version comment");
+        assert!(
+            action_reference.is_match(reference.trim()),
+            "release actions must use full 40-hex commit SHAs: {line}"
+        );
+        assert!(
+            version_comment.trim().starts_with('v') || version_comment.trim() == "stable",
+            "release action pin comments must identify the source version: {line}"
+        );
+    }
+    assert!(actions > 0, "release workflow must invoke actions");
+
+    let network_to_shell = Regex::new(
+        r"(?im)\b(?:curl|wget|invoke-webrequest|iwr)\b[^\r\n|]*\|\s*(?:env\s+)?(?:sh|bash|zsh|pwsh|powershell|iex|invoke-expression)\b",
+    )
+    .expect("network-to-shell pattern must be valid");
+    assert!(
+        !network_to_shell.is_match(&workflow),
+        "release workflow must not pipe network content directly to a shell"
     );
 }
 
