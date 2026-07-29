@@ -24,7 +24,7 @@ fn read_yaml(path: &Path) -> serde_yaml::Value {
         .unwrap_or_else(|e| panic!("{} must be valid YAML: {e}", path.display()))
 }
 
-fn issue_template_options(template: &serde_yaml::Value, id: &str) -> Vec<&str> {
+fn issue_template_options<'a>(template: &'a serde_yaml::Value, id: &str) -> Vec<&'a str> {
     template["body"]
         .as_sequence()
         .expect("issue template body must be a YAML sequence")
