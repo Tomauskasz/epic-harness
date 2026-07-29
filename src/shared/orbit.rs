@@ -230,7 +230,8 @@ pub fn completion_violations_with_durable_evolution(
 }
 
 /// Reject manual Orbit completion because it has no validated SessionEnd identity.
-pub fn complete_pipeline_in(harness_dir: &Path) -> io::Result<()> {
+#[cfg(test)]
+fn complete_pipeline_in(harness_dir: &Path) -> io::Result<()> {
     let _ = harness_dir;
     Err(io::Error::new(
         io::ErrorKind::PermissionDenied,
