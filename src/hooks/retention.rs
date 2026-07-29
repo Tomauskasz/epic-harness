@@ -381,7 +381,7 @@ fn open_retention_root(projects: &Path) -> io::Result<RetentionRoot> {
                 format!("retention root is not a directory: {}", projects.display()),
             ));
         }
-        return Ok(RetentionRoot { directory });
+        Ok(RetentionRoot { directory })
     }
 
     #[cfg(windows)]
@@ -459,7 +459,7 @@ fn open_retention_child(
                 "retention child is not a regular file",
             ));
         }
-        return Ok(file);
+        Ok(file)
     }
 
     #[cfg(windows)]

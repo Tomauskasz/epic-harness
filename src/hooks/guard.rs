@@ -193,7 +193,7 @@ fn recursive_delete_targets_from_words(words: &[String], depth: usize) -> Vec<St
             .map(|command| recursive_delete_targets_from_words(command, depth + 1))
             .unwrap_or_default(),
         "sh" | "bash" | "zsh" if depth < MAX_WRAPPER_DEPTH => shell_command_text(arguments)
-            .map(|script| recursive_delete_targets(script))
+            .map(recursive_delete_targets)
             .unwrap_or_default(),
         "cmd" if depth < MAX_WRAPPER_DEPTH => cmd_command_text(arguments)
             .map(|script| recursive_delete_targets(&script))
@@ -350,7 +350,7 @@ fn posix_rm_targets(arguments: &[String]) -> Vec<String> {
             targets.push(argument.clone());
         }
     }
-    recursive.then_some(targets).unwrap_or_default()
+    if recursive { targets } else { Vec::new() }
 }
 
 fn powershell_remove_item_targets(arguments: &[String]) -> Vec<String> {
@@ -384,7 +384,7 @@ fn powershell_remove_item_targets(arguments: &[String]) -> Vec<String> {
             targets.push(argument.clone());
         }
     }
-    recursive.then_some(targets).unwrap_or_default()
+    if recursive { targets } else { Vec::new() }
 }
 
 fn powershell_recurse_option(option: &str) -> bool {

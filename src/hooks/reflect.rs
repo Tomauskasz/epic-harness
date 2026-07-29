@@ -2927,7 +2927,7 @@ fn sync_completed_orbit_pipelines_in(
         }
         let state_json = serde_json::to_string(&pipeline).map_err(io::Error::other)?;
         crate::store::runtime::block_on(crate::store::orbit_store::upsert_pipeline_pool(
-            &pool,
+            pool,
             id,
             project,
             "complete",

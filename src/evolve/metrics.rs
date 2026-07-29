@@ -98,11 +98,9 @@ fn replace_checkpoint(source: Option<&Path>, destination: &Path) -> io::Result<(
 
     let destination_exists = validate_checkpoint_dir(destination, false, "checkpoint")?;
     let retired = checkpoint_temp_path(destination, "retired")?;
-    if destination_exists {
-        if let Err(error) = fs::rename(destination, &retired) {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(error);
-        }
+    if destination_exists && let Err(error) = fs::rename(destination, &retired) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
     }
     if let Err(error) = fs::rename(&staging, destination) {
         if destination_exists {
