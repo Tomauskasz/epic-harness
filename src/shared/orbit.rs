@@ -1,9 +1,10 @@
-use std::fs;
-use std::path::Path;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use super::paths::orbit_dir;
+use super::paths::{canonical_for_compare, orbit_dir};
 
 /// Scan a directory for PIPELINE-*.json files with `"status": "running"`.
 /// Returns the most recent running pipeline (by filename sort order), or None.
@@ -175,6 +176,204 @@ pub fn completion_violations(pipeline: &serde_json::Value) -> Vec<String> {
     violations
 }
 
+/// Mark the latest running Orbit pipeline complete after validating its evidence.
+///
+/// This is the only completion persistence path. It accepts a valid legacy
+/// completion unchanged, but never changes invalid state. The target must be a
+/// regular file below the regular `harness_dir/orbit` directory; valid writes
+/// are staged and atomically replaced.
+pub fn complete_pipeline_in(harness_dir: &Path) -> io::Result<()> {
+    let orbit_dir = regular_orbit_dir(harness_dir)?;
+    let (pipeline_path, state) = completion_candidate(&orbit_dir, harness_dir)?;
+    let status = state
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "Orbit pipeline has no status")
+        })?;
+
+    if status == "complete" {
+        return ensure_valid_completion(&state);
+    }
+
+    let mut completed = state;
+    let object = completed.as_object_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Orbit pipeline state must be a JSON object",
+        )
+    })?;
+    object.insert(
+        "status".into(),
+        serde_json::Value::String("complete".into()),
+    );
+    object.insert("phase".into(), serde_json::Value::String("evolve".into()));
+    ensure_valid_completion(&completed)?;
+    atomic_write_pipeline(&pipeline_path, harness_dir, &orbit_dir, &completed)
+}
+
+fn ensure_valid_completion(state: &serde_json::Value) -> io::Result<()> {
+    let violations = completion_violations(state);
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Orbit completion rejected: {}", violations.join("; ")),
+        ))
+    }
+}
+
+fn regular_orbit_dir(harness_dir: &Path) -> io::Result<PathBuf> {
+    let metadata = fs::symlink_metadata(harness_dir)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "HARNESS_DIR is not a regular directory: {}",
+                harness_dir.display()
+            ),
+        ));
+    }
+    let orbit_dir = harness_dir.join("orbit");
+    let metadata = fs::symlink_metadata(&orbit_dir)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Orbit directory is not a regular directory: {}",
+                orbit_dir.display()
+            ),
+        ));
+    }
+    Ok(orbit_dir)
+}
+
+fn completion_candidate(
+    orbit_dir: &Path,
+    harness_dir: &Path,
+) -> io::Result<(PathBuf, serde_json::Value)> {
+    let mut running = Vec::new();
+    let mut complete = Vec::new();
+    for entry in fs::read_dir(orbit_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("PIPELINE-") || !name.ends_with(".json") {
+            continue;
+        }
+        let path = entry.path();
+        validate_pipeline_path(&path, harness_dir, orbit_dir)?;
+        let content = fs::read_to_string(&path)?;
+        let state: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid Orbit pipeline {}: {error}", path.display()),
+            )
+        })?;
+        match state.get("status").and_then(serde_json::Value::as_str) {
+            Some("running") => running.push((name.to_owned(), path, state)),
+            Some("complete") => complete.push((name.to_owned(), path, state)),
+            _ => {}
+        }
+    }
+    let candidates = if running.is_empty() {
+        &mut complete
+    } else {
+        &mut running
+    };
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    candidates
+        .pop()
+        .map(|(_, path, state)| (path, state))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "no running or complete Orbit pipeline found",
+            )
+        })
+}
+
+fn validate_pipeline_path(path: &Path, harness_dir: &Path, orbit_dir: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Orbit pipeline target is not a regular file: {}",
+                path.display()
+            ),
+        ));
+    }
+    let harness_root = canonical_for_compare(harness_dir)?;
+    let orbit_root = canonical_for_compare(orbit_dir)?;
+    let target = canonical_for_compare(path)?;
+    if !target.starts_with(&harness_root) || !target.starts_with(&orbit_root) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "Orbit pipeline target escapes HARNESS_DIR: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn atomic_write_pipeline(
+    path: &Path,
+    harness_dir: &Path,
+    orbit_dir: &Path,
+    state: &serde_json::Value,
+) -> io::Result<()> {
+    let payload = serde_json::to_vec_pretty(state).map_err(io::Error::other)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Orbit pipeline target has no UTF-8 filename",
+            )
+        })?;
+    let process_id = std::process::id();
+    for attempt in 0..100u32 {
+        let temporary = orbit_dir.join(format!(".{name}.{process_id}.{attempt}.tmp"));
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = file.write_all(&payload).and_then(|_| file.sync_all()) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        drop(file);
+        if let Err(error) = validate_pipeline_path(path, harness_dir, orbit_dir) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        if let Err(error) = crate::team::codex::atomic_replace_file(&temporary, path) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "could not allocate temporary Orbit pipeline file in {}",
+            orbit_dir.display()
+        ),
+    ))
+}
+
 pub fn pipeline_is_dashboard_visible(pipeline: &serde_json::Value) -> bool {
     completion_violations(pipeline).is_empty()
 }
@@ -257,6 +456,7 @@ pub fn sanitize_orbit_field(s: &str) -> String {
 mod completion_tests {
     use super::completion_violations as violations;
     use serde_json::json;
+    use std::fs;
 
     #[test]
     fn a_clean_completion_reports_nothing() {
@@ -371,5 +571,85 @@ mod completion_tests {
     fn both_invariants_report_independently() {
         let pipeline = json!({"status": "complete", "audit_fail_count": 4, "max_retries": 3});
         assert_eq!(violations(&pipeline).len(), 3);
+    }
+
+    #[test]
+    fn complete_command_commits_a_valid_running_pipeline() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-20260729-valid.json");
+        fs::write(
+            &pipeline,
+            r#"{"id":"valid","status":"running","phase":"ship","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#,
+        )
+        .unwrap();
+
+        super::complete_pipeline_in(harness.path()).unwrap();
+
+        let state: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(pipeline).unwrap()).unwrap();
+        assert_eq!(state["status"], "complete");
+        assert_eq!(state["phase"], "evolve");
+    }
+
+    #[test]
+    fn complete_command_rejects_invalid_state_without_changing_its_bytes() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-20260729-invalid.json");
+        let before = r#"{"id":"invalid","status":"running","phase":"ship","audit_fail_count":0,"max_retries":3,"pr_url":"","ci_status":"failed"}"#;
+        fs::write(&pipeline, before).unwrap();
+
+        assert!(super::complete_pipeline_in(harness.path()).is_err());
+
+        assert_eq!(fs::read_to_string(pipeline).unwrap(), before);
+    }
+
+    #[test]
+    fn complete_command_is_idempotent_for_a_valid_legacy_completion() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let pipeline = orbit.join("PIPELINE-20260729-complete.json");
+        let before = r#"{"id":"complete","status":"complete","phase":"evolve","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#;
+        fs::write(&pipeline, before).unwrap();
+
+        super::complete_pipeline_in(harness.path()).unwrap();
+
+        assert_eq!(fs::read_to_string(pipeline).unwrap(), before);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn complete_command_rejects_a_symlinked_orbit_target() {
+        let harness = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(target.path(), harness.path().join("orbit")).unwrap();
+
+        assert!(super::complete_pipeline_in(harness.path()).is_err());
+    }
+
+    #[test]
+    fn complete_command_rejects_a_pipeline_symlink_outside_harness_dir() {
+        let harness = tempfile::tempdir().unwrap();
+        let orbit = harness.path().join("orbit");
+        fs::create_dir(&orbit).unwrap();
+        let external = tempfile::NamedTempFile::new().unwrap();
+        let before = r#"{"id":"outside","status":"running","audit_fail_count":0,"max_retries":3,"pr_url":"https://github.com/o/r/pull/1","ci_status":"success"}"#;
+        fs::write(external.path(), before).unwrap();
+        let link = orbit.join("PIPELINE-20260729-outside.json");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(external.path(), &link).unwrap();
+        #[cfg(windows)]
+        match std::os::windows::fs::symlink_file(external.path(), &link) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(1314) => return,
+            Err(error) => panic!("create symlink fixture: {error}"),
+        }
+
+        assert!(super::complete_pipeline_in(harness.path()).is_err());
+        assert_eq!(fs::read_to_string(external.path()).unwrap(), before);
     }
 }

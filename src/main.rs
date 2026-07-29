@@ -4,6 +4,7 @@ mod evolve;
 mod harness_cli;
 mod hooks;
 mod mem;
+mod orbit_cli;
 mod orchestrate;
 mod serve;
 mod shared;
@@ -235,6 +236,10 @@ fn main() {
         let code = harness_cli::run(&args[1..]);
         std::process::exit(code);
     }
+    if subcmd == "orbit" {
+        let code = orbit_cli::run(&args[2..]);
+        std::process::exit(code);
+    }
     if subcmd == "serve" {
         let port = parse_flag_u32(&args, "--port").map(|p| p as u16);
         std::process::exit(serve::run_serve(port));
@@ -372,8 +377,8 @@ fn main() {
                     }
                 }
             }
-            "mem" | "team" | "org" | "eval" | "harness" | "telemetry" | "serve" | "dashboard"
-            | "update" => {
+            "mem" | "team" | "org" | "eval" | "harness" | "orbit" | "telemetry" | "serve"
+            | "dashboard" | "update" => {
                 unreachable!()
             }
             "path" => {
@@ -448,6 +453,9 @@ fn main() {
                 eprintln!("    --delete-source      Remove source directory after merge");
                 eprintln!("  org          Browse org team libraries  (epic org help)");
                 eprintln!("  team         Manage org-level agent teams  (epic team help)");
+                eprintln!(
+                    "  orbit complete  Validate and atomically complete the active Orbit pipeline"
+                );
                 eprintln!("  mem          Cross-agent unified memory  (harness mem help)");
                 eprintln!(
                     "  harness      Harness state as a first-class object  (epic harness snapshot|diff|restore)"

@@ -295,24 +295,14 @@ fn validate_org_name(org: &str) -> io::Result<()> {
     validate_identifier("org", org)
 }
 
-/// Returns the agents dir for a tool if that tool appears to be installed globally.
-fn installed_tool_agents_dir(tool: &str) -> Option<PathBuf> {
+/// Returns Codex's agents dir if Codex appears to be installed globally.
+fn codex_agents_dir() -> Option<PathBuf> {
     let home = home_dir();
     // home_dir() falls back to PathBuf::from(".") when HOME is unset — not an empty string.
     if home == std::path::Path::new(".") {
         return None;
     }
-    let parent = match tool {
-        "codex" => home.join(".codex"),
-        "antigravity" => home
-            .join(".gemini")
-            .join("config")
-            .join("plugins")
-            .join("epic"),
-        "cursor" => home.join(".cursor"),
-        "opencode" => home.join(".config").join("opencode"),
-        _ => return None,
-    };
+    let parent = home.join(".codex");
     if parent.exists() {
         Some(parent.join("agents"))
     } else {
@@ -326,7 +316,7 @@ fn installed_tool_agents_dir(tool: &str) -> Option<PathBuf> {
 /// they are the one piece of generated state the project-local commands cannot
 /// see through `.claude/agents/`.
 fn codex_team_files(org: &str, team: &str) -> Vec<PathBuf> {
-    installed_tool_agents_dir("codex")
+    codex_agents_dir()
         .map(|dir| crate::team::codex::team_agent_files(&dir, org, team))
         .unwrap_or_default()
 }
@@ -598,97 +588,48 @@ fn sync_to_dest(org: &str, team: &str, global: bool) -> io::Result<u32> {
         }
     }
 
-    // Also sync to other installed tools with tool-specific transforms.
-    // This writes agent files to ~/.codex/agents/, ~/.gemini/config/plugins/epic/agents/, etc.
-    // when those directories exist.  Print a notice for each tool synced so
-    // the user can see which tools were updated.
-    let other_tools = ["codex", "antigravity", "cursor", "opencode"];
-    for tool in &other_tools {
-        if let Some(agents_dir) = installed_tool_agents_dir(tool) {
-            // Codex has a flat agent directory. Its files carry exact ownership
-            // metadata and use an atomic no-symlink write path, unlike the
-            // per-team Markdown layout used by the other tools.
-            if *tool == "codex" {
-                crate::team::codex::prepare_agents_dir(&agents_dir).map_err(|e| {
+    // Claude and Codex are the only supported team-agent hosts. Codex receives
+    // its native TOML transform; raw Claude Markdown is not exported elsewhere.
+    if let Some(agents_dir) = codex_agents_dir() {
+        crate::team::codex::prepare_agents_dir(&agents_dir).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "unsafe Codex agents destination {}: {e}",
+                    agents_dir.display()
+                ),
+            )
+        })?;
+        eprintln!(
+            "[harness] syncing team '{team}' to codex ({})",
+            agents_dir.display()
+        );
+        for agent_name in &agents {
+            let Some(content) = load_agent(org, team, agent_name) else {
+                continue;
+            };
+            let injected = inject_team_context(&content, org, team, &config.team_type, &mission);
+            let agent = crate::team::codex::to_codex_agent(org, team, agent_name, &injected);
+            let payload = crate::team::codex::render_codex_toml(&agent).map_err(|e| {
+                io::Error::other(format!("could not render Codex agent '{agent_name}': {e}"))
+            })?;
+            // Legacy flat names are ambiguous for hyphenated names. A sync adds
+            // the owned identity without renaming or deleting ambiguous files.
+            let legacy = agents_dir.join(format!("{team}-{agent_name}.toml"));
+            if fs::symlink_metadata(&legacy).is_ok() {
+                eprintln!(
+                    "[harness] legacy Codex agent left untouched: {}; use the new owned identity {}",
+                    legacy.display(),
+                    agent.name
+                );
+            }
+            crate::team::codex::write_agent_file(&agents_dir, org, team, agent_name, &payload)
+                .map_err(|e| {
                     io::Error::new(
                         e.kind(),
-                        format!(
-                            "unsafe Codex agents destination {}: {e}",
-                            agents_dir.display()
-                        ),
+                        format!("could not write Codex agent '{agent_name}': {e}"),
                     )
                 })?;
-                eprintln!(
-                    "[harness] syncing team '{team}' to codex ({})",
-                    agents_dir.display()
-                );
-                for agent_name in &agents {
-                    let Some(content) = load_agent(org, team, agent_name) else {
-                        continue;
-                    };
-                    let injected =
-                        inject_team_context(&content, org, team, &config.team_type, &mission);
-                    let agent =
-                        crate::team::codex::to_codex_agent(org, team, agent_name, &injected);
-                    let payload = crate::team::codex::render_codex_toml(&agent).map_err(|e| {
-                        io::Error::other(format!(
-                            "could not render Codex agent '{agent_name}': {e}"
-                        ))
-                    })?;
-                    // Legacy flat names are ambiguous for hyphenated names. A
-                    // sync migrates by adding the new owned file, never by
-                    // renaming or deleting a legacy file that may be another
-                    // team's agent.
-                    let legacy = agents_dir.join(format!("{team}-{agent_name}.toml"));
-                    if fs::symlink_metadata(&legacy).is_ok() {
-                        eprintln!(
-                            "[harness] legacy Codex agent left untouched: {}; use the new owned identity {}",
-                            legacy.display(),
-                            agent.name
-                        );
-                    }
-                    crate::team::codex::write_agent_file(
-                        &agents_dir,
-                        org,
-                        team,
-                        agent_name,
-                        &payload,
-                    )
-                    .map_err(|e| {
-                        io::Error::new(
-                            e.kind(),
-                            format!("could not write Codex agent '{agent_name}': {e}"),
-                        )
-                    })?;
-                }
-                continue;
-            }
-
-            let tool_team_dir = agents_dir.join(team);
-            ensure_regular_directory(&tool_team_dir).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!(
-                        "unsafe {tool} agents destination {}: {error}",
-                        tool_team_dir.display()
-                    ),
-                )
-            })?;
-            eprintln!(
-                "[harness] syncing team '{team}' to {tool} ({})",
-                tool_team_dir.display()
-            );
-            for agent_name in &agents {
-                if let Some(content) = load_agent(org, team, agent_name) {
-                    let injected =
-                        inject_team_context(&content, org, team, &config.team_type, &mission);
-
-                    let (dest_path, payload) =
-                        (tool_team_dir.join(format!("{}.md", agent_name)), injected);
-
-                    write_owned_agent_file(&dest_path, &payload, org, team)?;
-                }
-            }
         }
     }
 
@@ -2119,32 +2060,39 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn test_other_tool_sync_does_not_create_a_team_dir_through_an_agents_symlink() {
+    fn test_sync_only_exports_native_codex_agents_when_unsupported_tool_roots_exist() {
         let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe { env::set_var("HOME", tmp.path()) };
         let project = tmp.path().join("project");
-        let tool_root = tmp
+        let antigravity_root = tmp
             .path()
             .join(".gemini")
             .join("config")
             .join("plugins")
             .join("epic");
-        let escape = tmp.path().join("escape");
+        let cursor_root = tmp.path().join(".cursor");
+        let opencode_root = tmp.path().join(".config").join("opencode");
+        let codex_agents = tmp.path().join(".codex").join("agents");
         fs::create_dir_all(&project).unwrap();
-        fs::create_dir_all(&tool_root).unwrap();
-        fs::create_dir_all(&escape).unwrap();
-        std::os::unix::fs::symlink(&escape, tool_root.join("agents")).unwrap();
+        fs::create_dir_all(&antigravity_root).unwrap();
+        fs::create_dir_all(&cursor_root).unwrap();
+        fs::create_dir_all(&opencode_root).unwrap();
+        fs::create_dir_all(&codex_agents).unwrap();
         seed_team(tmp.path(), "syncorg", "gamma");
 
         let _cwd = CwdGuard(env::current_dir().unwrap());
         env::set_current_dir(&project).unwrap();
-        assert!(sync_to_dest("syncorg", "gamma", false).is_err());
+        assert_eq!(sync_to_dest("syncorg", "gamma", false).unwrap(), 1);
         assert!(
-            !escape.join("gamma").exists(),
-            "sync must not create another tool's team directory through a symlink"
+            codex_agents
+                .join("epic-7-syncorg-5-gamma-6-tester.toml")
+                .is_file(),
+            "Codex receives its native transformed agent"
         );
+        assert!(!antigravity_root.join("agents").exists());
+        assert!(!cursor_root.join("agents").exists());
+        assert!(!opencode_root.join("agents").exists());
     }
 
     #[test]

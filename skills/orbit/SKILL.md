@@ -210,8 +210,14 @@ identity and persisted session date.
 
 3. Report the evolution outcome in the final summary (evolved skills generated, score trend).
 
-4. Verify the completion invariants again. Then update pipeline state:
-   `"phase": "evolve"`, `"status": "complete"`.
+4. Verify the completion invariants again, then commit completion through the
+   validated atomic transition:
+   ```bash
+   epic orbit complete
+   ```
+   Do not edit the pipeline JSON directly. The command rejects invalid state
+   without changing the file and is safe to repeat for an already-valid complete
+   pipeline.
 
 ## Step 8: Report
 
