@@ -213,10 +213,10 @@ pub fn completion_violations_with_durable_evolution(
         violations.push("completed without ci_status=\"success\" evidence".to_string());
     }
 
-    if !pipeline
+    if pipeline
         .get("evolution_session_id")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|session_id| !session_id.trim().is_empty())
+        .is_none_or(|session_id| session_id.trim().is_empty())
     {
         violations.push("completed without durable SessionEnd evolution evidence".to_string());
     } else if !durable_evolution {
