@@ -52,6 +52,13 @@ fn invalid_hook_input_response(subcmd: &str) -> Option<&'static str> {
     (subcmd == "guard").then_some(CODEX_GUARD_DENY)
 }
 
+fn is_hook_subcommand(subcmd: &str) -> bool {
+    matches!(
+        subcmd,
+        "resume" | "guard" | "polish" | "observe" | "snapshot" | "reflect"
+    )
+}
+
 fn validate_hook_input_for_subcommand(
     subcmd: &str,
     input: &hooks::common::HookInput,
@@ -289,29 +296,35 @@ fn main() {
     }
 
     // Read stdin once, pass to hook subcommands (skip if TTY — no EOF would arrive)
-    let parsed_input = if io::stdin().is_terminal() {
-        Ok((hooks::common::HookInput::default(), String::new()))
-    } else {
-        read_hook_input(io::stdin().lock())
-    };
-    let (input, stdin_buf) = match parsed_input {
-        Ok((input, raw)) => {
-            if let Err(error) = validate_hook_input_for_subcommand(subcmd, &input, &raw) {
-                eprintln!("[{subcmd}] invalid hook input: {error}");
+    let (input, stdin_buf) = if is_hook_subcommand(subcmd) {
+        // Read stdin once for hook subcommands (skip if TTY - no EOF would arrive).
+        // Ordinary CLI subcommands must leave stdin to their own contracts.
+        let parsed_input = if io::stdin().is_terminal() {
+            Ok((hooks::common::HookInput::default(), String::new()))
+        } else {
+            read_hook_input(io::stdin().lock())
+        };
+        match parsed_input {
+            Ok((input, raw)) => {
+                if let Err(error) = validate_hook_input_for_subcommand(subcmd, &input, &raw) {
+                    eprintln!("[{subcmd}] invalid hook input: {error}");
+                    if let Some(response) = invalid_hook_input_response(subcmd) {
+                        println!("{response}");
+                    }
+                    exit_with_cleanup(invalid_hook_input_exit_code(subcmd), true);
+                }
+                (input, raw)
+            }
+            Err(error) => {
+                eprintln!("[{subcmd}] {error}");
                 if let Some(response) = invalid_hook_input_response(subcmd) {
                     println!("{response}");
                 }
                 exit_with_cleanup(invalid_hook_input_exit_code(subcmd), true);
             }
-            (input, raw)
         }
-        Err(error) => {
-            eprintln!("[{subcmd}] {error}");
-            if let Some(response) = invalid_hook_input_response(subcmd) {
-                println!("{response}");
-            }
-            exit_with_cleanup(invalid_hook_input_exit_code(subcmd), true);
-        }
+    } else {
+        (hooks::common::HookInput::default(), String::new())
     };
 
     // Decide once whether human-facing output belongs on stdout (Codex reads it
