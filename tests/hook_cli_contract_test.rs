@@ -1005,3 +1005,143 @@ fn session_end_jobs_are_session_scoped_and_exactly_once() {
         "replaying SessionEnd must not duplicate or rewrite persisted analysis"
     );
 }
+
+#[test]
+fn session_end_reflects_every_project_that_recorded_the_same_host_session() {
+    let root = tempfile::tempdir().expect("temp root");
+    let first = project_path(root.path());
+    let second = root.path().join("second-project");
+    fs::create_dir_all(&first).expect("first project");
+    fs::create_dir_all(&second).expect("second project");
+    let session_id = "cross-project-reflection";
+    establish_global_host_session_state(root.path(), session_id);
+
+    for (project, error) in [
+        (&first, "TypeError: first-project failure"),
+        (&second, "permission denied: second-project failure"),
+    ] {
+        record_failed_observations(root.path(), project, session_id, error);
+    }
+
+    let output = run_hook(
+        root.path(),
+        &first,
+        "reflect",
+        r#"{"hook_event_name":"SessionEnd","session_id":"cross-project-reflection"}"#,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let first_harness = harness_path(root.path(), &first);
+    let second_harness = harness_path(root.path(), &second);
+    wait_for_completed_jobs(&first_harness.join("reflect-queue"), 1);
+    wait_for_completed_jobs(&second_harness.join("reflect-queue"), 1);
+
+    let first_records =
+        fs::read_to_string(first_harness.join("evolution.jsonl")).expect("first evolution records");
+    let second_records = fs::read_to_string(second_harness.join("evolution.jsonl"))
+        .expect("second evolution records");
+    assert_eq!(first_records.lines().count(), 1);
+    assert_eq!(second_records.lines().count(), 1);
+    assert!(first_records.contains("type_error"));
+    assert!(second_records.contains("permission_denied"));
+
+    let replay = run_hook(
+        root.path(),
+        &first,
+        "reflect",
+        r#"{"hook_event_name":"SessionEnd","session_id":"cross-project-reflection"}"#,
+    );
+    assert!(
+        replay.status.success(),
+        "cross-project replay must be accepted"
+    );
+    assert_eq!(
+        fs::read_to_string(first_harness.join("evolution.jsonl")).expect("first replay records"),
+        first_records,
+        "replay must not duplicate first-project evolution"
+    );
+    assert_eq!(
+        fs::read_to_string(second_harness.join("evolution.jsonl")).expect("second replay records"),
+        second_records,
+        "replay must not duplicate second-project evolution"
+    );
+}
+
+#[test]
+fn session_end_discovers_jsonl_only_project_and_bare_reflect_cannot_complete_work() {
+    let root = tempfile::tempdir().expect("temp root");
+    let first = project_path(root.path());
+    let second = root.path().join("jsonl-only-project");
+    fs::create_dir_all(&first).expect("first project");
+    fs::create_dir_all(&second).expect("second project");
+    let session_id = "jsonl-only-reflection";
+    establish_global_host_session_state(root.path(), session_id);
+
+    let second_harness = harness_path(root.path(), &second);
+    let projected_session = "20260728_jsonl-only-reflection";
+    fs::create_dir_all(second_harness.join("obs")).expect("fallback observation directory");
+    fs::write(
+        second_harness
+            .join("obs")
+            .join(format!("session_{projected_session}.jsonl")),
+        concat!(
+            r#"{"timestamp":"2026-07-28T00:00:00Z","tool":"Bash","tool_category":"shell","action":"bad","result":"error","score":0.0,"dimensions":null,"failure_category":"type_error"}"#,
+            "\n"
+        ),
+    )
+    .expect("fallback observation");
+
+    let bare = run_hook(root.path(), &first, "reflect", "");
+    assert!(!bare.status.success(), "bare reflect must be rejected");
+    assert!(
+        !harness_path(root.path(), &first)
+            .join("reflect-queue")
+            .exists(),
+        "bare reflect must not create a durable queue job"
+    );
+
+    for invalid in [
+        r#"{"hook_event_name":"SessionEnd"}"#,
+        "{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"###\"}",
+    ] {
+        let rejected = run_hook(root.path(), &first, "reflect", invalid);
+        assert!(
+            !rejected.status.success(),
+            "invalid SessionEnd identity must be rejected: {invalid}"
+        );
+    }
+
+    let malformed = run_hook(
+        root.path(),
+        &first,
+        "reflect",
+        r#"{"hook_event_name":"Stop","session_id":"jsonl-only-reflection"}"#,
+    );
+    assert!(
+        !malformed.status.success(),
+        "non-SessionEnd reflect must be rejected"
+    );
+
+    let output = run_hook(
+        root.path(),
+        &first,
+        "reflect",
+        r#"{"hook_event_name":"SessionEnd","session_id":"jsonl-only-reflection"}"#,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    wait_for_completed_jobs(&second_harness.join("reflect-queue"), 1);
+    assert!(
+        !harness_path(root.path(), &first)
+            .join("reflect-queue")
+            .exists(),
+        "the initiating project did not record this session"
+    );
+}

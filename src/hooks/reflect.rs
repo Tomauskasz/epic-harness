@@ -957,7 +957,10 @@ fn is_leap(y: i32) -> bool {
 
 const REFLECTION_JOB_ENV: &str = "EPIC_REFLECT_WORKER_JOB";
 const REFLECTION_SLOT_ENV: &str = "EPIC_REFLECT_WORKER_SLOT";
-const REFLECTION_SPAWN_LIMIT: usize = 2;
+const REFLECTION_PROJECT_ENV: &str = "EPIC_REFLECT_PROJECT";
+/// Reflection mutates metrics, skill files and project ledgers. Keep that
+/// transaction serial per project; other projects still have their own slot.
+const REFLECTION_SPAWN_LIMIT: usize = 1;
 const MAX_REFLECTION_QUEUE_SCAN: usize = 64;
 const MAX_REFLECTION_OBSERVATIONS: i64 = 5_000;
 const MAX_REFLECTION_JSONL_BYTES: u64 = 4 * 1024 * 1024;
@@ -1376,19 +1379,36 @@ fn observation_identity(record: &ObsRecord) -> io::Result<Option<String>> {
 }
 
 fn reflection_job_key(session_id: &str) -> io::Result<String> {
-    let key: String = session_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .take(128)
-        .collect();
-    if key.is_empty() {
+    if session_id.is_empty()
+        || session_id.len() > 128
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
         Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "reflection session id is empty after sanitization",
+            "invalid reflection session id",
         ))
     } else {
-        Ok(key)
+        Ok(session_id.to_string())
     }
+}
+
+fn validate_reflection_job(job: &ReflectionJob) -> io::Result<()> {
+    reflection_job_key(&job.session_id)?;
+    if job.project.is_empty()
+        || job.project.len() > 128
+        || !job
+            .project
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid reflection project",
+        ));
+    }
+    Ok(())
 }
 
 fn reflection_job_path(queue: &Path, session_id: &str, state: &str) -> io::Result<PathBuf> {
@@ -1536,6 +1556,7 @@ fn publish_new_file(
 }
 
 fn enqueue_reflection_job(queue: &Path, job: &ReflectionJob) -> io::Result<Option<PathBuf>> {
+    validate_reflection_job(job)?;
     ensure_reflection_queue_dir(queue)?;
     let pending = reflection_job_path(queue, &job.session_id, "pending")?;
     for state in ["pending", "claimed", "completed"] {
@@ -1737,6 +1758,19 @@ fn spawn_pending_reflection_jobs(queue: &Path) -> io::Result<usize> {
     let executable = std::env::current_exe()?;
     let mut spawned = 0;
     for job in pending {
+        let scope: ReflectionJob =
+            serde_json::from_slice(&fs::read(&job)?).map_err(io::Error::other)?;
+        validate_reflection_job(&scope)?;
+        let expected_queue = resolve_external_harness_dir(&scope.project)?.join("reflect-queue");
+        if canonical_for_compare(queue)? != canonical_for_compare(&expected_queue)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "reflection queue does not belong to project {}",
+                    scope.project
+                ),
+            ));
+        }
         let Some(slot) = reserve_reflection_worker_slot(queue)? else {
             break;
         };
@@ -1745,6 +1779,7 @@ fn spawn_pending_reflection_jobs(queue: &Path) -> io::Result<usize> {
             .arg("reflect")
             .env(REFLECTION_JOB_ENV, &job)
             .env(REFLECTION_SLOT_ENV, &slot_path)
+            .env(REFLECTION_PROJECT_ENV, &scope.project)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1759,21 +1794,73 @@ fn spawn_pending_reflection_jobs(queue: &Path) -> io::Result<usize> {
     Ok(spawned)
 }
 
-fn enqueue_reflection() -> io::Result<()> {
-    let queue = harness_dir().join("reflect-queue");
-    recover_stale_reflection_claims(&queue, SystemTime::now(), REFLECTION_CLAIM_MAX_AGE)?;
-    recover_stale_reflection_worker_slots(&queue, SystemTime::now(), REFLECTION_CLAIM_MAX_AGE)?;
-    let job = ReflectionJob {
-        session_id: session_id(),
-        project: project_slug(),
-        created_at: now_iso(),
-        attempts: 0,
-        claim: None,
-    };
-    let _ = enqueue_reflection_job(&queue, &job)?;
-    // A saturated queue is still a successful durable handoff. Completing
-    // workers dispatch the next pending job after releasing their slot.
-    let _ = spawn_pending_reflection_jobs(&queue)?;
+fn fallback_projects_for_session(reflection_session_id: &str) -> io::Result<Vec<String>> {
+    let mut projects = Vec::new();
+    for slug in list_harness_project_slugs() {
+        let harness = resolve_external_harness_dir(&slug)?;
+        let path = harness
+            .join("obs")
+            .join(format!("session_{reflection_session_id}.jsonl"));
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("reflection fallback is a symlink: {}", path.display()),
+                ));
+            }
+            Ok(metadata) if metadata.is_file() => {
+                // The exact filename is the fallback identity boundary. Parse
+                // it now so corrupt evidence never becomes a durable job.
+                read_bounded_session_jsonl(
+                    &path,
+                    MAX_REFLECTION_OBSERVATIONS as usize,
+                    MAX_REFLECTION_JSONL_BYTES,
+                )?;
+                projects.push(slug);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(projects)
+}
+
+fn reflection_projects_for_session(reflection_session_id: &str) -> io::Result<Vec<String>> {
+    let mut projects = crate::store::runtime::block_on(async {
+        let pool = crate::store::pool::harness_pool().await?;
+        crate::store::observations::distinct_projects_for_session_pool(&pool, reflection_session_id)
+            .await
+    })?;
+    projects.extend(fallback_projects_for_session(reflection_session_id)?);
+    projects.sort();
+    projects.dedup();
+    // Database contents are untrusted input: every target must resolve to an
+    // exact regular project dir below the harness projects root.
+    for project in &projects {
+        resolve_external_harness_dir(project)?;
+    }
+    Ok(projects)
+}
+
+fn enqueue_reflection(reflection_session_id: &str) -> io::Result<()> {
+    for project in reflection_projects_for_session(reflection_session_id)? {
+        let harness = resolve_external_harness_dir(&project)?;
+        let queue = harness.join("reflect-queue");
+        recover_stale_reflection_claims(&queue, SystemTime::now(), REFLECTION_CLAIM_MAX_AGE)?;
+        recover_stale_reflection_worker_slots(&queue, SystemTime::now(), REFLECTION_CLAIM_MAX_AGE)?;
+        let job = ReflectionJob {
+            session_id: reflection_session_id.to_string(),
+            project,
+            created_at: now_iso(),
+            attempts: 0,
+            claim: None,
+        };
+        let _ = enqueue_reflection_job(&queue, &job)?;
+        // A saturated queue is still a successful durable handoff. Completing
+        // workers dispatch the next pending job after releasing their slot.
+        let _ = spawn_pending_reflection_jobs(&queue)?;
+    }
     Ok(())
 }
 
@@ -1786,66 +1873,97 @@ fn settle_reflection_job(claimed: &Path, reflection_code: i32) -> io::Result<()>
 }
 
 fn run_reflection_worker(pending: &Path) -> i32 {
-    let queue = harness_dir().join("reflect-queue");
-    if let Err(error) = ensure_reflection_queue_dir(&queue) {
-        eprintln!("[reflect] invalid worker queue: {error}");
+    let declared: ReflectionJob = match fs::read(pending)
+        .map_err(io::Error::other)
+        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(io::Error::other))
+    {
+        Ok(job) => job,
+        Err(error) => {
+            eprintln!("[reflect] invalid worker job: {error}");
+            return 1;
+        }
+    };
+    if let Err(error) = validate_reflection_job(&declared) {
+        eprintln!("[reflect] invalid worker job identity: {error}");
         return 1;
     }
+    let queue = match resolve_external_harness_dir(&declared.project) {
+        Ok(harness) => harness.join("reflect-queue"),
+        Err(error) => {
+            eprintln!("[reflect] invalid worker project: {error}");
+            return 1;
+        }
+    };
     let Some(parent) = pending.parent() else {
         eprintln!("[reflect] worker job has no parent directory");
         return 1;
     };
-    if parent != queue {
+    if canonical_for_compare(parent).ok() != canonical_for_compare(&queue).ok() {
         eprintln!("[reflect] refusing worker job outside {}", queue.display());
         return 1;
     }
+    if std::env::var(REFLECTION_PROJECT_ENV).ok().as_deref() != Some(declared.project.as_str()) {
+        eprintln!("[reflect] worker project scope does not match its job");
+        return 1;
+    }
+    if let Err(error) = ensure_reflection_queue_dir(&queue) {
+        eprintln!("[reflect] invalid worker queue: {error}");
+        return 1;
+    }
     let slot_path = match std::env::var_os(REFLECTION_SLOT_ENV).map(PathBuf::from) {
-        Some(path) if path.parent() == Some(queue.as_path()) && path.exists() => path,
+        Some(path)
+            if canonical_for_compare(path.parent().unwrap_or(Path::new(""))).ok()
+                == canonical_for_compare(&queue).ok()
+                && path
+                    .symlink_metadata()
+                    .map(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+                    .unwrap_or(false) =>
+        {
+            path
+        }
         _ => {
             eprintln!("[reflect] worker has no valid slot permit");
             return 1;
         }
     };
     let worker_slot = ReflectionWorkerSlot { path: slot_path };
-    let claimed = match claim_reflection_job(pending) {
-        Ok(Some(path)) => path,
-        Ok(None) => return 0,
+    let code = match claim_reflection_job(pending) {
+        Ok(Some(claimed)) => match read_claimed_reflection_job(&claimed) {
+            Ok(job) if job.project == declared.project => {
+                let reflection_code = run_reflection(&job.session_id);
+                match settle_reflection_job(&claimed, reflection_code) {
+                    Ok(()) => reflection_code,
+                    Err(error) => {
+                        eprintln!("[reflect] failed to settle reflection job: {error}");
+                        1
+                    }
+                }
+            }
+            Ok(job) => {
+                eprintln!("[reflect] claimed job project {} changed", job.project);
+                if let Err(error) = quarantine_reflection_job(&claimed) {
+                    eprintln!("[reflect] failed to quarantine mismatched job: {error}");
+                }
+                1
+            }
+            Err(error) => {
+                eprintln!("[reflect] invalid job: {error}");
+                1
+            }
+        },
+        Ok(None) => 0,
         Err(error) => {
             eprintln!("[reflect] failed to claim job: {error}");
-            return 1;
+            1
         }
     };
-    let job = match read_claimed_reflection_job(&claimed) {
-        Ok(job) if job.project == project_slug() => job,
-        Ok(job) => {
-            eprintln!(
-                "[reflect] job project {} does not match {}",
-                job.project,
-                project_slug()
-            );
-            if let Err(error) = quarantine_reflection_job(&claimed) {
-                eprintln!("[reflect] failed to quarantine mismatched job: {error}");
-            }
-            return 1;
-        }
-        Err(error) => {
-            eprintln!("[reflect] invalid job: {error}");
-            return 1;
-        }
-    };
-
-    let code = run_reflection(&job.session_id);
-    let settlement_failed = if let Err(error) = settle_reflection_job(&claimed, code) {
-        eprintln!("[reflect] failed to settle reflection job: {error}");
-        true
-    } else {
-        false
-    };
+    // Drop before dispatching: this project has one permit, and every worker
+    // exit (including claim/read/settlement failure) must hand the queue on.
     drop(worker_slot);
     if let Err(error) = spawn_pending_reflection_jobs(&queue) {
         eprintln!("[reflect] failed to dispatch next pending job: {error}");
     }
-    if settlement_failed { 1 } else { code }
+    code
 }
 
 // ── Main Hook ───────────────────────────────────────
@@ -1854,8 +1972,18 @@ pub fn run(input: &HookInput) -> i32 {
     if let Some(path) = std::env::var_os(REFLECTION_JOB_ENV) {
         return run_reflection_worker(Path::new(&path));
     }
-    if input.session_id.is_some() || input.hook_event_name.as_deref() == Some("SessionEnd") {
-        return match enqueue_reflection() {
+    if input.hook_event_name.as_deref() == Some("SessionEnd")
+        && input.session_id.is_some()
+        && crate::shared::host::session_id().is_some()
+    {
+        let reflection_session_id = match try_session_id() {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                eprintln!("[reflect] SessionEnd identity is unavailable: {error}");
+                return 1;
+            }
+        };
+        return match enqueue_reflection(&reflection_session_id) {
             Ok(()) => 0,
             Err(error) => {
                 eprintln!("[reflect] failed to delegate SessionEnd work: {error}");
@@ -1863,7 +1991,8 @@ pub fn run(input: &HookInput) -> i32 {
             }
         };
     }
-    run_reflection(&session_id())
+    eprintln!("[reflect] mutating reflection requires a validated SessionEnd session identity");
+    1
 }
 
 fn reflection_partition_date(reflection_session_id: &str) -> Option<&str> {
@@ -3500,11 +3629,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first = reserve_reflection_worker_slot(dir.path()).unwrap();
         let second = reserve_reflection_worker_slot(dir.path()).unwrap();
-        let third = reserve_reflection_worker_slot(dir.path()).unwrap();
 
         assert!(first.is_some());
-        assert!(second.is_some());
-        assert!(third.is_none());
+        assert!(
+            second.is_none(),
+            "one project may run one reflection worker"
+        );
 
         drop(first);
         assert!(
@@ -3512,6 +3642,21 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn reflection_job_paths_reject_traversal_identities() {
+        let queue = tempfile::tempdir().unwrap();
+        let job = ReflectionJob {
+            session_id: "20260728_../../escape".into(),
+            project: "project-a".into(),
+            created_at: "2026-07-28T00:00:00Z".into(),
+            attempts: 0,
+            claim: None,
+        };
+
+        assert!(enqueue_reflection_job(queue.path(), &job).is_err());
+        assert_eq!(fs::read_dir(queue.path()).unwrap().count(), 0);
     }
 
     #[test]

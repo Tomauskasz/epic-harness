@@ -182,13 +182,12 @@ and reports the ones whose own state contradicts it. Do not set
 
 ## Step 7: Evolve
 
-Run the evolution engine to analyze this session and generate/improve skills.
+SessionEnd queues the evolution engine for this session. Do not invoke a
+mutating reflection manually: it requires the host's validated SessionEnd
+identity and persisted session date.
 
-1. Verify `ci_status` is `"success"`, then run:
-   ```bash
-   epic-harness reflect
-   ```
-   This triggers the Ring 3 loop: observe → analyze → seed evolved skills → update metrics.
+1. Verify `ci_status` is `"success"`. SessionEnd triggers the Ring 3 loop.
+   It analyzes observations, seeds evolved skills, and updates metrics.
 
    If `$HARNESS_DIR/pending_synth.jsonl` has records with `status: "pending"`,
    synthesize each — launch one subagent per manifest (use your host's subagent

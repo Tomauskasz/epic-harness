@@ -296,6 +296,27 @@ pub(crate) async fn query_obs_for_session_pool(
     decode_stored_observations(rows)
 }
 
+/// Discover every project that recorded this exact host-session identity.
+/// SessionEnd can run after a host changes directories, so reflection must
+/// dispatch each recorded project instead of trusting the worker's CWD.
+pub(crate) async fn distinct_projects_for_session_pool(
+    pool: &AnyPool,
+    session_id: &str,
+) -> io::Result<Vec<String>> {
+    let rows = sqlx::query("SELECT DISTINCT project FROM observations WHERE session_id = ?")
+        .bind(session_id)
+        .fetch_all(pool)
+        .await
+        .map_err(super::sqlx_err)?;
+    let mut projects = Vec::with_capacity(rows.len());
+    for row in rows {
+        projects.push(row.try_get::<String, _>(0).map_err(super::sqlx_err)?);
+    }
+    projects.sort();
+    projects.dedup();
+    Ok(projects)
+}
+
 /// Bounded date-range load for reflection context.
 pub(crate) async fn query_obs_for_date_range_bounded_pool(
     pool: &AnyPool,
@@ -984,6 +1005,41 @@ mod tests {
 
         assert_eq!(rows.len(), 2);
         assert_ne!(rows[0].row_id, rows[1].row_id);
+    }
+
+    #[tokio::test]
+    async fn reflection_project_discovery_is_exact_and_distinct() {
+        let pool = test_pool().await;
+        let record = ObsRecord {
+            timestamp: "2026-06-02T10:00:00".into(),
+            tool: "Bash".into(),
+            tool_category: "bash".into(),
+            action: None,
+            result: Some("success".into()),
+            score: Some(1.0),
+            dimensions: None,
+            failure_category: None,
+            error_snippet: None,
+            file_ext: None,
+            sequence_id: None,
+            pipeline_id: None,
+            tool_use_id: None,
+        };
+        for project in ["project-b", "project-a", "project-a"] {
+            insert_observation_pool(&pool, &record, "session-a", project)
+                .await
+                .unwrap();
+        }
+        insert_observation_pool(&pool, &record, "session-other", "project-c")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            distinct_projects_for_session_pool(&pool, "session-a")
+                .await
+                .unwrap(),
+            vec!["project-a", "project-b"]
+        );
     }
 
     #[tokio::test]

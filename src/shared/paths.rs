@@ -104,8 +104,21 @@ fn canonical_project_root() -> PathBuf {
 
 /// Returns a stable collision-resistant slug for the canonical project root.
 pub fn project_slug() -> String {
-    static SLUG: LazyLock<String> =
-        LazyLock::new(|| project_slug_for_root(&canonical_project_root()));
+    static SLUG: LazyLock<String> = LazyLock::new(|| {
+        // A reflection worker is dispatched for a durable project-scoped
+        // job. Its inherited CWD belongs to the SessionEnd caller and may
+        // be a different project, so never derive worker storage from it.
+        // The queue worker validates this value against the job and the
+        // projects root before it is allowed to run.
+        if std::env::var_os("EPIC_REFLECT_WORKER_JOB").is_some()
+            && let Some(scope) =
+                std::env::var_os("EPIC_REFLECT_PROJECT").and_then(|scope| scope.into_string().ok())
+            && resolve_external_harness_dir(&scope).is_ok()
+        {
+            return scope;
+        }
+        project_slug_for_root(&canonical_project_root())
+    });
     SLUG.clone()
 }
 
