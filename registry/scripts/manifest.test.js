@@ -398,6 +398,8 @@ test("npm package includes the hook runners and canonical runtime revision", () 
   const packed = JSON.parse(result.stdout);
   const files = new Set(packed[0]?.files?.map((file) => file.path));
   for (const path of [
+    ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
     "hooks/hooks.json",
     "registry/scripts/install.js",
     "registry/scripts/run-hook.cmd",

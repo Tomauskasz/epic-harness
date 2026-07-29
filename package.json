@@ -21,6 +21,8 @@
     "ai"
   ],
   "files": [
+    ".claude-plugin/",
+    ".codex-plugin/",
     "registry/commands/",
     "registry/skills/",
     "registry/agents/",
