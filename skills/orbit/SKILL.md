@@ -61,7 +61,7 @@ and reports the ones whose own state contradicts it. Do not set
 - `pr_url` is a nonempty concrete GitHub pull-request URL returned by `gh pr create`
 - `ci_status` is exactly `"success"`
 - `audit_fail_count` and `max_retries` are integer evidence, and `audit_fail_count` is below `max_retries` — at the limit, Step 5 requires a pause
-- `phase` is exactly `"evolve"`, recorded only after this skill's Evolve work succeeds
+- `phase` is exactly `"evolve"` and `evolution_session_id` identifies the durable SessionEnd reflection that recorded it
 
 ## Step 1: Auto-Detect Mode
 
@@ -187,8 +187,10 @@ SessionEnd queues the evolution engine for this session. Do not invoke a
 mutating reflection manually: it requires the host's validated SessionEnd
 identity and persisted session date.
 
-1. Verify `ci_status` is `"success"`. SessionEnd triggers the Ring 3 loop.
-   It analyzes observations, seeds evolved skills, and updates metrics.
+1. Verify `ci_status` is `"success"`, set `"phase": "awaiting_evolution"`, and
+   leave `"status": "running"`. SessionEnd triggers the Ring 3 loop.
+   Its durable worker analyzes observations, seeds evolved skills, updates metrics,
+   and is the only component that records `phase: "evolve"` and completion.
 
    If `$HARNESS_DIR/pending_synth.jsonl` has records with `status: "pending"`,
    synthesize each — launch one subagent per manifest (use your host's subagent
@@ -198,35 +200,32 @@ identity and persisted session date.
    ```
    Unconsumed manifests leave the template skill body in place.
 
-2. Run the contextual reflection:
+2. Do not invoke manual reflection; SessionEnd is the required mutation boundary:
    ```bash
-   epic-harness reflect --context --days 1
+   # SessionEnd worker records evolution evidence after this response ends.
    ```
    and record the successful orbit pattern into memory:
    ```bash
-   epic mem add --title "Orbit: {goal_slug} succeeded" \
-     --type pattern --importance 0.7 \
-     --body "Orbit completed. Mode: {mode}. AC: all verified. PR: {url}. Stack: {stack}."
+   # Do not record an Orbit-success pattern before durable SessionEnd evidence.
    ```
 
-3. Report the evolution outcome in the final summary (evolved skills generated, score trend).
+3. Report the PR and that evolution completion is pending SessionEnd. Do not
+   report evolved skill counts, score trends, or `Orbit Complete` yet.
 
-4. After the reflection and memory record succeed, update the pipeline state to
-   set `"phase": "evolve"`. Do not set `status` to `complete` directly.
+4. Do not edit `phase` to `"evolve"` or set `status` to `complete`; the durable
+   worker does both only for a pipeline observed in its ending session.
 
-5. Verify the completion invariants again, then commit completion through the
-   validated atomic transition:
+5. Do not invoke the manual completion command:
    ```bash
-   epic orbit complete
+   # `epic orbit complete` rejects because it has no SessionEnd identity.
    ```
-   Do not edit the pipeline JSON directly. The command rejects invalid state
-   without changing the file and is safe to repeat for an already-valid complete
-   pipeline.
+   A missing worker result leaves the pipeline running and recoverable rather
+   than fabricating a completed evolution.
 
 ## Step 8: Report
 
 ```
-## Orbit Complete
+## Orbit Shipped; Evolution Pending
 - Pipeline: PIPELINE-{id}
 - Mode: {direct|council|interactive} (auto-detected)
 - Spec: SPEC-{timestamp} ({goal_slug})
@@ -243,11 +242,10 @@ identity and persisted session date.
 | Audit | PASS | {count} |
 | Eval | {PASS|SKIPPED} | 0 |
 | Ship | complete | 0 |
-| Evolve | complete | 0 |
+| Evolve | pending SessionEnd | 0 |
 
 ### Evolution
-- Skills evolved: {count}
-- Score trend: {improving|stable|declining}
+- Completion: pending durable SessionEnd evidence
 ```
 
 ## Red Flags

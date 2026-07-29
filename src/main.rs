@@ -467,7 +467,7 @@ fn main() {
                 eprintln!("  org          Browse org team libraries  (epic org help)");
                 eprintln!("  team         Manage org-level agent teams  (epic team help)");
                 eprintln!(
-                    "  orbit complete  Validate and atomically complete the active Orbit pipeline"
+                    "  orbit complete  Reserved for SessionEnd; manual invocation is rejected"
                 );
                 eprintln!("  mem          Cross-agent unified memory  (harness mem help)");
                 eprintln!(

@@ -2075,7 +2075,7 @@ fn run_reflection(reflection_session_id: &str) -> i32 {
         crate::store::evolution::reflection_completed_pool(&pool, reflection_session_id, &slug)
             .await
     }) {
-        Ok(true) => return 0,
+        Ok(true) => return complete_recorded_orbit_pipelines(reflection_session_id, &slug),
         Ok(false) => {}
         Err(error) => {
             eprintln!("[reflect] failed to check completed session: {error}");
@@ -2145,7 +2145,7 @@ fn run_reflection(reflection_session_id: &str) -> i32 {
         }
     };
     if observations.len() < 3 {
-        return mark_reflection_completed(reflection_session_id, &slug);
+        return mark_reflection_completed(reflection_session_id, &slug, &observations);
     }
 
     // 2. Analyze
@@ -2154,7 +2154,7 @@ fn run_reflection(reflection_session_id: &str) -> i32 {
     // defensible session score. Complete the durable job without touching
     // evolution, metrics, stagnation, or their replay projections.
     if !analysis.is_evaluable() {
-        return mark_reflection_completed(reflection_session_id, &slug);
+        return mark_reflection_completed(reflection_session_id, &slug, &observations);
     }
     analysis.failure_patterns = evolve::detect_patterns(&observations);
 
@@ -2754,10 +2754,14 @@ fn run_reflection(reflection_session_id: &str) -> i32 {
         seeded,
     );
 
-    mark_reflection_completed(reflection_session_id, &slug)
+    mark_reflection_completed(reflection_session_id, &slug, &observations)
 }
 
-fn mark_reflection_completed(reflection_session_id: &str, project: &str) -> i32 {
+fn mark_reflection_completed(
+    reflection_session_id: &str,
+    project: &str,
+    observations: &[ObsRecord],
+) -> i32 {
     match crate::store::runtime::block_on(async {
         let pool = crate::store::pool::harness_pool().await?;
         crate::store::evolution::mark_reflection_completed_pool(
@@ -2767,7 +2771,7 @@ fn mark_reflection_completed(reflection_session_id: &str, project: &str) -> i32 
         )
         .await
     }) {
-        Ok(()) => 0,
+        Ok(()) => complete_observed_orbit_pipelines(reflection_session_id, observations),
         Err(error) => {
             eprintln!("[reflect] failed to mark reflection complete: {error}");
             1
@@ -2781,6 +2785,63 @@ fn mark_reflection_completed(reflection_session_id: &str, project: &str) -> i32 
 ///
 /// Returns `(pipeline_id, violation)` pairs. See
 /// `shared::orbit::completion_violations` for what is checked and why.
+fn complete_recorded_orbit_pipelines(reflection_session_id: &str, project: &str) -> i32 {
+    let observations = match crate::store::runtime::block_on(async {
+        let pool = crate::store::pool::harness_pool().await?;
+        crate::store::observations::query_obs_for_session_pool(
+            &pool,
+            reflection_session_id,
+            project,
+            MAX_REFLECTION_OBSERVATIONS,
+        )
+        .await
+    }) {
+        Ok(observations) => observations,
+        Err(error) => {
+            eprintln!("[reflect] failed to recover Orbit completion evidence: {error}");
+            return 1;
+        }
+    };
+    let records: Vec<ObsRecord> = observations
+        .into_iter()
+        .map(|observation| observation.record)
+        .collect();
+    complete_observed_orbit_pipelines(reflection_session_id, &records)
+}
+
+fn complete_observed_orbit_pipelines(
+    reflection_session_id: &str,
+    observations: &[ObsRecord],
+) -> i32 {
+    let mut pipeline_ids: Vec<String> = observations
+        .iter()
+        .filter_map(|observation| observation.pipeline_id.clone())
+        .collect();
+    pipeline_ids.sort();
+    pipeline_ids.dedup();
+    if pipeline_ids.is_empty() {
+        return 0;
+    }
+    match crate::shared::orbit::complete_pipelines_after_reflection_in(
+        &harness_dir(),
+        reflection_session_id,
+        &pipeline_ids,
+    ) {
+        Ok(0) => 0,
+        Ok(completed) => {
+            hint(
+                "reflect",
+                &format!("Orbit: completed {completed} pipeline(s) after durable evolution"),
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("[reflect] failed to complete evolved Orbit pipeline: {error}");
+            1
+        }
+    }
+}
+
 fn orbit_pipeline_candidates(orbit_dir: &Path) -> io::Result<Vec<PathBuf>> {
     let entries = match fs::read_dir(orbit_dir) {
         Ok(entries) => entries,
