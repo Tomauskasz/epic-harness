@@ -42,7 +42,7 @@ Complete inventory of every data artifact written to disk.
     │   └── PIPELINE-*.json              ← Orbit pipeline state
     ├── reflect-queue/
     │   ├── job_*.{pending,claimed,completed,failed}
-    │   └── worker-*.slot                ← Bounded SessionEnd workers
+    │   └── worker.lock                  ← OS-held SessionEnd worker lock
     ├── orchestrator/
     │   ├── run.json                     ← Orchestrator run state
     │   ├── control.json                 ← Control directive
