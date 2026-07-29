@@ -413,8 +413,9 @@ under slow/remote hosts) is gone.
 `reflect` publishes each SessionEnd job only after it has synced a temporary
 file. Publication is no-clobber, so a partial write never appears as
 `*.pending`. One persistent OS-held `worker.lock` serializes a project worker.
-Each scan visits at most 128 directory entries and selects deterministic,
-bounded candidates. Each claim gets a fresh owned lease and fence. Retry,
+Each scan detects the 129th directory entry and rejects queues over 128 rather
+than silently starving later jobs; otherwise it selects deterministic, bounded
+candidates. Each claim gets a fresh owned lease and fence. Retry,
 completion, and dead-letter transitions use atomic replacement and sync the
 queue directory. Per-session database keys and typed file projections make
 crash recovery idempotent. Abandoned claims count as failed attempts; malformed

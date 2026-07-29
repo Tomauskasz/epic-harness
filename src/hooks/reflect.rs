@@ -1482,6 +1482,12 @@ fn reflection_queue_files_from_entries(
             files.push(path);
         }
     }
+    if entries.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("reflection queue entries exceed limit of {MAX_REFLECTION_QUEUE_FILES}"),
+        ));
+    }
     files.sort();
     files.truncate(candidate_limit);
     Ok(files)
@@ -1983,6 +1989,7 @@ fn run_reflection_worker(pending: &Path) -> i32 {
     drop(worker_lock);
     if let Err(error) = spawn_pending_reflection_jobs(&queue) {
         eprintln!("[reflect] failed to dispatch next pending job: {error}");
+        return 1;
     }
     code
 }
@@ -3305,21 +3312,33 @@ mod tests {
     }
 
     #[test]
-    fn queue_scan_caps_total_entries_before_late_candidates() {
+    fn queue_scan_rejects_overflow_before_pending_or_claim_recovery() {
         let mut entries = (0..MAX_REFLECTION_QUEUE_FILES)
             .map(|index| Ok((PathBuf::from(format!("garbage-{index:03}.tmp")), true)))
             .collect::<Vec<io::Result<(PathBuf, bool)>>>();
-        entries.push(Err(io::Error::other("late entry must not be visited")));
+        entries.push(Ok((PathBuf::from("job_late.pending"), true)));
 
-        assert!(
-            reflection_queue_files_from_entries(
-                entries.into_iter(),
-                "pending",
-                MAX_REFLECTION_QUEUE_FILES,
-            )
-            .unwrap()
-            .is_empty()
+        let pending_error = reflection_queue_files_from_entries(
+            entries.into_iter(),
+            "pending",
+            MAX_REFLECTION_QUEUE_FILES,
         );
+        assert_eq!(
+            pending_error.unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        let mut claim_entries = (0..MAX_REFLECTION_QUEUE_FILES)
+            .map(|index| Ok((PathBuf::from(format!("garbage-{index:03}.tmp")), true)))
+            .collect::<Vec<io::Result<(PathBuf, bool)>>>();
+        claim_entries.push(Ok((PathBuf::from("job_late.claimed"), true)));
+
+        let claim_error = reflection_queue_files_from_entries(
+            claim_entries.into_iter(),
+            "claimed",
+            MAX_REFLECTION_QUEUE_SCAN,
+        );
+        assert_eq!(claim_error.unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
