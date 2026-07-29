@@ -9,7 +9,7 @@
 //! Runs at session end, after reflect has analyzed the day.
 
 use std::fs;
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 use std::{collections::HashSet, fs::OpenOptions};
@@ -22,14 +22,37 @@ use super::common::*;
 /// session, so an in-flight lock is never removed.
 const RUNTIME_FILE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const GLOBAL_RETENTION_CADENCE: Duration = Duration::from_secs(60 * 60);
+/// Retention runs synchronously at session end, so hostile local state must
+/// not make it enumerate or deserialize without a finite bound.
+const MAX_RETENTION_PROJECTS: usize = 256;
+const MAX_REFLECTION_QUEUE_ENTRIES: usize = 512;
+const MAX_ACTIVE_REFLECTION_JOBS: usize = 256;
+const MAX_REFLECTION_JOB_BYTES: usize = 64 * 1024;
 
 /// Held OS lock for one global retention sweep.
 ///
 /// The `retention.lock` pathname intentionally persists: closing this handle
 /// releases ownership, including after process death, without ever unlinking a
 /// successor's lock file.
+#[derive(Debug)]
 struct RetentionLease {
     _file: fs::File,
+}
+
+/// An opened projects directory. Unix children are always resolved relative to
+/// this descriptor, so replacing the pathname after this point cannot redirect
+/// a marker or lock operation.
+struct RetentionRoot {
+    #[cfg(unix)]
+    directory: fs::File,
+    #[cfg(windows)]
+    // Kept open for the whole operation. `std` has no Windows equivalent of
+    // `openat`, so child lookup still cannot prove an ancestor was not
+    // replaced after root validation; every opened leaf is nevertheless a
+    // `FILE_FLAG_OPEN_REPARSE_POINT` handle and is rejected before mutation.
+    _directory: fs::File,
+    #[cfg(windows)]
+    path: std::path::PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -43,14 +66,15 @@ struct QueuedReflectionJob {
 pub(crate) fn run_preserving_session(
     active_session: Option<(&str, &str)>,
 ) -> io::Result<(u64, usize)> {
-    let mut files = sweep_runtime_files(&harness_dir(), &obs_dir(), SystemTime::now());
     let projects = harness_projects_root();
     let now = SystemTime::now();
     let Some(_lease) = try_acquire_global_retention_lease(&projects, now)? else {
-        return Ok((0, files));
+        return Ok((0, 0));
     };
 
+    // Complete every bounded, fallible scan before any delete/prune operation.
     let active_sessions = active_reflection_sessions(&projects, active_session)?;
+    let mut files = sweep_runtime_files(&harness_dir(), &obs_dir(), now);
     let days = crate::config::CONFIG.db.retention_days;
     if days == 0 {
         record_global_retention(&projects)?;
@@ -178,61 +202,22 @@ fn try_acquire_global_retention_lease(
     projects: &Path,
     now: SystemTime,
 ) -> io::Result<Option<RetentionLease>> {
-    if projects
-        .symlink_metadata()
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("retention root is a symlink: {}", projects.display()),
-        ));
-    }
-    fs::create_dir_all(projects)?;
-    if !projects.symlink_metadata()?.file_type().is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("retention root is not a directory: {}", projects.display()),
-        ));
-    }
-
-    let marker = projects.join("retention.last");
-    if marker
-        .symlink_metadata()
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("retention marker is a symlink: {}", marker.display()),
-        ));
-    }
-    if marker
-        .metadata()
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(|modified| now.duration_since(modified).ok())
-        .is_some_and(|age| age < GLOBAL_RETENTION_CADENCE)
-    {
+    let root = open_retention_root(projects)?;
+    let marker_is_recent = match open_retention_child(&root, "retention.last", false, false) {
+        Ok(file) => file
+            .metadata()?
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age < GLOBAL_RETENTION_CADENCE),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    if marker_is_recent {
         return Ok(None);
     }
 
-    let lock = projects.join("retention.lock");
-    if lock
-        .symlink_metadata()
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("retention lock is a symlink: {}", lock.display()),
-        ));
-    }
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(lock)?;
+    let file = open_retention_child(&root, "retention.lock", true, true)?;
     match file.try_lock() {
         Ok(()) => Ok(Some(RetentionLease { _file: file })),
         Err(fs::TryLockError::WouldBlock) => Ok(None),
@@ -241,25 +226,163 @@ fn try_acquire_global_retention_lease(
 }
 
 fn record_global_retention(projects: &Path) -> io::Result<()> {
-    let marker = projects.join("retention.last");
-    if marker
-        .symlink_metadata()
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("retention marker is a symlink: {}", marker.display()),
-        ));
-    }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(marker)?;
-    use std::io::Write;
+    let root = open_retention_root(projects)?;
+    record_global_retention_in_root(&root)
+}
+
+fn record_global_retention_in_root(root: &RetentionRoot) -> io::Result<()> {
+    // Do not request truncation during open: it would be applied before a
+    // Windows reparse-point handle can be verified. The opened handle remains
+    // stable if a pathname is swapped after this point.
+    let mut file = open_retention_child(root, "retention.last", true, true)?;
+    file.set_len(0)?;
     file.write_all(crate::shared::helpers::now_iso().as_bytes())?;
     file.sync_all()
+}
+
+#[cfg(all(test, unix))]
+fn record_global_retention_after_root_open(
+    projects: &Path,
+    before_child_open: impl FnOnce(),
+) -> io::Result<()> {
+    let root = open_retention_root(projects)?;
+    before_child_open();
+    record_global_retention_in_root(&root)
+}
+
+fn open_retention_root(projects: &Path) -> io::Result<RetentionRoot> {
+    match fs::create_dir_all(projects) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(projects)?;
+        if !directory.metadata()?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("retention root is not a directory: {}", projects.display()),
+            ));
+        }
+        return Ok(RetentionRoot { directory });
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(projects)?;
+        let metadata = directory.metadata()?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "retention root is a reparse point or not a directory: {}",
+                    projects.display()
+                ),
+            ));
+        }
+        return Ok(RetentionRoot {
+            _directory: directory,
+            path: projects.to_path_buf(),
+        });
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let metadata = fs::symlink_metadata(projects)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("retention root is not a directory: {}", projects.display()),
+            ));
+        }
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "retention needs a no-follow directory open on this platform",
+        ))
+    }
+}
+
+/// Open a regular retention child without following a leaf symlink/reparse
+/// point. On Unix, `openat` also binds child lookup to the opened root.
+fn open_retention_child(
+    root: &RetentionRoot,
+    name: &str,
+    write: bool,
+    create: bool,
+) -> io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        let name = CString::new(name).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "retention child contains NUL")
+        })?;
+        let mut flags = libc::O_CLOEXEC | libc::O_NOFOLLOW;
+        flags |= if write { libc::O_RDWR } else { libc::O_RDONLY };
+        if create {
+            flags |= libc::O_CREAT;
+        }
+        let fd = unsafe { libc::openat(root.directory.as_raw_fd(), name.as_ptr(), flags, 0o600) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { fs::File::from_raw_fd(fd) };
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "retention child is not a regular file",
+            ));
+        }
+        return Ok(file);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        let mut options = OpenOptions::new();
+        options
+            .read(!write)
+            .write(write)
+            .create(create)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = options.open(root.path.join(name))?;
+        let metadata = file.metadata()?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "retention child is a reparse point or not a regular file",
+            ));
+        }
+        return Ok(file);
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (root, name, write, create);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "retention needs a no-follow child open on this platform",
+        ))
+    }
 }
 
 fn active_reflection_sessions(
@@ -275,7 +398,13 @@ fn active_reflection_sessions(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(active),
         Err(error) => return Err(error),
     };
-    for project in entries {
+    for (project_count, project) in entries.enumerate() {
+        if project_count >= MAX_RETENTION_PROJECTS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("retention projects exceed limit of {MAX_RETENTION_PROJECTS}"),
+            ));
+        }
         let project = project?;
         if !project.file_type()?.is_dir() {
             continue;
@@ -289,12 +418,22 @@ fn active_reflection_sessions(
         {
             continue;
         }
-        let jobs = match fs::read_dir(queue) {
+        let jobs = match fs::read_dir(&queue) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         };
-        for job in jobs {
+        let mut valid_jobs = 0;
+        for (queue_entry_count, job) in jobs.enumerate() {
+            if queue_entry_count >= MAX_REFLECTION_QUEUE_ENTRIES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "reflection queue entries exceed limit of {MAX_REFLECTION_QUEUE_ENTRIES}: {}",
+                        queue.display()
+                    ),
+                ));
+            }
             let job = job?;
             if !job.file_type()?.is_file() {
                 continue;
@@ -306,8 +445,18 @@ fn active_reflection_sessions(
             ) {
                 continue;
             }
+            valid_jobs += 1;
+            if valid_jobs > MAX_ACTIVE_REFLECTION_JOBS {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "valid reflection jobs exceed limit of {MAX_ACTIVE_REFLECTION_JOBS}: {}",
+                        queue.display()
+                    ),
+                ));
+            }
             let queued: QueuedReflectionJob =
-                serde_json::from_slice(&fs::read(&path)?).map_err(io::Error::other)?;
+                serde_json::from_slice(&read_reflection_job(&path)?).map_err(io::Error::other)?;
             if queued.session_id.is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -318,6 +467,63 @@ fn active_reflection_sessions(
         }
     }
     Ok(active)
+}
+
+fn read_reflection_job(path: &Path) -> io::Result<Vec<u8>> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("reflection job is not a regular file: {}", path.display()),
+        ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("reflection job is a reparse point: {}", path.display()),
+            ));
+        }
+    }
+    if metadata.len() > MAX_REFLECTION_JOB_BYTES as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "reflection job exceeds {MAX_REFLECTION_JOB_BYTES} bytes: {}",
+                path.display()
+            ),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take((MAX_REFLECTION_JOB_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_REFLECTION_JOB_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "reflection job grew beyond {MAX_REFLECTION_JOB_BYTES} bytes: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(bytes)
 }
 
 pub(crate) fn prune_completed_reflection_jobs(
@@ -639,6 +845,176 @@ mod tests {
             active_reflection_sessions(&projects, Some(("20260101_ending", "project-a"))).unwrap();
         assert!(active.contains(&("20260101_ending".into(), "project-a".into())));
         assert!(active.contains(&("20260101_long".into(), "project-b".into())));
+    }
+
+    #[test]
+    fn reflection_queue_rejects_more_than_the_entry_limit_without_pruning() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        let project = projects.join("project-a");
+        let queue = project.join("reflect-queue");
+        let obs = project.join("obs");
+        fs::create_dir_all(&queue).unwrap();
+        fs::create_dir_all(&obs).unwrap();
+        let retained = obs.join("session_20260101_active.jsonl");
+        File::create(&retained).unwrap();
+        for index in 0..=MAX_REFLECTION_QUEUE_ENTRIES {
+            File::create(queue.join(format!("ignored-{index}"))).unwrap();
+        }
+
+        let error = active_reflection_sessions(&projects, None).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            retained.exists(),
+            "a failed scan must run before any pruning"
+        );
+    }
+
+    #[test]
+    fn reflection_scan_rejects_more_than_the_project_limit() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        for index in 0..=MAX_RETENTION_PROJECTS {
+            fs::create_dir_all(projects.join(format!("project-{index}"))).unwrap();
+        }
+
+        let error = active_reflection_sessions(&projects, None).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn reflection_queue_rejects_more_than_the_valid_job_limit_without_pruning() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        let project = projects.join("project-a");
+        let queue = project.join("reflect-queue");
+        let obs = project.join("obs");
+        fs::create_dir_all(&queue).unwrap();
+        fs::create_dir_all(&obs).unwrap();
+        let retained = obs.join("session_20260101_active.jsonl");
+        File::create(&retained).unwrap();
+        for index in 0..=MAX_ACTIVE_REFLECTION_JOBS {
+            fs::write(
+                queue.join(format!("job-{index}.pending")),
+                format!(r#"{{"session_id":"session-{index}"}}"#),
+            )
+            .unwrap();
+        }
+
+        let error = active_reflection_sessions(&projects, None).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            retained.exists(),
+            "a failed scan must run before any pruning"
+        );
+    }
+
+    #[test]
+    fn reflection_queue_rejects_oversized_valid_job_without_pruning() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        let project = projects.join("project-a");
+        let queue = project.join("reflect-queue");
+        let obs = project.join("obs");
+        fs::create_dir_all(&queue).unwrap();
+        fs::create_dir_all(&obs).unwrap();
+        let retained = obs.join("session_20260101_active.jsonl");
+        File::create(&retained).unwrap();
+        let oversized = queue.join("job_active.pending");
+        fs::write(
+            &oversized,
+            format!(
+                "{{\"session_id\":\"active\",\"padding\":\"{}\"}}",
+                "x".repeat(MAX_REFLECTION_JOB_BYTES + 1)
+            ),
+        )
+        .unwrap();
+
+        let error = active_reflection_sessions(&projects, None).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            retained.exists(),
+            "a failed scan must run before any pruning"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_marker_open_does_not_follow_a_leaf_swap_after_root_validation() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        let external = dir.path().join("external");
+        fs::create_dir_all(&projects).unwrap();
+        fs::create_dir(&external).unwrap();
+        let marker = projects.join("retention.last");
+        let sentinel = external.join("retention.last");
+        fs::write(&marker, "old").unwrap();
+        fs::write(&sentinel, "sentinel").unwrap();
+
+        let error = record_global_retention_after_root_open(&projects, || {
+            fs::remove_file(&marker).unwrap();
+            symlink(&sentinel, &marker).unwrap();
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::FilesystemLoop);
+        assert_eq!(fs::read_to_string(sentinel).unwrap(), "sentinel");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_marker_write_stays_in_open_root_after_parent_swap() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        let moved_projects = dir.path().join("projects-original");
+        let external = dir.path().join("external");
+        fs::create_dir(&projects).unwrap();
+        fs::create_dir(&external).unwrap();
+        let sentinel = external.join("retention.last");
+        fs::write(&sentinel, "sentinel").unwrap();
+
+        record_global_retention_after_root_open(&projects, || {
+            fs::rename(&projects, &moved_projects).unwrap();
+            symlink(&external, &projects).unwrap();
+        })
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(sentinel).unwrap(), "sentinel");
+        assert!(moved_projects.join("retention.last").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retention_rejects_a_junction_projects_root_when_creation_is_permitted() {
+        use std::process::Command;
+
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        let external = dir.path().join("external");
+        fs::create_dir(&external).unwrap();
+        let projects_cmd = projects.to_string_lossy().replace("\\\\?\\", "");
+        let external_cmd = external.to_string_lossy().replace("\\\\?\\", "");
+        let command = format!("mklink /J {projects_cmd} {external_cmd}");
+        if !Command::new("cmd")
+            .args(["/C", command.as_str()])
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return;
+        }
+
+        let error = try_acquire_global_retention_lease(&projects, SystemTime::now())
+            .expect_err("a reparse-point projects root must not be opened");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[cfg(unix)]
