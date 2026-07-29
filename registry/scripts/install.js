@@ -244,7 +244,7 @@ async function install(requiredRuntime) {
       const result = spawnSync(
         "brew",
         ["install", "epicsagas/tap/epic-harness"],
-        { shell: false, stdio: "inherit" },
+        { shell: false, stdio: ["ignore", "ignore", "inherit"] },
       );
       if (result.status === 0 && sameRuntime(getBinaryRuntime(), requiredRuntime)) {
         return;
@@ -267,7 +267,7 @@ async function install(requiredRuntime) {
         "--no-confirm",
         "--force",
       ],
-      { shell: false, stdio: "inherit" },
+      { shell: false, stdio: ["ignore", "ignore", "inherit"] },
     );
     if (result.status === 0) return;
     log("cargo-binstall failed; falling back to the release installer...");
@@ -284,7 +284,7 @@ async function install(requiredRuntime) {
       const result = spawnSync(
         "powershell",
         ["-ExecutionPolicy", "Bypass", "-File", destination],
-        { shell: false, stdio: "inherit" },
+        { shell: false, stdio: ["ignore", "ignore", "inherit"] },
       );
       if (result.status !== 0) throw new Error("PowerShell installer failed");
       return;
@@ -303,7 +303,7 @@ async function install(requiredRuntime) {
     chmodSync(destination, 0o700);
     const result = spawnSync("sh", [destination], {
       shell: false,
-      stdio: "inherit",
+      stdio: ["ignore", "ignore", "inherit"],
     });
     if (result.status !== 0) throw new Error("shell installer failed");
   } finally {
