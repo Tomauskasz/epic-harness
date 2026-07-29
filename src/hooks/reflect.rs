@@ -988,8 +988,6 @@ const MAX_CLAUDE_SESSION_FILES_PER_PROJECT: usize = 3;
 const MAX_CLAUDE_RECORDS_PER_FILE: usize = 5;
 const MAX_CLAUDE_JSONL_BYTES: u64 = 256 * 1024;
 const MAX_CLAUDE_JSONL_LINE_BYTES: usize = 16 * 1024;
-const MAX_ORBIT_PIPELINE_FILES: usize = 64;
-const MAX_ORBIT_PIPELINE_BYTES: usize = 1024 * 1024;
 const MAX_REFLECTION_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
