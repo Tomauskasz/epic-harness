@@ -863,9 +863,7 @@ fn handle_harness_cmd(cmd: &str, harness_dir: &std::path::Path, project: Option<
             // the fleet average toward a score nothing was measured at.
             let evaluated_total: u64 = tool_stats
                 .iter()
-                .map(|t| {
-                    t["calls"].as_u64().unwrap_or(0) - t["unknowns"].as_u64().unwrap_or(0)
-                })
+                .map(|t| t["calls"].as_u64().unwrap_or(0) - t["unknowns"].as_u64().unwrap_or(0))
                 .sum();
             let avg = if evaluated_total > 0 {
                 tool_stats
