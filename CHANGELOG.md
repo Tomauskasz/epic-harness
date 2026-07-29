@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Outcome evidence now stays unevaluable when the host supplies no verdict**:
+  only structured host status establishes success or error. Unknown-only and
+  legacy verdict-less sessions complete reflection without writing zero-score
+  metrics, evolution, stagnation, or replay state.
+- **Codex SessionStart no longer waits for stdin EOF**: the Node runner dispatches
+  after one complete JSON object, while preserving EOF handling for malformed
+  input. Installer child stdout is isolated so the hook emits only its one
+  structured response; ordinary CLI commands no longer consume unrelated piped
+  hook input.
+- **Plugin packages now include every manifest target**: `npm pack` ships both
+  plugin manifests plus their declared skills, MCP, and hook paths.
+- **Orbit completion requires complete evidence**: atomic completion now rejects
+  absent or malformed retry evidence, retries at the limit, and an incomplete
+  Evolve phase without changing the pipeline file.
+- **Retention preflights every bounded filesystem scan before deletion**: a late
+  scan error now leaves database rows and all candidate runtime, observation,
+  and completed-job files untouched.
 - **A stale dashboard made every later session start silently context-free**:
   the port probe identified Epic's own dashboard by an exact
   `CARGO_PKG_VERSION` match. The dashboard server is detached and outlives the

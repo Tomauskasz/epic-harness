@@ -144,6 +144,11 @@ Notes that are easy to get wrong:
   a missing binary on stderr without corrupting event output. SessionStart
   strips an optional `+codex.<cachebuster>` cache identity, then installs and
   verifies the exact base binary version and runtime revision before `resume`.
+- **SessionStart has one stdout payload.** The runner dispatches immediately
+  after it receives one complete JSON object instead of waiting for stdin EOF,
+  which Codex may hold while it waits for the hook. Installer children inherit
+  stderr for diagnostics but never stdout, preserving the one structured
+  SessionStart response.
 - **Windows overrides select `cmd.exe` explicitly and enter `run-hook.cmd`.**
   Codex may execute them through PowerShell, where `%PLUGIN_ROOT%` stays literal
   and a native exit 2 is collapsed to exit 1. The wrapper expands the path and
@@ -196,6 +201,9 @@ Tool success is determined only by structured host status.
 
 `unknown` observations are left unscored (`score`/`dimensions` NULL) and excluded
 from success rates via `ObsStats::evaluated()` — never counted as failures.
+An `unknown`-only or legacy verdict-less session is unevaluable: reflection
+completes its durable job without writing metrics, evolution, stagnation, or
+replay state from an invented zero-score session.
 
 An undetermined outcome must stay undetermined everywhere, so all three readers
 agree:
@@ -284,6 +292,10 @@ survives under `.claude-plugin/`, that the bootstrap is loadable under
 `"type": "module"`, and that every `registry/scripts/…` path named by either
 manifest exists on disk.
 
+The npm artifact must ship both plugin manifests and every manifest-declared
+`skills`, `mcpServers`, and `hooks` target. Verify this from `npm pack --dry-run
+--json`; source-tree existence alone cannot prove the published package works.
+
 Keep the two manifests' matchers in step. `guard` and `polish` must cover the
 same edit tools on a host — they drifted once, and `Write` went unformatted on
 Claude Code for as long as they did.
@@ -295,6 +307,8 @@ same structured shapes (`hookSpecificOutput`, `permissionDecision`,
 `{"continue":true}`). Choose behaviour by **event**, never by an inferred host.
 `None` means only that no event name was supplied — a direct CLI run — and
 selects the conservative stderr contract.
+Only hook subcommands consume and validate hook stdin; ordinary CLI commands
+leave piped stdin to their own command contracts.
 
 ### Paths: compare normalized, never raw canonical
 
