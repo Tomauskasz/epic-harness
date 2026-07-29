@@ -149,7 +149,8 @@ Notes that are easy to get wrong:
   while it waits for the hook. Its incomplete input is bounded by a five-second
   deadline and one MiB budget; every other hook reads through EOF and rejects
   non-JSON trailing bytes. SessionStart installer, probe, and resume children
-  have a 30-second deadline, terminate their process tree on Windows, inherit
+  have a 30-second deadline, terminate their process group on POSIX and tree
+  on Windows, tear down retained pipes after a bounded grace period, inherit
   stderr for diagnostics, and never stdout, preserving the one structured
   SessionStart response.
 - **Windows overrides select `cmd.exe` explicitly and enter `run-hook.cmd`.**
