@@ -120,7 +120,7 @@ helpers need; `hint()`/`raw()` then pick the stream.
 | `SessionStart` | Node runner → `epic-harness resume` | one JSON object carries `additionalContext`; tagged text must not be emitted directly |
 | `PreToolUse` (`Bash`) | Node runner → `epic-harness guard` | plain text ignored; JSON `permissionDecision` blocks |
 | `PostToolUse` (`*`) | Node runner → `epic-harness observe` | plain text ignored |
-| `PostToolUse` (`apply_patch\|Edit\|Write`) | Node runner → `epic-harness polish` | plain text ignored |
+| `PostToolUse` (`apply_patch`) | Node runner → `epic-harness polish` | plain text ignored |
 | `SubagentStart` | Node runner → `epic-harness observe` | empty output is valid |
 | `SubagentStop` | Node runner → `epic-harness observe` | runner validates and forwards JSON; emits `{}` only when the binary is silent |
 | `PreCompact` | Node runner → `epic-harness snapshot` | exit 0 with no output = success |

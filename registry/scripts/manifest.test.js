@@ -13,7 +13,7 @@ const CLAUDE = JSON.parse(readFileSync(CLAUDE_PATH, "utf8"));
 const CODEX_CONTRACT = [
   ["SessionStart", [["*", "resume"]]],
   ["PreToolUse", [["Bash", "guard"], ["apply_patch", "guard"]]],
-  ["PostToolUse", [["*", "observe"], ["apply_patch|Edit|Write", "polish"]]],
+  ["PostToolUse", [["*", "observe"], ["apply_patch", "polish"]]],
   ["SubagentStart", [["*", "observe"]]],
   ["SubagentStop", [["*", "observe"]]],
   ["PreCompact", [["*", "snapshot"]]],
@@ -150,6 +150,28 @@ function assertManifestContract(name, manifest, contract, rootVariable) {
 
 test("Codex manifest has the exact lifecycle matcher, handler, and timeout contract", () => {
   assertManifestContract("Codex", CODEX, CODEX_CONTRACT, "PLUGIN_ROOT");
+});
+
+test("Codex guard and polish cover the same edit tools", () => {
+  const editMatcherFor = (event, subcommand) => {
+    const matchers =
+      CODEX.hooks[event]
+        .filter((group) =>
+          group.hooks.some((handler) =>
+            handler.command.endsWith(` ${subcommand}`),
+          ),
+        )
+        .map((group) => group.matcher)
+        .filter((matcher) => matcher.split("|").includes("apply_patch"));
+
+    assert.equal(matchers.length, 1, `${event} ${subcommand} edit matcher`);
+    return matchers[0];
+  };
+
+  assert.equal(
+    editMatcherFor("PreToolUse", "guard"),
+    editMatcherFor("PostToolUse", "polish"),
+  );
 });
 
 test("Claude manifest has the exact lifecycle matcher, handler, and timeout contract", () => {

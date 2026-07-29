@@ -47,7 +47,7 @@
         ]
       },
       {
-        "matcher": "apply_patch|Edit|Write",
+        "matcher": "apply_patch",
         "hooks": [
           {
             "type": "command",
