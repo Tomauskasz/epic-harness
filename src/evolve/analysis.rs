@@ -9,11 +9,13 @@ pub(crate) fn round3(v: f64) -> f64 {
 }
 
 pub fn analyze_session(observations: &[ObsRecord]) -> SessionAnalysis {
-    // `unknown` is explicitly not an outcome, even if malformed legacy input
-    // happens to carry a numeric score. It must never inflate success rates.
+    // Only an explicit success or error is an outcome. `unknown` and legacy
+    // verdict-less rows remain unevaluable even if they carry a numeric score.
     let scored: Vec<_> = observations
         .iter()
-        .filter(|o| o.score.is_some() && o.result.as_deref() != Some("unknown"))
+        .filter(|o| {
+            o.score.is_some() && matches!(o.result.as_deref(), Some("success") | Some("error"))
+        })
         .collect();
     let total = scored.len() as u64;
     let errors: Vec<_> = scored
@@ -138,6 +140,15 @@ pub fn analyze_session(observations: &[ObsRecord]) -> SessionAnalysis {
         persistent_failure: false,
         persistent_failure_categories: vec![],
         error_snippets,
+    }
+}
+
+impl SessionAnalysis {
+    /// Whether the session contains at least one observation with a determined
+    /// outcome. Metrics and evolution records require this boundary; an
+    /// undetermined outcome must never become a zero-score session.
+    pub fn is_evaluable(&self) -> bool {
+        self.total_observations > 0
     }
 }
 
@@ -582,26 +593,44 @@ mod tests {
     }
 
     #[test]
-    fn analyze_unknown_only_session_is_not_successful() {
-        let mut unknown = make_obs("Read", "read", "unknown", 0.0, Some("src/lib.rs"));
-        unknown.score = None;
-        unknown.dimensions = None;
+    fn analyze_unknown_only_session_is_unevaluable() {
+        let observations: Vec<_> = (0..3)
+            .map(|_| {
+                let mut unknown = make_obs("Read", "read", "unknown", 0.0, Some("src/lib.rs"));
+                unknown.score = None;
+                unknown.dimensions = None;
+                unknown
+            })
+            .collect();
 
-        let analysis = analyze_session(&[unknown]);
+        let analysis = analyze_session(&observations);
 
         assert_eq!(analysis.total_observations, 0);
-        assert_eq!(analysis.success_rate, 0.0);
+        assert!(!analysis.is_evaluable());
     }
 
     #[test]
-    fn analyze_unknown_observation_is_not_counted_as_a_success() {
+    fn analyze_verdictless_observation_is_unevaluable() {
+        let mut observation = make_obs("Read", "read", "success", 1.0, Some("src/lib.rs"));
+        observation.result = None;
+
+        let analysis = analyze_session(&[observation]);
+
+        assert_eq!(analysis.total_observations, 0);
+        assert!(!analysis.is_evaluable());
+    }
+
+    #[test]
+    fn analyze_mixed_outcomes_uses_only_evaluable_observations() {
         let success = make_obs("Bash", "bash", "success", 1.0, Some("cargo test"));
+        let error = make_obs("Bash", "bash", "error", 0.0, Some("cargo test"));
         let unknown = make_obs("Read", "read", "unknown", 1.0, Some("src/lib.rs"));
 
-        let analysis = analyze_session(&[success, unknown]);
+        let analysis = analyze_session(&[success, unknown, error]);
 
-        assert_eq!(analysis.total_observations, 1);
-        assert_eq!(analysis.success_rate, 1.0);
+        assert_eq!(analysis.total_observations, 2);
+        assert!(analysis.is_evaluable());
+        assert_eq!(analysis.success_rate, 0.5);
     }
 
     #[test]

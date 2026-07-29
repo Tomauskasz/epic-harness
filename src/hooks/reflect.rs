@@ -2150,6 +2150,12 @@ fn run_reflection(reflection_session_id: &str) -> i32 {
 
     // 2. Analyze
     let mut analysis = evolve::analyze_session(&observations);
+    // `unknown` observations have no determined outcome and therefore no
+    // defensible session score. Complete the durable job without touching
+    // evolution, metrics, stagnation, or their replay projections.
+    if !analysis.is_evaluable() {
+        return mark_reflection_completed(reflection_session_id, &slug);
+    }
     analysis.failure_patterns = evolve::detect_patterns(&observations);
 
     // 2b. HarnessX Digester + Planner (R2, R3): compress the session into

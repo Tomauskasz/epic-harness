@@ -1187,6 +1187,143 @@ async fn codex_node_runner_persists_one_complete_lifecycle() {
     database.close().await;
 }
 
+#[tokio::test]
+async fn unknown_only_session_completes_without_scored_reflection_state() {
+    let root = tempfile::tempdir().expect("temp root");
+    let project = project_path(root.path());
+    fs::create_dir_all(&project).expect("project");
+
+    let session_id = "unknown-only-session";
+    establish_global_host_session_state(root.path(), session_id);
+    let harness = harness_path(root.path(), &project);
+    fs::create_dir_all(harness.join("obs")).expect("observation directory");
+    let expected_session = format!("20260728_{session_id}");
+    let records: Vec<serde_json::Value> = (0..3)
+        .map(|index| {
+            serde_json::json!({
+                "timestamp": format!("2026-07-28T00:00:0{index}Z"),
+                "tool": "Read",
+                "tool_category": "read",
+                "action": format!("src/log-{index}.txt"),
+                "result": "unknown",
+                "score": null,
+                "dimensions": null,
+                "failure_category": null,
+                "file_ext": ".txt",
+                "sequence_id": index,
+                "tool_use_id": format!("unknown-read-{index}"),
+                "pipeline_id": null,
+            })
+        })
+        .collect();
+    let jsonl = records
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        harness
+            .join("obs")
+            .join(format!("session_{expected_session}.jsonl")),
+        format!("{jsonl}\n"),
+    )
+    .expect("unknown-only observations");
+
+    let ended = run_hook(
+        root.path(),
+        &project,
+        "reflect",
+        &serde_json::json!({
+            "hook_event_name": "SessionEnd",
+            "session_id": session_id,
+        })
+        .to_string(),
+    );
+    assert!(
+        ended.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ended.stderr)
+    );
+    wait_for_completed_jobs(&harness.join("reflect-queue"), 1);
+
+    let replay = run_hook(
+        root.path(),
+        &project,
+        "reflect",
+        &serde_json::json!({
+            "hook_event_name": "SessionEnd",
+            "session_id": session_id,
+        })
+        .to_string(),
+    );
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    wait_for_completed_jobs(&harness.join("reflect-queue"), 1);
+
+    let db_path = root.path().join(".harness").join("harness.db");
+    let database = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::from_str(&format!("sqlite:{}", db_path.display()))
+                .expect("SQLite connection options"),
+        )
+        .await
+        .expect("open isolated operational database");
+    let project_slug = harness
+        .file_name()
+        .and_then(|value| value.to_str())
+        .expect("project harness slug");
+    for (table, query) in [
+        (
+            "reflection_metrics",
+            "SELECT COUNT(*) FROM reflection_metrics WHERE project = ?",
+        ),
+        (
+            "evolution_records",
+            "SELECT COUNT(*) FROM evolution_records WHERE project = ?",
+        ),
+        (
+            "score_history",
+            "SELECT COUNT(*) FROM score_history WHERE project = ?",
+        ),
+    ] {
+        let count: i64 = sqlx::query_scalar(query)
+            .bind(project_slug)
+            .fetch_one(&database)
+            .await
+            .expect("scored reflection state count");
+        assert_eq!(count, 0, "unknown-only session must not write {table}");
+    }
+    let metric_state: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM metrics_state
+         WHERE project = ? AND key IN ('total_sessions', 'stagnation_count')",
+    )
+    .bind(project_slug)
+    .fetch_one(&database)
+    .await
+    .expect("scored session state count");
+    assert_eq!(
+        metric_state, 0,
+        "unknown-only session must not initialize session or stagnation metrics"
+    );
+    let completed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reflection_sessions WHERE session_id = ? AND project = ?",
+    )
+    .bind(&expected_session)
+    .bind(project_slug)
+    .fetch_one(&database)
+    .await
+    .expect("completed reflection session count");
+    assert_eq!(
+        completed, 1,
+        "unknown-only session must complete its queue job"
+    );
+    database.close().await;
+}
+
 #[test]
 fn fresh_session_start_initializes_all_project_runtime_directories() {
     let root = tempfile::tempdir().expect("temp root");
