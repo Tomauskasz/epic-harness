@@ -2147,7 +2147,13 @@ fn run_reflection(reflection_session_id: &str) -> i32 {
         read_json(&metrics_file(), default_metrics())
     });
     let (should_rollback, improved, rolled_back_count) =
-        evolve::check_stagnation(&mut metrics, analysis.avg_score);
+        match evolve::check_stagnation(&mut metrics, analysis.avg_score) {
+            Ok(decision) => decision,
+            Err(error) => {
+                eprintln!("[reflect] evolved-skill checkpoint failure: {error}");
+                return 1;
+            }
+        };
 
     // 4b. HarnessX seesaw constraint (R5): a coarse per-task regression gate.
     // Runs BEFORE seeding (digests are already available from step 2b) so a

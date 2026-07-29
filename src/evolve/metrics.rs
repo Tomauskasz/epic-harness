@@ -1,5 +1,11 @@
 use crate::config::CONFIG;
 use crate::shared::{evolution::*, helpers::*, paths::*};
+use std::fs;
+use std::io;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static CHECKPOINT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Clamp avg_score to a finite f64 so it serialises as a valid JSON number.
 /// NaN and ±Infinity are both invalid JSON; replace them with 0.0.
@@ -18,12 +24,136 @@ pub fn compute_rolling_avg(history: &[SessionScoreEntry], window: usize) -> f64 
     slice.iter().map(|e| e.avg_score).sum::<f64>() / slice.len() as f64
 }
 
-pub fn check_stagnation(metrics: &mut Metrics, current_score: f64) -> (bool, bool, u64) {
+pub fn check_stagnation(
+    metrics: &mut Metrics,
+    current_score: f64,
+) -> io::Result<(bool, bool, u64)> {
+    check_stagnation_at(
+        metrics,
+        current_score,
+        &evolved_dir(),
+        &evolved_backup_dir(),
+    )
+}
+
+fn checkpoint_temp_path(path: &Path, label: &str) -> io::Result<std::path::PathBuf> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "checkpoint path has no parent")
+    })?;
+    Ok(parent.join(format!(
+        ".{}.{}.{}.{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        label,
+        std::process::id(),
+        CHECKPOINT_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+    )))
+}
+
+fn validate_checkpoint_dir(path: &Path, required: bool, label: &str) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(io::Error::other(format!(
+                "{label} is not a regular directory: {}",
+                path.display()
+            )))
+        }
+        Ok(_) => {
+            validate_regular_tree(path)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !required => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{label} is missing: {}", path.display()),
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+fn replace_checkpoint(source: Option<&Path>, destination: &Path) -> io::Result<()> {
+    let parent = destination.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "checkpoint path has no parent")
+    })?;
+    ensure_private_dir(parent)?;
+    let staging = checkpoint_temp_path(destination, "staging")?;
+    fs::create_dir(&staging)?;
+    ensure_private_dir(&staging)?;
+
+    let staged = (|| {
+        if let Some(source) = source {
+            let copied = copy_dir_counted(source, &staging);
+            if copied.errors > 0 {
+                return Err(io::Error::other(format!(
+                    "failed to copy checkpoint source: {}",
+                    source.display()
+                )));
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = staged {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+
+    let destination_exists = validate_checkpoint_dir(destination, false, "checkpoint")?;
+    let retired = checkpoint_temp_path(destination, "retired")?;
+    if destination_exists {
+        if let Err(error) = fs::rename(destination, &retired) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    }
+    if let Err(error) = fs::rename(&staging, destination) {
+        if destination_exists {
+            let _ = fs::rename(&retired, destination);
+        }
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    if destination_exists {
+        fs::remove_dir_all(retired)?;
+    }
+    Ok(())
+}
+
+fn skill_dir_count(path: &Path) -> io::Result<u64> {
+    if !validate_checkpoint_dir(path, false, "evolved skills")? {
+        return Ok(0);
+    }
+    let mut count = 0;
+    for entry in fs::read_dir(path)? {
+        if entry?.file_type()?.is_dir() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn checkpoint_evolved_skills(evolved: &Path, checkpoint: &Path) -> io::Result<()> {
+    let exists = validate_checkpoint_dir(evolved, false, "evolved skills")?;
+    replace_checkpoint(exists.then_some(evolved), checkpoint)
+}
+
+fn restore_evolved_skills(evolved: &Path, checkpoint: &Path) -> io::Result<u64> {
+    validate_checkpoint_dir(checkpoint, true, "evolved-skill checkpoint")?;
+    let before_count = skill_dir_count(evolved)?;
+    replace_checkpoint(Some(checkpoint), evolved)?;
+    Ok(before_count)
+}
+
+fn check_stagnation_at(
+    metrics: &mut Metrics,
+    current_score: f64,
+    evolved: &Path,
+    checkpoint: &Path,
+) -> io::Result<(bool, bool, u64)> {
     // Returns (should_rollback, improved, rolled_back_count)
     if metrics.total_sessions == 0 || metrics.best_score.is_none() {
         // First session or genuinely uninitialized — set best_score and treat as improved.
+        checkpoint_evolved_skills(evolved, checkpoint)?;
         metrics.best_score = Some(current_score);
-        return (false, true, 0);
+        return Ok((false, true, 0));
     }
 
     // Use rolling 3-session average instead of absolute best_score for the
@@ -41,14 +171,8 @@ pub fn check_stagnation(metrics: &mut Metrics, current_score: f64) -> (bool, boo
     };
     let improvement = current_score - rolling_avg;
     if improvement >= CONFIG.evolution.improvement_threshold {
-        // Improved over rolling average! Backup evolved skills
-        let evolved = evolved_dir();
-        let backup = evolved_backup_dir();
-        if evolved.is_dir() {
-            rm_dir(&backup);
-            copy_dir(&evolved, &backup);
-        }
-        return (false, true, 0);
+        checkpoint_evolved_skills(evolved, checkpoint)?;
+        return Ok((false, true, 0));
     }
 
     // No improvement
@@ -60,26 +184,20 @@ pub fn check_stagnation(metrics: &mut Metrics, current_score: f64) -> (bool, boo
         if degradation > CONFIG.evolution.rollback_degradation
             || best < CONFIG.evolution.rollback_best_floor
         {
-            let backup = evolved_backup_dir();
-            if backup.is_dir() {
-                let evolved = evolved_dir();
-                let before_count = list_dirs(&evolved).len() as u64;
-                rm_dir(&evolved);
-                copy_dir(&backup, &evolved);
-                metrics.stagnation_count = 0;
-                hint(
-                    "reflect",
-                    &format!(
-                        "Stagnation detected ({} sessions). Rolled back evolved skills.",
-                        CONFIG.evolution.stagnation_limit
-                    ),
-                );
-                return (true, false, before_count);
-            }
+            let before_count = restore_evolved_skills(evolved, checkpoint)?;
+            metrics.stagnation_count = 0;
+            hint(
+                "reflect",
+                &format!(
+                    "Stagnation detected ({} sessions). Rolled back evolved skills.",
+                    CONFIG.evolution.stagnation_limit
+                ),
+            );
+            return Ok((true, false, before_count));
         }
     }
 
-    (false, false, 0)
+    Ok((false, false, 0))
 }
 
 #[cfg(test)]
@@ -409,11 +527,110 @@ mod tests {
     use super::*;
     use crate::shared::evolution::default_metrics;
     use crate::shared::scoring::ScoreDimensions;
+    use std::fs;
+
+    fn check_stagnation_for_test(
+        metrics: &mut Metrics,
+        current_score: f64,
+    ) -> io::Result<(bool, bool, u64)> {
+        let sandbox = tempfile::tempdir()?;
+        check_stagnation_at(
+            metrics,
+            current_score,
+            &sandbox.path().join("evolved"),
+            &sandbox.path().join("evolved_backup"),
+        )
+    }
+
+    #[test]
+    fn first_session_empty_checkpoint_removes_later_evolved_skills_on_rollback() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let evolved = sandbox.path().join("evolved");
+        let checkpoint = sandbox.path().join("evolved_backup");
+        let mut metrics = default_metrics();
+
+        let (rolled_back, improved, _) =
+            check_stagnation_at(&mut metrics, 0.8, &evolved, &checkpoint).expect("baseline");
+        assert!(!rolled_back);
+        assert!(improved);
+        assert!(
+            checkpoint.is_dir(),
+            "the empty baseline must be materialized"
+        );
+        assert!(
+            fs::read_dir(&checkpoint)
+                .expect("checkpoint entries")
+                .next()
+                .is_none()
+        );
+
+        fs::create_dir_all(evolved.join("post-baseline-skill")).expect("create evolved skill");
+        fs::write(
+            evolved.join("post-baseline-skill").join("SKILL.md"),
+            "post-baseline skill",
+        )
+        .expect("write evolved skill");
+        metrics.total_sessions = 1;
+
+        check_stagnation_at(&mut metrics, 0.7, &evolved, &checkpoint).expect("first decline");
+        check_stagnation_at(&mut metrics, 0.7, &evolved, &checkpoint).expect("second decline");
+        let (rolled_back, improved, removed) =
+            check_stagnation_at(&mut metrics, 0.7, &evolved, &checkpoint).expect("rollback");
+
+        assert!(rolled_back);
+        assert!(!improved);
+        assert_eq!(removed, 1);
+        assert!(
+            fs::read_dir(&evolved)
+                .expect("restored evolved entries")
+                .next()
+                .is_none(),
+            "rollback must restore the empty pre-seeding baseline"
+        );
+    }
+
+    #[test]
+    fn eligible_rollback_fails_when_checkpoint_is_missing() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let evolved = sandbox.path().join("evolved");
+        let checkpoint = sandbox.path().join("missing_backup");
+        fs::create_dir_all(evolved.join("post-baseline-skill")).expect("create evolved skill");
+        let mut metrics = default_metrics();
+        metrics.total_sessions = 1;
+        metrics.best_score = Some(0.8);
+        metrics.stagnation_count = CONFIG.evolution.stagnation_limit - 1;
+
+        let error = check_stagnation_at(&mut metrics, 0.7, &evolved, &checkpoint)
+            .expect_err("an eligible rollback without a checkpoint must fail");
+
+        assert!(error.to_string().contains("checkpoint"));
+        assert!(evolved.join("post-baseline-skill").is_dir());
+    }
+
+    #[test]
+    fn eligible_rollback_fails_when_checkpoint_is_corrupt() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let evolved = sandbox.path().join("evolved");
+        let checkpoint = sandbox.path().join("evolved_backup");
+        fs::create_dir_all(evolved.join("post-baseline-skill")).expect("create evolved skill");
+        fs::write(&checkpoint, "not a checkpoint directory").expect("corrupt checkpoint");
+        let mut metrics = default_metrics();
+        metrics.total_sessions = 1;
+        metrics.best_score = Some(0.8);
+        metrics.stagnation_count = CONFIG.evolution.stagnation_limit - 1;
+
+        let error = check_stagnation_at(&mut metrics, 0.7, &evolved, &checkpoint)
+            .expect_err("an eligible rollback with a corrupt checkpoint must fail");
+
+        assert!(error.to_string().contains("checkpoint"));
+        assert!(evolved.join("post-baseline-skill").is_dir());
+    }
 
     #[test]
     fn stagnation_first_session() {
         let mut metrics = default_metrics();
-        let (rollback, improved, _) = check_stagnation(&mut metrics, 0.8);
+        let (rollback, improved, _) =
+            check_stagnation_for_test(&mut metrics, 0.8).expect("stagnation");
         assert!(!rollback);
         assert!(improved);
     }
@@ -435,7 +652,8 @@ mod tests {
                 dimension_averages: ScoreDimensions::default(),
             });
         }
-        let (rollback, improved, _) = check_stagnation(&mut metrics, 0.80);
+        let (rollback, improved, _) =
+            check_stagnation_for_test(&mut metrics, 0.80).expect("stagnation");
         assert!(!rollback);
         assert!(improved);
     }
@@ -457,7 +675,8 @@ mod tests {
                 dimension_averages: ScoreDimensions::default(),
             });
         }
-        let (rollback, improved, _) = check_stagnation(&mut metrics, 0.78);
+        let (rollback, improved, _) =
+            check_stagnation_for_test(&mut metrics, 0.78).expect("stagnation");
         assert!(!rollback);
         assert!(!improved);
         assert_eq!(metrics.stagnation_count, 1);
@@ -469,7 +688,8 @@ mod tests {
         metrics.total_sessions = 3;
         metrics.best_score = Some(0.0);
         metrics.stagnation_count = 0;
-        let (rollback, improved, _) = check_stagnation(&mut metrics, 0.0);
+        let (rollback, improved, _) =
+            check_stagnation_for_test(&mut metrics, 0.0).expect("stagnation");
         assert!(!rollback);
         assert!(!improved);
         assert_eq!(
@@ -481,7 +701,8 @@ mod tests {
     #[test]
     fn stagnation_first_session_zero_score_initializes_best() {
         let mut metrics = default_metrics();
-        let (rollback, improved, _) = check_stagnation(&mut metrics, 0.0);
+        let (rollback, improved, _) =
+            check_stagnation_for_test(&mut metrics, 0.0).expect("stagnation");
         assert!(!rollback);
         assert!(improved);
         assert_eq!(metrics.best_score, Some(0.0));
