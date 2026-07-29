@@ -24,6 +24,7 @@ const INSTALLER_MAX_REDIRECTS = 5;
 const INSTALLER_REQUEST_TIMEOUT_MS = 15_000;
 const INSTALLER_TOTAL_TIMEOUT_MS = 60_000;
 const SESSION_START_CHILD_TIMEOUT_MS = 30_000;
+const SESSION_START_CHILD_TEARDOWN_GRACE_MS = 1_000;
 const SESSION_START_INPUT_TIMEOUT_MS = 5_000;
 const SESSION_START_INPUT_MAX_BYTES = 1_048_576;
 const STRUCTURED_CODEX_EVENTS = new Set([
@@ -86,10 +87,12 @@ function runChild(command, args, {
     let stdout = "";
     let stderr = "";
     let timer;
+    let teardownTimer;
     const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(teardownTimer);
       resolve(result);
     };
 
@@ -101,6 +104,7 @@ function runChild(command, args, {
           captureStdout ? "pipe" : "ignore",
           captureStderr ? "pipe" : "inherit",
         ],
+        detached: process.platform !== "win32" && timeoutMs !== undefined,
         windowsHide: true,
       });
     } catch (error) {
@@ -142,12 +146,39 @@ function runChild(command, args, {
           );
           taskkill.once("error", () => child.kill("SIGKILL"));
           taskkill.once("close", () => child.kill("SIGKILL"));
-          return;
+        } else if (Number.isSafeInteger(child.pid) && child.pid > 0) {
+          try {
+            // A detached POSIX child is a process-group leader. Killing its
+            // negative PID reaches descendants that inherited hook pipes.
+            process.kill(-child.pid, "SIGKILL");
+          } catch {
+            child.kill("SIGKILL");
+          }
+        } else {
+          child.kill("SIGKILL");
         }
-        child.kill("SIGKILL");
+        teardownTimer = setTimeout(() => {
+          // Do not let a surviving inherited pipe keep the runner alive after
+          // termination was requested. The child is already being killed.
+          child.stdin?.destroy();
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          child.unref();
+          finish({
+            error: new Error(`${label ?? command} timed out after ${timeoutMs} ms`),
+            status: null,
+            stderr,
+            stdout,
+          });
+        }, SESSION_START_CHILD_TEARDOWN_GRACE_MS);
       }, timeoutMs);
     }
     if (input !== undefined) {
+      child.stdin.once("error", (error) => {
+        if (error.code !== "EPIPE") {
+          finish({ error, status: null, stderr, stdout });
+        }
+      });
       child.stdin.end(input);
     }
   });

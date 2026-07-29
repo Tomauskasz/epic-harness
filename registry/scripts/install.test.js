@@ -907,7 +907,8 @@ test("Codex SessionStart dispatches complete JSON before stdin closes", async ()
   printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2
   exit 0
 fi
-cat > "$EPIC_TEST_STDIN"
+IFS= read -r EPIC_STDIN || true
+printf '%s\\n' "$EPIC_STDIN" > "$EPIC_TEST_STDIN"
 printf '%s\\n' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"ok"}}'`,
       `if "%1"=="version" (
   echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} 1>&2
@@ -1087,12 +1088,16 @@ for (const [environmentKey, manifestDir] of [
       writeCommand(
         fixture.bin,
         "cargo",
-        `if [ "$1" = "binstall" ] && [ "$2" = "--version" ]; then\n  exit 0\nfi\nprintf '%s\\n' 'installer child stdout'\nsleep 5`,
+        `if [ "$1" = "binstall" ] && [ "$2" = "--version" ]; then\n  exit 0\nfi\nprintf '%s\\n' 'installer child stdout'\n"$EPIC_TEST_NODE" -e 'setTimeout(() => {}, 5000)'`,
         `if "%1"=="binstall" if "%2"=="--version" exit /b 0\necho installer child stdout\n"%SystemRoot%\\System32\\ping.exe" -n 6 127.0.0.1 >nul`,
       );
       const installer = runScript(
         ["hook", "SessionStart", "resume"],
-        { ...fixture.env, EPIC_HOOK_SESSIONSTART_CHILD_TIMEOUT_MS: "250" },
+        {
+          ...fixture.env,
+          EPIC_HOOK_SESSIONSTART_CHILD_TIMEOUT_MS: "250",
+          EPIC_TEST_NODE: process.execPath,
+        },
         JSON.stringify({ hook_event_name: "SessionStart" }),
       );
       assert.notEqual(installer.status, 0, installer.stderr);
@@ -1102,12 +1107,16 @@ for (const [environmentKey, manifestDir] of [
       writeCommand(
         fixture.bin,
         "epic-harness",
-        `if [ "$1" = "version" ]; then\n  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2\n  exit 0\nfi\nprintf '%s\\n' 'resume child stdout'\nsleep 5`,
+        `if [ "$1" = "version" ]; then\n  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2\n  exit 0\nfi\nprintf '%s\\n' 'resume child stdout'\n"$EPIC_TEST_NODE" -e 'setTimeout(() => {}, 5000)'`,
         `if "%1"=="version" (\n  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} 1>&2\n  exit /b 0\n)\necho resume child stdout\n"%SystemRoot%\\System32\\ping.exe" -n 6 127.0.0.1 >nul`,
       );
       const resume = runScript(
         ["hook", "SessionStart", "resume"],
-        { ...fixture.env, EPIC_HOOK_SESSIONSTART_CHILD_TIMEOUT_MS: "250" },
+        {
+          ...fixture.env,
+          EPIC_HOOK_SESSIONSTART_CHILD_TIMEOUT_MS: "250",
+          EPIC_TEST_NODE: process.execPath,
+        },
         JSON.stringify({ hook_event_name: "SessionStart" }),
       );
       assert.notEqual(resume.status, 0, resume.stderr);
@@ -1119,6 +1128,82 @@ for (const [environmentKey, manifestDir] of [
     }
   });
 }
+
+test(
+  "POSIX SessionStart timeout kills a forked resume descendant holding stdout",
+  { skip: IS_WINDOWS },
+  async () => {
+    const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+    const descendantPidPath = join(fixture.root, "descendant.pid");
+
+    try {
+      writeCommand(
+        fixture.bin,
+        "epic-harness",
+        `if [ "$1" = "version" ]; then
+  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2
+  exit 0
+fi
+"$EPIC_TEST_NODE" -e 'require("node:fs").writeFileSync(process.env.EPIC_TEST_DESCENDANT_PID, String(process.pid)); setTimeout(() => {}, 5000)' &
+exit 0`,
+        "exit /b 99",
+      );
+
+      const child = spawn(process.execPath, [SCRIPT, "hook", "SessionStart", "resume"], {
+        env: {
+          ...fixture.env,
+          EPIC_HOOK_SESSIONSTART_CHILD_TIMEOUT_MS: "100",
+          EPIC_TEST_DESCENDANT_PID: descendantPidPath,
+          EPIC_TEST_NODE: process.execPath,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      child.stdin.end(JSON.stringify({ hook_event_name: "SessionStart" }));
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+
+      const result = await new Promise((resolve) => {
+        const timer = setTimeout(() => resolve({ timeout: true }), 1_500);
+        child.once("exit", (code, signal) => {
+          clearTimeout(timer);
+          resolve({ code, signal, timeout: false });
+        });
+      });
+      if (result.timeout) {
+        const descendantPid = Number(readFileSync(descendantPidPath, "utf8"));
+        process.kill(descendantPid, "SIGKILL");
+        await new Promise((resolve) => child.once("close", resolve));
+      }
+      assert.equal(result.timeout, false, "runner waited for an inherited stdout pipe");
+      assert.notEqual(result.code, 0, result.signal ?? "timed-out resume unexpectedly succeeded");
+      assert.deepEqual(assertSingleJsonObject(stdout, "forked resume timeout"), {});
+      assert.match(stderr, /resume timed out/i);
+
+      const descendantPid = Number(readFileSync(descendantPidPath, "utf8"));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      let live = true;
+      try {
+        process.kill(descendantPid, 0);
+        try {
+          const state = readFileSync(`/proc/${descendantPid}/stat`, "utf8").split(" ")[2];
+          live = state !== "Z";
+        } catch {
+          // macOS does not expose /proc; a non-ESRCH probe is the best check.
+        }
+      } catch (error) {
+        assert.equal(error.code, "ESRCH");
+        live = false;
+      }
+      assert.equal(live, false, "timed-out descendant remained live");
+    } finally {
+      rmSync(fixture.root, { force: true, recursive: true });
+    }
+  },
+);
 
 test("Codex runner preserves closed empty, malformed, and trailing input", () => {
   const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
@@ -1132,7 +1217,8 @@ test("Codex runner preserves closed empty, malformed, and trailing input", () =>
   printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2
   exit 0
 fi
-cat > "$EPIC_TEST_STDIN"
+IFS= read -r EPIC_STDIN || true
+printf '%s\\n' "$EPIC_STDIN" > "$EPIC_TEST_STDIN"
 printf '%s\\n' '{"hookSpecificOutput":{"hookEventName":"SessionStart"}}'`,
       `if "%1"=="version" (
   echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} 1>&2
