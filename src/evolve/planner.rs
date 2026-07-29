@@ -336,7 +336,6 @@ mod tests {
             implicated_components: vec!["auth".into(), "db".into()],
             evidence_excerpts: vec![],
             tool_trajectory: vec![],
-            iterations_seen: 0,
             token_estimate: 0,
             observation_count: 1,
         };
@@ -354,7 +353,6 @@ mod tests {
             implicated_components: vec!["auth".into()],
             evidence_excerpts: vec![],
             tool_trajectory: vec![],
-            iterations_seen: 0,
             token_estimate: 0,
             observation_count: 1,
         };
