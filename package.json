@@ -28,6 +28,7 @@
     "mcp_config.json",
     "registry/scripts/install.js",
     "registry/scripts/run-hook.cmd",
+    "registry/scripts/bundle-manifest.json",
     "hooks/",
     "registry/presets/",
     "docs/",

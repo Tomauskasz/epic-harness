@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -11,12 +11,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
-import https from "node:https";
 import test from "node:test";
-
-import { downloadFile } from "./install.js";
 
 const SCRIPT = fileURLToPath(new URL("./install.js", import.meta.url));
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -28,13 +25,21 @@ const RUNTIME_REVISION = readFileSync(
   new URL("../../runtime-revision.txt", import.meta.url),
   "utf8",
 ).trim();
-const versionParts = PLUGIN_VERSION.split(".").map(Number);
-const PREVIOUS_VERSION = `${versionParts[0]}.${versionParts[1]}.${versionParts[2] - 1}`;
-const VERSION_PATTERN = PLUGIN_VERSION.replaceAll(".", "\\.");
-const PREVIOUS_VERSION_PATTERN = PREVIOUS_VERSION.replaceAll(".", "\\.");
+const BUILD_IDENTITY = JSON.parse(
+  readFileSync(new URL("./bundle-manifest.json", import.meta.url), "utf8"),
+).build_identity;
 const STRUCTURED_HOOKS = [
   ["SessionStart", "resume"],
   ["PreToolUse", "guard"],
+  ["SubagentStop", "observe"],
+  ["PreCompact", "snapshot"],
+  ["SessionEnd", "reflect"],
+];
+const NON_SESSION_START_MANIFEST_HOOKS = [
+  ["PreToolUse", "guard"],
+  ["PostToolUse", "observe"],
+  ["PostToolUse", "polish"],
+  ["SubagentStart", "observe"],
   ["SubagentStop", "observe"],
   ["PreCompact", "snapshot"],
   ["SessionEnd", "reflect"],
@@ -84,11 +89,34 @@ const WINDOWS_COMMAND_SHIM = makeWindowsCommandShim();
 
 function writeCommand(bin, name, unixBody, windowsBody) {
   const path = join(bin, IS_WINDOWS ? `${name}.cmd` : name);
+  const versionUnix = `if [ "$1" = "version" ]; then
+  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY}' >&2
+  exit 0
+fi`;
+  const versionWindows = `if "%1"=="version" (
+  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY} 1>&2
+  exit /b 0
+)`;
+  const suppliedVersionUnix = unixBody.includes('if [ "$1" = "version" ]');
+  const suppliedVersionWindows = windowsBody.includes('if "%1"=="version"');
+  const doctorUnix = `if [ "$1" = "codex" ] && [ "$2" = "doctor" ]; then
+  if [ -n "$EPIC_TEST_DOCTOR_OUTPUT" ]; then
+    printf '%s\\n' "$EPIC_TEST_DOCTOR_OUTPUT"
+  else
+    printf '%s\\n' '{"healthy":true}'
+  fi
+  exit "${'${EPIC_TEST_DOCTOR_STATUS:-0}'}"
+fi`;
+  const doctorWindows = `if "%1"=="codex" if "%2"=="doctor" (
+  if not "%EPIC_TEST_DOCTOR_OUTPUT%"=="" (echo %EPIC_TEST_DOCTOR_OUTPUT%) else (echo {"healthy":true})
+  if not "%EPIC_TEST_DOCTOR_STATUS%"=="" exit /b %EPIC_TEST_DOCTOR_STATUS%
+  exit /b 0
+)`;
   writeFileSync(
     path,
     IS_WINDOWS
-      ? `@echo off\r\n${windowsBody}\r\n`
-      : `#!/bin/sh\n${unixBody}\n`,
+      ? `@echo off\r\n${suppliedVersionWindows ? "" : `${versionWindows}\r\n`}${doctorWindows}\r\n${windowsBody}\r\n`
+      : `#!/bin/sh\n${suppliedVersionUnix ? "" : `${versionUnix}\n`}${doctorUnix}\n${unixBody}\n`,
   );
   if (IS_WINDOWS) {
     const executable = join(bin, `${name}.exe`);
@@ -100,15 +128,28 @@ function writeCommand(bin, name, unixBody, windowsBody) {
 }
 
 function makeFixture(environmentKey, manifestDir, version = PLUGIN_VERSION) {
+  void environmentKey;
   const root = mkdtempSync(join(tmpdir(), "epic-harness-install-test-"));
   const bin = join(root, "bin");
   mkdirSync(join(root, manifestDir), { recursive: true });
+  mkdirSync(join(root, "registry", "scripts"), { recursive: true });
   mkdirSync(bin, { recursive: true });
   writeFileSync(
     join(root, manifestDir, "plugin.json"),
     JSON.stringify({ version }),
   );
   writeFileSync(join(root, "runtime-revision.txt"), `${RUNTIME_REVISION}\n`);
+  writeFileSync(
+    join(root, "registry", "scripts", "bundle-manifest.json"),
+    JSON.stringify({
+      schema_version: 1,
+      release_version: PLUGIN_VERSION,
+      runtime_revision: RUNTIME_REVISION,
+      build_identity: BUILD_IDENTITY,
+      artifacts: [],
+      identity_inputs: {},
+    }),
+  );
 
   return {
     bin,
@@ -116,16 +157,14 @@ function makeFixture(environmentKey, manifestDir, version = PLUGIN_VERSION) {
       ...process.env,
       CLAUDE_PLUGIN_ROOT: "",
       PLUGIN_ROOT: "",
-      [environmentKey]: root,
-      EPIC_TEST_RUNTIME_REVISION: RUNTIME_REVISION,
       PATH: bin,
     },
     root,
   };
 }
 
-function runScript(args, env, input) {
-  return spawnSync(process.execPath, [SCRIPT, ...args], {
+function runScript(args, env, input, script = SCRIPT) {
+  return spawnSync(process.execPath, [script, ...args], {
     encoding: "utf8",
     env,
     input,
@@ -146,283 +185,94 @@ function assertSingleJsonObject(stdout, label) {
   return value;
 }
 
-test("installer module is import-safe and exposes its downloader", () => {
-  const moduleUrl = pathToFileURL(SCRIPT).href;
-  const result = spawnSync(
-    process.execPath,
-    [
-      "--input-type=module",
-      "--eval",
-      `import { downloadFile } from ${JSON.stringify(moduleUrl)}; process.stdout.write(typeof downloadFile);`,
-    ],
-    {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        CLAUDE_PLUGIN_ROOT: "",
-        PLUGIN_ROOT: "",
-      },
-    },
-  );
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "function");
-  assert.equal(result.stderr, "");
-});
-
-test("installer download rejects an excessive HTTPS redirect chain", async () => {
-  const root = mkdtempSync(join(tmpdir(), "epic-harness-download-test-"));
-  const destination = join(root, "installer.sh");
-  const originalGet = https.get;
-  let requests = 0;
-
-  https.get = (_url, onResponse) => {
-    const request = new EventEmitter();
-    request.setTimeout = () => request;
-    request.destroy = () => {};
-    queueMicrotask(() => {
-      requests += 1;
-      const response = new EventEmitter();
-      response.statusCode = requests <= 10 ? 302 : 500;
-      response.headers = { location: "https://example.test/next" };
-      response.resume = () => {};
-      onResponse(response);
-    });
-    return request;
-  };
-
-  try {
-    await assert.rejects(
-      downloadFile("https://example.test/start", destination),
-      /redirect limit/i,
-    );
-  } finally {
-    https.get = originalGet;
-    rmSync(root, { force: true, recursive: true });
-  }
-});
-
-test("installer download times out a stalled HTTPS request", async () => {
-  const root = mkdtempSync(join(tmpdir(), "epic-harness-download-test-"));
-  const destination = join(root, "installer.sh");
-  const originalGet = https.get;
-
-  https.get = () => {
-    const request = new EventEmitter();
-    let timer;
-    request.setTimeout = (milliseconds, onTimeout) => {
-      timer = setTimeout(onTimeout, milliseconds);
-      return request;
-    };
-    request.destroy = (error) => {
+function waitForExit(child, timeoutMs) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ timeout: true }), timeoutMs);
+    child.once("exit", (code, signal) => {
       clearTimeout(timer);
-      queueMicrotask(() => request.emit("error", error));
-    };
-    return request;
-  };
-
-  try {
-    const hardDeadline = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error("test deadline exceeded")), 100);
+      resolve({ code, signal, timeout: false });
     });
-    await assert.rejects(
-      Promise.race([
-        downloadFile("https://example.test/start", destination, {
-          requestTimeoutMs: 10,
-          totalTimeoutMs: 80,
-        }),
-        hardDeadline,
-      ]),
-      /installer request timed out/i,
-    );
-  } finally {
-    https.get = originalGet;
-    rmSync(root, { force: true, recursive: true });
-  }
-});
-
-test("installer download enforces one total deadline across redirects", async () => {
-  const root = mkdtempSync(join(tmpdir(), "epic-harness-download-test-"));
-  const destination = join(root, "installer.sh");
-  const originalGet = https.get;
-
-  https.get = (_url, onResponse) => {
-    const request = new EventEmitter();
-    let destroyed = false;
-    request.setTimeout = () => request;
-    request.destroy = () => {
-      destroyed = true;
-    };
-    setTimeout(() => {
-      if (destroyed) return;
-      const response = new EventEmitter();
-      response.statusCode = 302;
-      response.headers = { location: "https://example.test/next" };
-      response.resume = () => {};
-      onResponse(response);
-    }, 10);
-    return request;
-  };
-
-  try {
-    const hardDeadline = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error("test deadline exceeded")), 150);
-    });
-    await assert.rejects(
-      Promise.race([
-        downloadFile("https://example.test/start", destination, {
-          requestTimeoutMs: 100,
-          totalTimeoutMs: 25,
-        }),
-        hardDeadline,
-      ]),
-      /total timeout/i,
-    );
-  } finally {
-    https.get = originalGet;
-    rmSync(root, { force: true, recursive: true });
-  }
-});
-
-for (const [environmentKey, manifestDir] of [
-  ["PLUGIN_ROOT", ".codex-plugin"],
-  ["CLAUDE_PLUGIN_ROOT", ".claude-plugin"],
-]) {
-  test(`${environmentKey} parses the real stderr version contract`, () => {
-    const fixture = makeFixture(environmentKey, manifestDir);
-    const probes = join(fixture.root, "probes.txt");
-
-    try {
-      writeCommand(
-        fixture.bin,
-        "epic-harness",
-        `if [ "$1" = "version" ]; then
-  printf '%s\\n' version >> "$EPIC_TEST_PROBES"
-  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2
-  exit 0
-fi
-exit 99`,
-        `if "%1"=="version" (
-  echo version>>"%EPIC_TEST_PROBES%"
-  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} 1>&2
-  exit /b 0
-)
-exit /b 99`,
-      );
-
-      const result = runScript([], {
-        ...fixture.env,
-        EPIC_TEST_PROBES: probes,
-      });
-
-      assert.equal(result.status, 0, result.stderr);
-      assert.equal(result.stdout, "");
-      assert.equal(result.stderr, "", "a compatible runtime must be quiet");
-      assert.match(readFileSync(probes, "utf8"), /^version\r?\nversion\r?\n$/);
-    } finally {
-      rmSync(fixture.root, { force: true, recursive: true });
-    }
-  });
-
-  test(`${environmentKey} installs and verifies an exact newer runtime`, () => {
-    const fixture = makeFixture(environmentKey, manifestDir);
-    const calls = join(fixture.root, "calls.txt");
-    const versionFile = join(fixture.root, "version.txt");
-    writeFileSync(versionFile, PREVIOUS_VERSION);
-
-    try {
-      writeCommand(
-        fixture.bin,
-        "epic-harness",
-        `if [ "$1" = "version" ]; then
-  IFS= read -r version < "$EPIC_TEST_VERSION_FILE"
-  printf 'epic-harness %s runtime-revision %s\\n' "$version" "$EPIC_TEST_RUNTIME_REVISION" >&2
-  exit 0
-fi
-printf '%s\\n' "$*" >> "$EPIC_TEST_CALLS"`,
-        `if "%1"=="version" (
-  for /f "usebackq delims=" %%v in ("%EPIC_TEST_VERSION_FILE%") do echo epic-harness %%v runtime-revision %EPIC_TEST_RUNTIME_REVISION% 1>&2
-  exit /b 0
-)
-echo %*>>"%EPIC_TEST_CALLS%"`,
-      );
-      writeCommand(
-        fixture.bin,
-        "brew",
-        "exit 1",
-        "exit /b 1",
-      );
-      writeCommand(
-        fixture.bin,
-        "cargo",
-        `if [ "$1" = "binstall" ] && [ "$2" = "--version" ]; then
-  exit 0
-fi
-printf '%s\\n' "$*" >> "$EPIC_TEST_CALLS"
-printf '%s\\n' '${PLUGIN_VERSION}' > "$EPIC_TEST_VERSION_FILE"`,
-        `if "%1"=="binstall" if "%2"=="--version" exit /b 0
-echo %*>>"%EPIC_TEST_CALLS%"
-> "%EPIC_TEST_VERSION_FILE%" echo ${PLUGIN_VERSION}`,
-      );
-
-      const result = runScript([], {
-        ...fixture.env,
-        EPIC_TEST_CALLS: calls,
-        EPIC_TEST_VERSION_FILE: versionFile,
-      });
-
-      assert.equal(result.status, 0, result.stderr);
-      assert.equal(result.stdout, "");
-      assert.match(
-        readFileSync(calls, "utf8"),
-        new RegExp(`binstall epic-harness@${VERSION_PATTERN} --no-confirm`),
-      );
-      assert.match(
-        result.stderr,
-        new RegExp(
-          `Updating epic-harness ${PREVIOUS_VERSION_PATTERN} → ${VERSION_PATTERN}`,
-        ),
-      );
-      assert.match(
-        result.stderr,
-        new RegExp(`Updated to ${VERSION_PATTERN}`),
-      );
-    } finally {
-      rmSync(fixture.root, { force: true, recursive: true });
-    }
   });
 }
 
-test("bootstrap fails when an installer reports success without a compatible binary", () => {
+async function stopChildForTest(child) {
+  if (child.exitCode !== null) return;
+  child.kill("SIGKILL");
+  await new Promise((resolve) => child.once("close", resolve));
+}
+
+test("no-argument mode is rejected without invoking any child", () => {
   const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
-
+  const calls = join(fixture.root, "calls.txt");
   try {
-    writeCommand(
-      fixture.bin,
-      "cargo",
-      `if [ "$1" = "binstall" ] && [ "$2" = "--version" ]; then
-  exit 0
-fi
-exit 0`,
-      `if "%1"=="binstall" if "%2"=="--version" exit /b 0
-exit /b 0`,
-    );
-
-    const result = runScript([], fixture.env);
-
+    writeCommand(fixture.bin, "epic-harness",
+      "printf '%s\\n' \"$*\" >> \"$EPIC_TEST_CALLS\"",
+      "echo %*>>\"%EPIC_TEST_CALLS%\"");
+    const result = runScript([], { ...fixture.env, EPIC_TEST_CALLS: calls });
     assert.notEqual(result.status, 0);
     assert.equal(result.stdout, "");
-    assert.match(
-      result.stderr,
-      new RegExp(
-        `required epic-harness ${VERSION_PATTERN} is unavailable after installation`,
-        "i",
-      ),
-    );
+    assert.match(result.stderr, /usage: install\.js hook/);
+    assert.throws(() => readFileSync(calls, "utf8"));
   } finally {
-    rmSync(fixture.root, { force: true, recursive: true });
+    rmSync(fixture.root, { recursive: true, force: true });
   }
 });
+
+test("healthy Codex doctor output never reaches hook stdout", () => {
+  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+  const calls = join(fixture.root, "calls.txt");
+  try {
+    writeCommand(fixture.bin, "epic-harness",
+      "printf '%s\\n' \"$1\" >> \"$EPIC_TEST_CALLS\"; if [ \"$1\" = resume ]; then printf '%s\\n' '{}'; fi",
+      "echo %1>>\"%EPIC_TEST_CALLS%\" & if \"%1\"==\"resume\" echo {}");
+    const result = runScript(["hook", "SessionStart", "resume"], { ...fixture.env, EPIC_TEST_CALLS: calls }, "{\"hook_event_name\":\"SessionStart\"}");
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(assertSingleJsonObject(result.stdout, "healthy doctor"), {});
+    assert.doesNotMatch(result.stdout, /healthy/);
+    assert.equal(readFileSync(calls, "utf8").trim(), "resume");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("Claude blocks a mismatched public version contract before the hook", () => {
+  const fixture = makeFixture("CLAUDE_PLUGIN_ROOT", ".claude-plugin");
+  const calls = join(fixture.root, "calls.txt");
+  const wrong = "sha256:" + "0".repeat(64);
+  try {
+    writeCommand(fixture.bin, "epic-harness",
+      "if [ \"$1\" = version ]; then printf '%s\\n' 'epic-harness 9.9.9 runtime-revision 999 build-identity " + wrong + "' >&2; exit 0; fi; printf '%s\\n' \"$1\" >> \"$EPIC_TEST_CALLS\"",
+      "if \"%1\"==\"version\" (echo epic-harness 9.9.9 runtime-revision 999 build-identity " + wrong + " 1>&2 & exit /b 0) & echo %1>>\"%EPIC_TEST_CALLS%\"");
+    const result = runScript(["hook", "SessionStart", "resume"], { ...fixture.env, EPIC_TEST_CALLS: calls }, "{\"hook_event_name\":\"SessionStart\"}");
+    assert.notEqual(result.status, 0);
+    assert.deepEqual(assertSingleJsonObject(result.stdout, "Claude mismatch"), {});
+    assert.throws(() => readFileSync(calls, "utf8"));
+    assert.match(result.stderr, /runtime verification failed|expected/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a missing Codex runtime never invokes package-manager helpers", () => {
+  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+  const calls = join(fixture.root, "calls.txt");
+  try {
+    for (const name of ["cargo", "brew", "powershell", "sh"]) {
+      writeCommand(fixture.bin, name, "printf '%s\\n' " + name + " >> \"$EPIC_TEST_CALLS\"", "echo " + name + ">>\"%EPIC_TEST_CALLS%\"");
+    }
+    const result = runScript(["hook", "SessionStart", "resume"], { ...fixture.env, EPIC_TEST_CALLS: calls }, "{\"hook_event_name\":\"SessionStart\"}");
+    assert.notEqual(result.status, 0);
+    assert.deepEqual(assertSingleJsonObject(result.stdout, "missing runtime"), {});
+    assert.throws(() => readFileSync(calls, "utf8"));
+    assert.match(result.stderr, /not found|doctor --repair/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+
+
+
 
 test("SessionStart accepts a Codex cachebuster while comparing the base runtime version", () => {
   const fixture = makeFixture(
@@ -437,13 +287,13 @@ test("SessionStart accepts a Codex cachebuster while comparing the base runtime 
       fixture.bin,
       "epic-harness",
       `if [ "$1" = "version" ]; then
-  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2
+  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY}' >&2
   exit 0
 fi
 printf '%s\\n' "$*" >> "$EPIC_TEST_CALLS"
 printf '%s\\n' '{}'`,
       `if "%1"=="version" (
-  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} 1>&2
+  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY} 1>&2
   exit /b 0
 )
 echo %*>>"%EPIC_TEST_CALLS%"
@@ -464,178 +314,8 @@ echo {}`,
   }
 });
 
-test("SessionStart keeps installer stdout out of its single JSON response", () => {
-  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
-  const versionFile = join(fixture.root, "version.txt");
-  writeFileSync(versionFile, PREVIOUS_VERSION);
 
-  try {
-    writeCommand(
-      fixture.bin,
-      "epic-harness",
-      `if [ "$1" = "version" ]; then
-  IFS= read -r version < "$EPIC_TEST_VERSION_FILE"
-  printf 'epic-harness %s runtime-revision %s\\n' "$version" "$EPIC_TEST_RUNTIME_REVISION" >&2
-  exit 0
-fi
-printf '%s\\n' '{}'`,
-      `if "%1"=="version" (
-  for /f "usebackq delims=" %%v in ("%EPIC_TEST_VERSION_FILE%") do echo epic-harness %%v runtime-revision %EPIC_TEST_RUNTIME_REVISION% 1>&2
-  exit /b 0
-)
-echo {}`,
-    );
-    writeCommand(
-      fixture.bin,
-      "cargo",
-      `if [ "$1" = "binstall" ] && [ "$2" = "--version" ]; then
-  exit 0
-fi
-printf '%s\\n' 'fixture installer stdout'
-printf '%s\\n' 'fixture installer diagnostic' >&2
-printf '%s\\n' '${PLUGIN_VERSION}' > "$EPIC_TEST_VERSION_FILE"`,
-      `if "%1"=="binstall" if "%2"=="--version" exit /b 0
-echo fixture installer stdout
-echo fixture installer diagnostic 1>&2
-> "%EPIC_TEST_VERSION_FILE%" echo ${PLUGIN_VERSION}`,
-    );
 
-    const result = runScript(
-      ["hook", "SessionStart", "resume"],
-      { ...fixture.env, EPIC_TEST_VERSION_FILE: versionFile },
-      JSON.stringify({ hook_event_name: "SessionStart", session_id: "session-1" }),
-    );
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(
-      assertSingleJsonObject(result.stdout, "SessionStart installer update"),
-      {},
-    );
-    assert.doesNotMatch(result.stderr, /fixture installer stdout/);
-    assert.match(result.stderr, /fixture installer diagnostic/);
-  } finally {
-    rmSync(fixture.root, { force: true, recursive: true });
-  }
-});
-
-test("bootstrap rejects versions outside the base or Codex-cachebuster contract", () => {
-  for (const version of [
-    `${PLUGIN_VERSION}+other.20260728181552`,
-    `${PLUGIN_VERSION}+codex.`,
-    `${PLUGIN_VERSION}+codex.bad..token`,
-  ]) {
-    const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin", version);
-
-    try {
-      const result = runScript([], fixture.env);
-
-      assert.notEqual(result.status, 0);
-      assert.match(result.stderr, /plugin manifest has an invalid version/i);
-    } finally {
-      rmSync(fixture.root, { force: true, recursive: true });
-    }
-  }
-});
-
-test("a same-version runtime with a different revision is reinstalled and verified", () => {
-  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
-  const calls = join(fixture.root, "calls.txt");
-  const revisionFile = join(fixture.root, "revision.txt");
-  const staleRevision = RUNTIME_REVISION === "1" ? "2" : "1";
-  writeFileSync(revisionFile, `${staleRevision}\n`);
-
-  try {
-    writeCommand(
-      fixture.bin,
-      "epic-harness",
-      `if [ "$1" = "version" ]; then
-  IFS= read -r revision < "$EPIC_TEST_REVISION_FILE"
-  printf 'epic-harness ${PLUGIN_VERSION} runtime-revision %s\\n' "$revision" >&2
-  exit 0
-fi
-exit 99`,
-      `if "%1"=="version" (
-  for /f "usebackq delims=" %%v in ("%EPIC_TEST_REVISION_FILE%") do echo epic-harness ${PLUGIN_VERSION} runtime-revision %%v 1>&2
-  exit /b 0
-)
-exit /b 99`,
-    );
-    writeCommand(
-      fixture.bin,
-      "cargo",
-      `if [ "$1" = "binstall" ] && [ "$2" = "--version" ]; then
-  exit 0
-fi
-printf '%s\\n' "$*" >> "$EPIC_TEST_CALLS"
-printf '%s\\n' '${RUNTIME_REVISION}' > "$EPIC_TEST_REVISION_FILE"`,
-      `if "%1"=="binstall" if "%2"=="--version" exit /b 0
-echo %*>>"%EPIC_TEST_CALLS%"
-> "%EPIC_TEST_REVISION_FILE%" echo ${RUNTIME_REVISION}`,
-    );
-
-    const result = runScript([], {
-      ...fixture.env,
-      EPIC_TEST_CALLS: calls,
-      EPIC_TEST_REVISION_FILE: revisionFile,
-    });
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(readFileSync(calls, "utf8"), new RegExp(`binstall epic-harness@${VERSION_PATTERN} --no-confirm`));
-    assert.match(result.stderr, new RegExp(`revision ${staleRevision}`));
-  } finally {
-    rmSync(fixture.root, { force: true, recursive: true });
-  }
-});
-
-test("SessionStart does not resume with an incompatible same-path runtime", () => {
-  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
-  const calls = join(fixture.root, "calls.txt");
-
-  try {
-    writeCommand(
-      fixture.bin,
-      "epic-harness",
-      `if [ "$1" = "version" ]; then
-  printf '%s\\n' 'epic-harness ${PREVIOUS_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2
-  exit 0
-fi
-printf '%s\\n' "$*" >> "$EPIC_TEST_CALLS"`,
-      `if "%1"=="version" (
-  echo epic-harness ${PREVIOUS_VERSION} runtime-revision ${RUNTIME_REVISION} 1>&2
-  exit /b 0
-)
-echo %*>>"%EPIC_TEST_CALLS%"`,
-    );
-    writeCommand(
-      fixture.bin,
-      "cargo",
-      `if [ "$1" = "binstall" ] && [ "$2" = "--version" ]; then
-  exit 0
-fi
-exit 0`,
-      `if "%1"=="binstall" if "%2"=="--version" exit /b 0
-exit /b 0`,
-    );
-
-    const result = runScript(["hook", "SessionStart", "resume"], {
-      ...fixture.env,
-      EPIC_TEST_CALLS: calls,
-    });
-
-    assert.notEqual(result.status, 0);
-    assert.deepEqual(
-      assertSingleJsonObject(result.stdout, "SessionStart bootstrap failure"),
-      {},
-    );
-    assert.throws(() => readFileSync(calls, "utf8"));
-    assert.match(
-      result.stderr,
-      new RegExp(`required epic-harness ${VERSION_PATTERN}`, "i"),
-    );
-  } finally {
-    rmSync(fixture.root, { force: true, recursive: true });
-  }
-});
 
 test("SubagentStop emits one valid JSON object after observe succeeds", () => {
   const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
@@ -719,22 +399,6 @@ test("missing runtime fails without a synthetic guard denial", () => {
     const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
 
     try {
-      if (event === "SessionStart") {
-        writeCommand(
-          fixture.bin,
-          "cargo",
-          `if [ "$1" = "binstall" ] && [ "$2" = "--version" ]; then
-  exit 0
-fi
-if [ "$1" = "binstall" ]; then
-  exit 0
-fi
-exit 99`,
-          `if "%1"=="binstall" if "%2"=="--version" exit /b 0
-if "%1"=="binstall" exit /b 0
-exit /b 99`,
-        );
-      }
 
       const result = runScript(
         ["hook", event, subcommand],
@@ -766,13 +430,13 @@ test("failing runtime fails without a synthetic guard denial", () => {
         fixture.bin,
         "epic-harness",
         `if [ "$1" = "version" ]; then
-  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2
+  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY}' >&2
   exit 0
 fi
 printf '%s\\n' 'runtime ${event} failure' >&2
 exit 17`,
         `if "%1"=="version" (
-  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} 1>&2
+  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY} 1>&2
   exit /b 0
 )
 echo runtime ${event} failure 1>&2
@@ -837,7 +501,7 @@ test("runner rejects unsupported event and subcommand pairs before invoking a ru
   }
 });
 
-test("Codex runner stamps every supported hook payload with explicit host provenance", () => {
+test("runner passes supported hook payloads through without inferred provenance", () => {
   const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
   const stdinPath = join(fixture.root, "stdin.txt");
   const events = [
@@ -857,17 +521,24 @@ test("Codex runner stamps every supported hook payload with explicit host proven
       fixture.bin,
       "epic-harness",
       `if [ "$1" = "version" ]; then
-  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2
+  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY}' >&2
   exit 0
 fi
 IFS= read -r EPIC_STDIN || true
-printf '%s\\n' "$EPIC_STDIN" > "$EPIC_TEST_STDIN"`,
+printf '%s\\n' "$EPIC_STDIN" > "$EPIC_TEST_STDIN"
+if [ "$1" = "resume" ]; then
+  printf '%s\\n' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"ok"}}'
+elif [ "$1" = "reflect" ]; then
+  printf '%s\\n' '{"continue":true}'
+fi`,
       `if "%1"=="version" (
-  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} 1>&2
+  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY} 1>&2
   exit /b 0
 )
 set /p EPIC_STDIN=
-> "%EPIC_TEST_STDIN%" echo %EPIC_STDIN%`,
+> "%EPIC_TEST_STDIN%" echo %EPIC_STDIN%
+if "%1"=="resume" echo {"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"ok"}}
+if "%1"=="reflect" echo {"continue":true}`,
     );
 
     for (const [event, subcommand] of events) {
@@ -881,15 +552,138 @@ set /p EPIC_STDIN=
       assert.equal(result.status, 0, `${event}: ${result.stderr}`);
       assert.deepEqual(
         JSON.parse(readFileSync(stdinPath, "utf8")),
-        { ...JSON.parse(input), host: "codex" },
+        JSON.parse(input),
         event,
       );
-      if (event === "SubagentStop") {
+      if (event === "SessionStart") {
+        assert.deepEqual(JSON.parse(result.stdout), {
+          hookSpecificOutput: {
+            hookEventName: "SessionStart",
+            additionalContext: "ok",
+          },
+        });
+      } else if (event === "SessionEnd") {
+        assert.deepEqual(JSON.parse(result.stdout), { continue: true });
+      } else if (event === "SubagentStop") {
         assert.deepEqual(JSON.parse(result.stdout), {});
       } else {
         assert.equal(result.stdout, "", event);
       }
     }
+  } finally {
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+});
+
+test("declared event behavior is independent of plugin root locator variables", () => {
+  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+  const stdinPath = join(fixture.root, "stdin.txt");
+  const input = JSON.stringify({
+    hook_event_name: "SessionEnd",
+    session_id: "root-locator-matrix",
+  });
+  const locators = [
+    ["neither", { CLAUDE_PLUGIN_ROOT: "", PLUGIN_ROOT: "" }],
+    ["Claude locator", { CLAUDE_PLUGIN_ROOT: ROOT, PLUGIN_ROOT: "" }],
+    ["Codex locator", { CLAUDE_PLUGIN_ROOT: "", PLUGIN_ROOT: ROOT }],
+    ["both locators", { CLAUDE_PLUGIN_ROOT: ROOT, PLUGIN_ROOT: ROOT }],
+  ];
+
+  try {
+    writeCommand(
+      fixture.bin,
+      "epic-harness",
+      `if [ "$1" = "version" ]; then
+  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY}' >&2
+  exit 0
+fi
+IFS= read -r EPIC_STDIN || true
+printf '%s\\n' "$EPIC_STDIN" > "$EPIC_TEST_STDIN"
+printf '%s\\n' '{"continue":true}'`,
+      `if "%1"=="version" (
+  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY} 1>&2
+  exit /b 0
+)
+set /p EPIC_STDIN=
+> "%EPIC_TEST_STDIN%" echo %EPIC_STDIN%
+echo {"continue":true}`,
+    );
+
+    for (const [label, locatorEnvironment] of locators) {
+      const result = runScript(
+        ["hook", "SessionEnd", "reflect"],
+        {
+          ...fixture.env,
+          ...locatorEnvironment,
+          EPIC_TEST_STDIN: stdinPath,
+        },
+        input,
+      );
+
+      assert.equal(result.status, 0, `${label}: ${result.stderr}`);
+      assert.deepEqual(assertSingleJsonObject(result.stdout, label), { continue: true });
+      assert.equal(readFileSync(stdinPath, "utf8").trim(), input, label);
+    }
+  } finally {
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+});
+
+test("adapter root follows its own path with spaces and rejects a mismatched locator", () => {
+  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+  const adapterRoot = join(fixture.root, "adapter root with spaces");
+  const adapterScript = join(adapterRoot, "registry", "scripts", "install.js");
+  const callsPath = join(fixture.root, "calls.txt");
+  mkdirSync(join(adapterRoot, "registry", "scripts"), { recursive: true });
+  copyFileSync(SCRIPT, adapterScript);
+  copyFileSync(
+    join(ROOT, "runtime-revision.txt"),
+    join(adapterRoot, "runtime-revision.txt"),
+  );
+  copyFileSync(
+    join(ROOT, "registry", "scripts", "bundle-manifest.json"),
+    join(adapterRoot, "registry", "scripts", "bundle-manifest.json"),
+  );
+
+  try {
+    writeCommand(
+      fixture.bin,
+      "epic-harness",
+      `printf '%s\\n' "$1" > "$EPIC_TEST_CALLS"
+printf '%s\\n' '{"continue":true}'`,
+      `> "%EPIC_TEST_CALLS%" echo %1
+echo {"continue":true}`,
+    );
+
+    const valid = runScript(
+      ["hook", "SessionEnd", "reflect"],
+      {
+        ...fixture.env,
+        PLUGIN_ROOT: adapterRoot,
+        EPIC_TEST_CALLS: callsPath,
+      },
+      JSON.stringify({ hook_event_name: "SessionEnd" }),
+      adapterScript,
+    );
+    assert.equal(valid.status, 0, valid.stderr);
+    assert.deepEqual(assertSingleJsonObject(valid.stdout, "space path"), { continue: true });
+    assert.equal(readFileSync(callsPath, "utf8").trim(), "reflect");
+
+    rmSync(callsPath, { force: true });
+    const invalid = runScript(
+      ["hook", "SessionEnd", "reflect"],
+      {
+        ...fixture.env,
+        PLUGIN_ROOT: join(adapterRoot, "wrong locator"),
+        EPIC_TEST_CALLS: callsPath,
+      },
+      JSON.stringify({ hook_event_name: "SessionEnd" }),
+      adapterScript,
+    );
+    assert.notEqual(invalid.status, 0, invalid.stderr);
+    assert.deepEqual(assertSingleJsonObject(invalid.stdout, "mismatched locator"), {});
+    assert.match(invalid.stderr, /PLUGIN_ROOT locates .*adapter is installed/i);
+    assert.equal(existsSync(callsPath), false, "a mismatched locator must stop before execution");
   } finally {
     rmSync(fixture.root, { force: true, recursive: true });
   }
@@ -904,14 +698,14 @@ test("Codex SessionStart dispatches complete JSON before stdin closes", async ()
       fixture.bin,
       "epic-harness",
       `if [ "$1" = "version" ]; then
-  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2
+  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY}' >&2
   exit 0
 fi
 IFS= read -r EPIC_STDIN || true
 printf '%s\\n' "$EPIC_STDIN" > "$EPIC_TEST_STDIN"
 printf '%s\\n' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"ok"}}'`,
       `if "%1"=="version" (
-  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} 1>&2
+  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY} 1>&2
   exit /b 0
 )
 set /p EPIC_STDIN=
@@ -950,7 +744,7 @@ echo {"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"
     assert.equal(result.code, 0, result.signal ?? "SessionStart failed");
     assert.deepEqual(
       JSON.parse(readFileSync(stdinPath, "utf8")),
-      { ...JSON.parse(input), host: "codex" },
+      JSON.parse(input),
       "runner must invoke resume with the complete payload",
     );
     assert.deepEqual(
@@ -1019,6 +813,222 @@ exit /b 99`,
   }
 });
 
+test("every non-SessionStart manifest hook bounds held-open input before invoking the runtime", async () => {
+  for (const [event, subcommand] of NON_SESSION_START_MANIFEST_HOOKS) {
+    const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+    const callsPath = join(fixture.root, "calls.txt");
+
+    try {
+      writeCommand(
+        fixture.bin,
+        "epic-harness",
+        `printf '%s\\n' "$1" > "$EPIC_TEST_CALLS"`,
+        `> "%EPIC_TEST_CALLS%" echo %1`,
+      );
+      const child = spawn(process.execPath, [SCRIPT, "hook", event, subcommand], {
+        env: {
+          ...fixture.env,
+          EPIC_HOOK_INPUT_TIMEOUT_MS: "40",
+          EPIC_TEST_CALLS: callsPath,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.stdin.write(JSON.stringify({ hook_event_name: event, session_id: "held-open" }));
+
+      const result = await waitForExit(child, 750);
+      if (result.timeout) await stopChildForTest(child);
+
+      assert.equal(result.timeout, false, `${event} waited for stdin EOF`);
+      assert.notEqual(result.code, 0, `${event}: ${result.signal ?? stderr}`);
+      assert.throws(() => readFileSync(callsPath, "utf8"), `${event} invoked its runtime`);
+      assert.match(stderr, new RegExp(`${event} input timed out`, "i"));
+      if (["SubagentStop", "PreCompact", "SessionEnd"].includes(event)) {
+        assert.deepEqual(assertSingleJsonObject(stdout, `${event} input timeout`), {});
+      } else {
+        assert.equal(stdout, "", `${event} input timeout must not emit stdout`);
+      }
+    } finally {
+      rmSync(fixture.root, { force: true, recursive: true });
+    }
+  }
+});
+
+test("every non-SessionStart manifest hook bounds and terminates a hung runtime", async () => {
+  for (const [event, subcommand] of NON_SESSION_START_MANIFEST_HOOKS) {
+    const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+    const pidPath = join(fixture.root, "runtime.pid");
+
+    try {
+      writeCommand(
+        fixture.bin,
+        "epic-harness",
+        `exec "$EPIC_TEST_NODE" -e 'require("node:fs").writeFileSync(process.env.EPIC_TEST_RUNTIME_PID, String(process.pid)); setTimeout(() => {}, 5000)'`,
+        `"%EPIC_TEST_NODE%" -e "require('node:fs').writeFileSync(process.env.EPIC_TEST_RUNTIME_PID, String(process.pid)); setTimeout(() => {}, 5000)"`,
+      );
+      const child = spawn(process.execPath, [SCRIPT, "hook", event, subcommand], {
+        env: {
+          ...fixture.env,
+          EPIC_HOOK_CHILD_TEARDOWN_GRACE_MS: "20",
+          // Leave enough time for the Windows command shim to start doctor,
+          // while still bounding every diagnosis + hook attempt tightly.
+          EPIC_HOOK_CHILD_TIMEOUT_MS: "250",
+          EPIC_TEST_NODE: process.execPath,
+          EPIC_TEST_RUNTIME_PID: pidPath,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.stdin.end(JSON.stringify({ hook_event_name: event, session_id: "hung-runtime" }));
+
+      const result = await waitForExit(child, 750);
+      if (result.timeout) {
+        child.kill("SIGKILL");
+        if (existsSync(pidPath)) {
+          try {
+            process.kill(Number(readFileSync(pidPath, "utf8")));
+          } catch (error) {
+            assert.equal(error.code, "ESRCH");
+          }
+        }
+        await new Promise((resolve) => child.once("close", resolve));
+      }
+
+      assert.equal(result.timeout, false, `${event} waited for its hung runtime`);
+      assert.notEqual(result.code, 0, `${event}: ${result.signal ?? stderr}`);
+      assert.match(stderr, new RegExp(`${subcommand} timed out`, "i"));
+      if (["SubagentStop", "PreCompact", "SessionEnd"].includes(event)) {
+        assert.deepEqual(assertSingleJsonObject(stdout, `${event} runtime timeout`), {});
+      } else {
+        assert.equal(stdout, "", `${event} runtime timeout must not emit stdout`);
+      }
+      if (process.platform !== "win32") {
+        const runtimePid = Number(readFileSync(pidPath, "utf8"));
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        assert.throws(() => process.kill(runtimePid, 0), { code: "ESRCH" });
+      }
+    } finally {
+      rmSync(fixture.root, { force: true, recursive: true });
+    }
+  }
+});
+
+test("SessionEnd shares its three-second host budget across input, runtime, and teardown", async () => {
+  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+  const pidPath = join(fixture.root, "runtime.pid");
+
+  try {
+    writeCommand(
+      fixture.bin,
+      "epic-harness",
+      `exec "$EPIC_TEST_NODE" -e 'require("node:fs").writeFileSync(process.env.EPIC_TEST_RUNTIME_PID, String(process.pid)); setTimeout(() => {}, 5000)'`,
+      `"%EPIC_TEST_NODE%" -e "require('node:fs').writeFileSync(process.env.EPIC_TEST_RUNTIME_PID, String(process.pid)); setTimeout(() => {}, 5000)"`,
+    );
+    const child = spawn(process.execPath, [SCRIPT, "hook", "SessionEnd", "reflect"], {
+      env: {
+        ...fixture.env,
+        EPIC_HOOK_CHILD_TEARDOWN_GRACE_MS: "20",
+        EPIC_HOOK_CHILD_TIMEOUT_MS: "2000",
+        EPIC_HOOK_INPUT_TIMEOUT_MS: "2000",
+        EPIC_HOOK_RUNNER_TIMEOUT_MS: "220",
+        EPIC_TEST_NODE: process.execPath,
+        EPIC_TEST_RUNTIME_PID: pidPath,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    child.stdin.end(JSON.stringify({ hook_event_name: "SessionEnd", session_id: "shared-budget" }));
+
+    const result = await waitForExit(child, 750);
+    if (result.timeout) {
+      child.kill("SIGKILL");
+      if (existsSync(pidPath)) {
+        try {
+          process.kill(Number(readFileSync(pidPath, "utf8")));
+        } catch (error) {
+          assert.equal(error.code, "ESRCH");
+        }
+      }
+      await new Promise((resolve) => child.once("close", resolve));
+    }
+
+    assert.equal(result.timeout, false, "SessionEnd exceeded its host budget");
+    assert.notEqual(result.code, 0, result.signal ?? stderr);
+    assert.deepEqual(assertSingleJsonObject(stdout, "SessionEnd shared budget"), {});
+    assert.match(stderr, /reflect timed out|runner deadline/i);
+  } finally {
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+});
+
+test("SessionStart shares its deadline across bootstrap and resume", async () => {
+  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+  const pidPath = join(fixture.root, "bootstrap.pid");
+
+  try {
+    writeCommand(
+      fixture.bin,
+      "epic-harness",
+      `exec "$EPIC_TEST_NODE" -e 'require("node:fs").writeFileSync(process.env.EPIC_TEST_BOOTSTRAP_PID, String(process.pid)); setTimeout(() => {}, 5000)'`,
+      `"%EPIC_TEST_NODE%" -e "require('node:fs').writeFileSync(process.env.EPIC_TEST_BOOTSTRAP_PID, String(process.pid)); setTimeout(() => {}, 5000)"`,
+    );
+    const child = spawn(process.execPath, [SCRIPT, "hook", "SessionStart", "resume"], {
+      env: {
+        ...fixture.env,
+        EPIC_HOOK_CHILD_TEARDOWN_GRACE_MS: "20",
+        EPIC_HOOK_SESSIONSTART_CHILD_TIMEOUT_MS: "2000",
+        EPIC_HOOK_SESSIONSTART_RUNNER_TIMEOUT_MS: "220",
+        EPIC_TEST_BOOTSTRAP_PID: pidPath,
+        EPIC_TEST_NODE: process.execPath,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stdin.end(JSON.stringify({ hook_event_name: "SessionStart", session_id: "bootstrap-budget" }));
+
+    const result = await waitForExit(child, 750);
+    if (result.timeout) {
+      child.kill("SIGKILL");
+      if (existsSync(pidPath)) {
+        try {
+          process.kill(Number(readFileSync(pidPath, "utf8")));
+        } catch (error) {
+          assert.equal(error.code, "ESRCH");
+        }
+      }
+      await new Promise((resolve) => child.once("close", resolve));
+    }
+
+    assert.equal(result.timeout, false, "SessionStart exceeded its bootstrap budget");
+    assert.notEqual(result.code, 0, result.signal ?? stderr);
+    assert.deepEqual(assertSingleJsonObject(stdout, "SessionStart bootstrap budget"), {});
+    assert.match(stderr, /codex doctor timed out|runner deadline|not found/i);
+  } finally {
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+});
+
 test("SessionStart bounds malformed held-open input and input byte growth", async () => {
   const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
 
@@ -1027,12 +1037,12 @@ test("SessionStart bounds malformed held-open input and input byte growth", asyn
       fixture.bin,
       "epic-harness",
       `if [ "$1" = "version" ]; then
-  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2
+  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY}' >&2
   exit 0
 fi
 exit 99`,
       `if "%1"=="version" (
-  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} 1>&2
+  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY} 1>&2
   exit /b 0
 )
 exit /b 99`,
@@ -1077,57 +1087,6 @@ exit /b 99`,
   }
 });
 
-for (const [environmentKey, manifestDir] of [
-  ["PLUGIN_ROOT", ".codex-plugin"],
-  ["CLAUDE_PLUGIN_ROOT", ".claude-plugin"],
-]) {
-  test(`${environmentKey} SessionStart bounds installer and resume children without corrupting stdout`, () => {
-    const fixture = makeFixture(environmentKey, manifestDir);
-
-    try {
-      writeCommand(
-        fixture.bin,
-        "cargo",
-        `if [ "$1" = "binstall" ] && [ "$2" = "--version" ]; then\n  exit 0\nfi\nprintf '%s\\n' 'installer child stdout'\n"$EPIC_TEST_NODE" -e 'setTimeout(() => {}, 5000)'`,
-        `if "%1"=="binstall" if "%2"=="--version" exit /b 0\necho installer child stdout\n"%SystemRoot%\\System32\\ping.exe" -n 6 127.0.0.1 >nul`,
-      );
-      const installer = runScript(
-        ["hook", "SessionStart", "resume"],
-        {
-          ...fixture.env,
-          EPIC_HOOK_SESSIONSTART_CHILD_TIMEOUT_MS: "250",
-          EPIC_TEST_NODE: process.execPath,
-        },
-        JSON.stringify({ hook_event_name: "SessionStart" }),
-      );
-      assert.notEqual(installer.status, 0, installer.stderr);
-      assert.deepEqual(assertSingleJsonObject(installer.stdout, "installer timeout"), {});
-      assert.match(installer.stderr, /(?:installer|cargo-binstall).*timed out/i);
-
-      writeCommand(
-        fixture.bin,
-        "epic-harness",
-        `if [ "$1" = "version" ]; then\n  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2\n  exit 0\nfi\nprintf '%s\\n' 'resume child stdout'\n"$EPIC_TEST_NODE" -e 'setTimeout(() => {}, 5000)'`,
-        `if "%1"=="version" (\n  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} 1>&2\n  exit /b 0\n)\necho resume child stdout\n"%SystemRoot%\\System32\\ping.exe" -n 6 127.0.0.1 >nul`,
-      );
-      const resume = runScript(
-        ["hook", "SessionStart", "resume"],
-        {
-          ...fixture.env,
-          EPIC_HOOK_SESSIONSTART_CHILD_TIMEOUT_MS: "250",
-          EPIC_TEST_NODE: process.execPath,
-        },
-        JSON.stringify({ hook_event_name: "SessionStart" }),
-      );
-      assert.notEqual(resume.status, 0, resume.stderr);
-      assert.deepEqual(assertSingleJsonObject(resume.stdout, "resume timeout"), {});
-      assert.match(resume.stderr, /resume.*timed out/i);
-      assert.doesNotMatch(resume.stdout, /child stdout/);
-    } finally {
-      rmSync(fixture.root, { force: true, recursive: true });
-    }
-  });
-}
 
 test(
   "POSIX SessionStart timeout kills a forked resume descendant holding stdout",
@@ -1141,7 +1100,7 @@ test(
         fixture.bin,
         "epic-harness",
         `if [ "$1" = "version" ]; then
-  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2
+  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY}' >&2
   exit 0
 fi
 "$EPIC_TEST_NODE" -e 'require("node:fs").writeFileSync(process.env.EPIC_TEST_DESCENDANT_PID, String(process.pid)); setTimeout(() => {}, 5000)' &
@@ -1205,7 +1164,77 @@ exit 0`,
   },
 );
 
-test("Codex runner preserves closed empty, malformed, and trailing input", () => {
+test(
+  "Windows SessionStart timeout kills the complete resume process tree",
+  { skip: !IS_WINDOWS },
+  async () => {
+    const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+    const descendantPidPath = join(fixture.root, "descendant.pid");
+    const descendantScript = join(fixture.root, "descendant.js");
+
+    try {
+      writeFileSync(
+        descendantScript,
+        `require("node:fs").writeFileSync(process.env.EPIC_TEST_DESCENDANT_PID, String(process.pid)); setTimeout(() => {}, 5000);`,
+      );
+      writeCommand(
+        fixture.bin,
+        "epic-harness",
+        "exit 99",
+        `if "%1"=="version" (
+  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY} 1>&2
+  exit /b 0
+)
+start "" /b "%EPIC_TEST_NODE%" "%EPIC_TEST_DESCENDANT_SCRIPT%"
+"%SystemRoot%\\System32\\ping.exe" -n 6 127.0.0.1 >nul`,
+      );
+
+      const child = spawn(process.execPath, [SCRIPT, "hook", "SessionStart", "resume"], {
+        env: {
+          ...fixture.env,
+          EPIC_HOOK_SESSIONSTART_CHILD_TIMEOUT_MS: "250",
+          EPIC_TEST_DESCENDANT_PID: descendantPidPath,
+          EPIC_TEST_DESCENDANT_SCRIPT: descendantScript,
+          EPIC_TEST_NODE: process.execPath,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      child.stdin.end(JSON.stringify({ hook_event_name: "SessionStart" }));
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+
+      const result = await waitForExit(child, 1_500);
+      if (result.timeout) await stopChildForTest(child);
+      assert.equal(result.timeout, false, "runner waited for the Windows process tree");
+      assert.notEqual(result.code, 0, result.signal ?? "timed-out resume unexpectedly succeeded");
+      assert.deepEqual(assertSingleJsonObject(stdout, "Windows resume timeout"), {});
+      assert.match(stderr, /resume timed out/i);
+
+      const descendantPid = Number(readFileSync(descendantPidPath, "utf8"));
+      let exited = false;
+      const deadline = Date.now() + 1_000;
+      while (Date.now() < deadline) {
+        try {
+          process.kill(descendantPid, 0);
+        } catch (error) {
+          assert.equal(error.code, "ESRCH");
+          exited = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.equal(exited, true, `descendant ${descendantPid} remained live after taskkill /t`);
+    } finally {
+      rmSync(fixture.root, { force: true, recursive: true });
+    }
+  },
+);
+
+test("Codex SessionStart preserves closed empty and incomplete input for resume", () => {
   const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
   const stdinPath = join(fixture.root, "stdin.txt");
 
@@ -1214,14 +1243,14 @@ test("Codex runner preserves closed empty, malformed, and trailing input", () =>
       fixture.bin,
       "epic-harness",
       `if [ "$1" = "version" ]; then
-  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION}' >&2
+  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY}' >&2
   exit 0
 fi
 IFS= read -r EPIC_STDIN || true
 printf '%s\\n' "$EPIC_STDIN" > "$EPIC_TEST_STDIN"
 printf '%s\\n' '{"hookSpecificOutput":{"hookEventName":"SessionStart"}}'`,
       `if "%1"=="version" (
-  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} 1>&2
+  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY} 1>&2
   exit /b 0
 )
 set /p EPIC_STDIN=
@@ -1229,7 +1258,7 @@ set /p EPIC_STDIN=
 echo {"hookSpecificOutput":{"hookEventName":"SessionStart"}}
 exit /b 0`,
     );
-    for (const input of ["", '{"hook_event_name":"SessionStart"', '{"hook_event_name":"SessionStart"} trailing']) {
+    for (const input of ["", '{"hook_event_name":"SessionStart"']) {
       const result = runScript(
         ["hook", "SessionStart", "resume"],
         { ...fixture.env, EPIC_TEST_STDIN: stdinPath },
@@ -1240,6 +1269,161 @@ exit /b 0`,
     }
   } finally {
     rmSync(fixture.root, { force: true, recursive: true });
+  }
+});
+
+test("Codex SessionStart rejects already-present non-whitespace after complete JSON before resume", () => {
+  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+  const callsPath = join(fixture.root, "calls.txt");
+
+  try {
+    writeCommand(
+      fixture.bin,
+      "epic-harness",
+      `if [ "$1" = "version" ]; then
+  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY}' >&2
+  exit 0
+fi
+printf '%s\\n' "$1" > "$EPIC_TEST_CALLS"
+printf '%s\\n' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"unexpected"}}'`,
+      `if "%1"=="version" (
+  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY} 1>&2
+  exit /b 0
+)
+> "%EPIC_TEST_CALLS%" echo %1
+echo {"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"unexpected"}}`,
+    );
+
+    const result = runScript(
+      ["hook", "SessionStart", "resume"],
+      { ...fixture.env, EPIC_TEST_CALLS: callsPath },
+      '{"hook_event_name":"SessionStart"} trailing',
+    );
+
+    assert.notEqual(result.status, 0, result.stderr);
+    assert.deepEqual(assertSingleJsonObject(result.stdout, "SessionStart trailing input"), {});
+    assert.throws(() => readFileSync(callsPath, "utf8"));
+    assert.match(result.stderr, /trailing|invalid JSON input/i);
+  } finally {
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+});
+
+test("Codex SessionStart drains immediately buffered trailing chunks before resume", async () => {
+  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+  const callsPath = join(fixture.root, "calls.txt");
+
+  try {
+    writeCommand(
+      fixture.bin,
+      "epic-harness",
+      `if [ "$1" = "version" ]; then
+  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY}' >&2
+  exit 0
+fi
+printf '%s\\n' "$1" > "$EPIC_TEST_CALLS"
+printf '%s\\n' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"unexpected"}}'`,
+      `if "%1"=="version" (
+  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY} 1>&2
+  exit /b 0
+)
+> "%EPIC_TEST_CALLS%" echo %1
+echo {"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"unexpected"}}`,
+    );
+    const child = spawn(process.execPath, [SCRIPT, "hook", "SessionStart", "resume"], {
+      env: { ...fixture.env, EPIC_TEST_CALLS: callsPath },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stdin.write('{"hook_event_name":"SessionStart"}');
+    child.stdin.write(" trailing");
+
+    const result = await waitForExit(child, 750);
+    if (result.timeout) await stopChildForTest(child);
+
+    assert.equal(result.timeout, false, "SessionStart waited for stdin EOF");
+    assert.notEqual(result.code, 0, result.signal ?? stderr);
+    assert.deepEqual(assertSingleJsonObject(stdout, "SessionStart trailing chunk"), {});
+    assert.throws(() => readFileSync(callsPath, "utf8"));
+    assert.match(stderr, /trailing/i);
+  } finally {
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+});
+
+test("Codex SessionStart requires one structured response from resume", () => {
+  const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+
+  try {
+    writeCommand(
+      fixture.bin,
+      "epic-harness",
+      `if [ "$1" = "version" ]; then
+  printf '%s\\n' 'epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY}' >&2
+fi`,
+      `if "%1"=="version" (
+  echo epic-harness ${PLUGIN_VERSION} runtime-revision ${RUNTIME_REVISION} build-identity ${BUILD_IDENTITY} 1>&2
+  exit /b 0
+)`,
+    );
+
+    const result = runScript(
+      ["hook", "SessionStart", "resume"],
+      fixture.env,
+      JSON.stringify({ hook_event_name: "SessionStart" }),
+    );
+
+    assert.notEqual(result.status, 0, result.stderr);
+    assert.deepEqual(assertSingleJsonObject(result.stdout, "SessionStart missing output"), {});
+    assert.match(result.stderr, /structured output|required JSON/i);
+  } finally {
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+});
+
+test("Codex validates structured output only for events with a structured contract", () => {
+  const cases = [
+    ["SessionEnd", "reflect", "__SILENT__", false],
+    ["SessionEnd", "reflect", "not-json", false],
+    ["PreCompact", "snapshot", "__SILENT__", true],
+    ["PreCompact", "snapshot", "not-json", false],
+    ["PostToolUse", "observe", "not-json", true],
+    ["SubagentStart", "observe", "not-json", true],
+  ];
+
+  for (const [event, subcommand, output, succeeds] of cases) {
+    const fixture = makeFixture("PLUGIN_ROOT", ".codex-plugin");
+    try {
+      writeCommand(
+        fixture.bin,
+        "epic-harness",
+        `if [ "$EPIC_TEST_OUTPUT" != "__SILENT__" ]; then
+  printf '%s\\n' "$EPIC_TEST_OUTPUT"
+fi`,
+        `if not "%EPIC_TEST_OUTPUT%"=="__SILENT__" echo %EPIC_TEST_OUTPUT%`,
+      );
+      const result = runScript(
+        ["hook", event, subcommand],
+        { ...fixture.env, EPIC_TEST_OUTPUT: output },
+        JSON.stringify({ hook_event_name: event, session_id: "structured-output" }),
+      );
+
+      if (succeeds) {
+        assert.equal(result.status, 0, `${event}: ${result.stderr}`);
+        assert.equal(result.stdout, "", `${event} must not forward non-structured output`);
+      } else {
+        assert.notEqual(result.status, 0, `${event}: ${result.stderr}`);
+        assert.deepEqual(assertSingleJsonObject(result.stdout, `${event} invalid output`), {});
+        assert.match(result.stderr, /required structured output|invalid JSON/i);
+      }
+    } finally {
+      rmSync(fixture.root, { force: true, recursive: true });
+    }
   }
 });
 
@@ -1291,6 +1475,7 @@ test("a malformed or non-structured guard denial fails without a permission deci
     ["non-object JSON", "[]"],
     ["missing Codex hook event", '{"hookSpecificOutput":{"permissionDecision":"deny"}}'],
     ["non-denial Codex output", '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'],
+    ["reasonless denial", '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"}}'],
   ];
 
   for (const [label, output] of cases) {

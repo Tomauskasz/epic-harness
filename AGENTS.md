@@ -144,18 +144,20 @@ Notes that are easy to get wrong:
   a context line beginning with `[` otherwise looks like malformed JSON.
 - **All plugin hooks use the Node runner.** It quotes plugin paths, provides
   Windows command overrides, resolves `epic-harness` consistently, and reports
-  a missing binary on stderr without corrupting event output. SessionStart
-  strips an optional `+codex.<cachebuster>` cache identity, then installs and
-  verifies the exact base binary version and runtime revision before `resume`.
+  a missing binary on stderr without corrupting event output. Normal hooks are
+  verification-only: they never install, update, download, or repair the
+  runtime. Codex verifies the active cache, release version, runtime revision,
+  and checked build identity before the hook subcommand. Explicit diagnosis and
+  journaled cache repair belong only to `epic-harness codex doctor [--repair]`.
 - **SessionStart has one stdout payload.** Only SessionStart dispatches after a
   complete JSON object instead of waiting for stdin EOF, which Codex may hold
   while it waits for the hook. Its incomplete input is bounded by a five-second
   deadline and one MiB budget; every other hook reads through EOF and rejects
-  non-JSON trailing bytes. SessionStart installer, probe, and resume children
-  have a 30-second deadline, terminate their process group on POSIX and tree
-  on Windows, tear down retained pipes after a bounded grace period, inherit
-  stderr for diagnostics, and never stdout, preserving the one structured
-  SessionStart response.
+  non-JSON trailing bytes. Verification and hook children share a finite event
+  deadline, terminate their process group on POSIX and tree on Windows, and tear
+  down retained pipes after a bounded grace period. SessionEnd stays within its
+  three-second host maximum. Child stdout never bypasses the event-specific
+  response contract.
 - **Windows overrides select `cmd.exe` explicitly and enter `run-hook.cmd`.**
   Codex may execute them through PowerShell, where `%PLUGIN_ROOT%` stays literal
   and a native exit 2 is collapsed to exit 1. The wrapper expands the path and

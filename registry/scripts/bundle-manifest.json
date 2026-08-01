@@ -1,0 +1,431 @@
+{
+  "schema_version": 1,
+  "manifest_kind": "logical-runtime-v1",
+  "release_version": "0.8.3",
+  "runtime_revision": "2",
+  "build_identity": "sha256:6149bb6e7fcdb92de66f613cf11f97c825e88d7fcc569980ec190f27e314101d",
+  "artifacts": [
+    {
+      "path": ".claude-plugin/plugin.json",
+      "type": "file",
+      "digest_mode": "canonical-plugin-json-v1",
+      "sha256": "sha256:2b3f01b11297dfbe9fa0e476b44a46dc38693a70f9744d2e2b68041d93d6067e"
+    },
+    {
+      "path": ".codex-plugin/hooks.json",
+      "type": "file",
+      "digest_mode": "canonical-json-v1",
+      "sha256": "sha256:cab44dc196cde1315d0ef3bd9926606e5e2a7960bf7321742e96be20844d6be7"
+    },
+    {
+      "path": ".codex-plugin/plugin.json",
+      "type": "file",
+      "digest_mode": "canonical-plugin-json-v1",
+      "sha256": "sha256:1f07e5477611743ac563008b8b928382427b7644bd56a62c37cd4c1d4cfd6a4e"
+    },
+    {
+      "path": "hooks/hooks.json",
+      "type": "file",
+      "digest_mode": "canonical-json-v1",
+      "sha256": "sha256:50f94273a7426acb2eac9c7fdcf6d115cbd719494ba0f96a9cb455ef0a059243"
+    },
+    {
+      "path": "mcp_config.json",
+      "type": "file",
+      "digest_mode": "canonical-json-v1",
+      "sha256": "sha256:2ea76601bf97b76c15c8516f0129b110ded9939ce135abf2f81ed353b91e146d"
+    },
+    {
+      "path": "package.json",
+      "type": "file",
+      "digest_mode": "canonical-json-v1",
+      "sha256": "sha256:61f348fad1d0f3b05e2f81148d8db91ac985d30069d6f65e9a34792f97e40d85"
+    },
+    {
+      "path": "registry/presets/go/evo-go-care.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:d36cbc027c548261592001a7d0e47397523ff9e07e49704d025dfa372456c8a5"
+    },
+    {
+      "path": "registry/presets/java/evo-java-care.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:5e6c406093e8df2196b253460d0d0465150ab511dc03ea13a689b5076f3cc4d7"
+    },
+    {
+      "path": "registry/presets/kotlin/evo-kt-care.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:ce706cb8838da1dc23851e84e61ef28d7b3dd9bd518bfcc5ae70480f677ce285"
+    },
+    {
+      "path": "registry/presets/node/evo-fix-build-fail.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:3c051789dd7cbaa8f206eca279a47b631ea16e45798fea55924e9a42e211c430"
+    },
+    {
+      "path": "registry/presets/node/evo-ts-care.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:670cfb8d4cd0dba05c80b3881ad170ed67704ecb9a42cc3fc790538fdddc1d19"
+    },
+    {
+      "path": "registry/presets/php/evo-php-care.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:3d6eb47b16cac2b11f3313ee1ed6c72ba1e32cfb717fe83472a446cdf018c6d6"
+    },
+    {
+      "path": "registry/presets/python/evo-py-care.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:751b4d29829c19f4c772d8f38af850c2781cd0b06ba7d62bbc54952f3a3b0b73"
+    },
+    {
+      "path": "registry/presets/ruby/evo-rb-care.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:d6b6ff9d498441a1740b23d99447f0c3c949df6ce4a01e3c8f9425a7e2b7e5c4"
+    },
+    {
+      "path": "registry/presets/rust/evo-rs-care.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:3ddb8e7487a1651c050ede2e6d9304673b08c2b13d998efa050db79091e5486d"
+    },
+    {
+      "path": "registry/scripts/install.js",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:fba163058f2ae3882fb4f18231efde6a90c53876b08a1f47bda501b0bed88468"
+    },
+    {
+      "path": "registry/scripts/run-hook.cmd",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:37e18bad687b1530615fa5bfaf2b2003fa91ebe72f48e313c70c27be5ac93503"
+    },
+    {
+      "path": "runtime-revision.txt",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3"
+    },
+    {
+      "path": "skills/_critic/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:9b3d06ca041c7b041562d30715a397ec6e0c298b008bd2229746403f01b8a29d"
+    },
+    {
+      "path": "skills/_dispatch/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:83bbeb4c09b0a5742bb58df87ba0c761bef459b55352654db62227a60841c13c"
+    },
+    {
+      "path": "skills/agent-introspection/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:2dec29a74b61bb7fc07b40e46b96a91474fd827d60b1c254dacf74802494e6b1"
+    },
+    {
+      "path": "skills/audit/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:236504b1a35c1526fdcb5926fa5deb2906aaec55b4708fc77f8976a052acecd3"
+    },
+    {
+      "path": "skills/commit/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:f95270a92f9263ef321d010e706add637ea9d17045624de84d6f7e0778c92014"
+    },
+    {
+      "path": "skills/context/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:8d105f5710b17e6d7652635977aeac8bed7a3330169e64b121e421cec28d176a"
+    },
+    {
+      "path": "skills/council/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:ba506221c1c16b501841015ba06185d919ae631aea5c53b3e3abdf80601c951e"
+    },
+    {
+      "path": "skills/debug/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:6e3806ead3440993616a98b7e2d0286a082f2dc4256903a7722c400a14383e07"
+    },
+    {
+      "path": "skills/discover/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:29f4e53f32c24e5c9046582b5363e3f3ffcc6044eab7115d01c9645d157d99e1"
+    },
+    {
+      "path": "skills/document/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:daa8ee430bf522f5c70e43a733f8dfcbafc88d187a3d4651c5e70af9a94ed426"
+    },
+    {
+      "path": "skills/eval/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:8c0062e70d1086ec0c8ccea13daba2d3a370cded1fb5e2de39573d0ac8f488cf"
+    },
+    {
+      "path": "skills/evolve/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:135f6e280cdcb7fd6599822accfab3ea4205e5f832064c24dac91ad6257f46cb"
+    },
+    {
+      "path": "skills/go/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:2766434c8abc8b010e2265d6d68bad7644b245617ac37de413644b3689e8e22a"
+    },
+    {
+      "path": "skills/orbit/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:ba1744912e912de7d9002c7c87fdaeac282cd82ccc34e40e542f27bbf0248786"
+    },
+    {
+      "path": "skills/orchestrate/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:bc02fff0a9f0de7658fe50abecc381c467c37b1178d26fd661a85ff7a886a149"
+    },
+    {
+      "path": "skills/perf/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:07ff451e9024b716d0b67e88e5d351a7e079f83c5d75af64627156706920b31a"
+    },
+    {
+      "path": "skills/reflect/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:ed5d32fc48a31c6455c845ffe262a3e907edcdc5e5d6d823e08066f43a75ed9f"
+    },
+    {
+      "path": "skills/secure/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:ede552de57113c1531b2dc028b0e4cbbb933b3ec6a36814022a52824f474f642"
+    },
+    {
+      "path": "skills/ship/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:9328c912bd546e45c5524d0cbb58c973e6be36d419e28e4736b9321f4a625722"
+    },
+    {
+      "path": "skills/simplify/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:dc612e213e2dc327adcbcbbced64fe1717a0343004176297b59ffe2fb2d43734"
+    },
+    {
+      "path": "skills/spec/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:7514461f3a95c4eae24d8e926261c16f2862b8a1e937cfbbc5c34e815e809fe6"
+    },
+    {
+      "path": "skills/tdd/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:d67e81436b05d681fb17b87bd0bf9dcffbe3b16821b1ea1ca8adb55bfdbea0e1"
+    },
+    {
+      "path": "skills/team/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:8fae931903a7d7e4bdd5e69acb6111cc9525104e1d5d120792117d4f3defd682"
+    },
+    {
+      "path": "skills/threat-model/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:dcf48da87eb9a2977de5acfe353af14d16c3f1c0b9984a1e5d711bc7634a4fc2"
+    },
+    {
+      "path": "skills/triage/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:dfd91a25c5bbe6092d2211383ed57b2127d0cd4f08801f1ee2b54302ad1559f1"
+    },
+    {
+      "path": "skills/verify/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:2526c27902373b88e72cd0c1f3f87b8a703c0b4c82b88ee1c0709bcf3e29febf"
+    },
+    {
+      "path": "skills/vuln-scan/SKILL.md",
+      "type": "file",
+      "digest_mode": "normalized-lf-text-v1",
+      "sha256": "sha256:3b8475b7447fd96415a1c0b27cd99598e745845ab0b89d9587785f6504391955"
+    }
+  ],
+  "identity_inputs": {
+    "algorithm": "sha256-framed-logical-source-and-artifact-projection-v3",
+    "inventory_path": "registry/scripts/bundle-spec.json",
+    "source_paths": [
+      "Cargo.lock",
+      "Cargo.toml",
+      "build.rs",
+      "registry/scripts/bundle-spec.json",
+      "src/codex/bundle.rs",
+      "src/codex/doctor.rs",
+      "src/codex/mod.rs",
+      "src/config.rs",
+      "src/eval/baseline.rs",
+      "src/eval/config.rs",
+      "src/eval/mod.rs",
+      "src/eval/report.rs",
+      "src/eval/runner.rs",
+      "src/eval/scaffold.rs",
+      "src/evolve/analysis.rs",
+      "src/evolve/cli.rs",
+      "src/evolve/critic.rs",
+      "src/evolve/digester.rs",
+      "src/evolve/edits.rs",
+      "src/evolve/ingest.rs",
+      "src/evolve/instincts.rs",
+      "src/evolve/metrics.rs",
+      "src/evolve/mod.rs",
+      "src/evolve/planner.rs",
+      "src/evolve/seesaw.rs",
+      "src/evolve/skills.rs",
+      "src/evolve/snapshot.rs",
+      "src/evolve/synthesis.rs",
+      "src/evolve/variants.rs",
+      "src/harness_cli.rs",
+      "src/hooks/common.rs",
+      "src/hooks/guard.rs",
+      "src/hooks/mod.rs",
+      "src/hooks/observe.rs",
+      "src/hooks/polish.rs",
+      "src/hooks/processor.rs",
+      "src/hooks/reflect.rs",
+      "src/hooks/resume.rs",
+      "src/hooks/retention.rs",
+      "src/hooks/snapshot.rs",
+      "src/lib.rs",
+      "src/main.rs",
+      "src/mem/axum_server.rs",
+      "src/mem/cli.rs",
+      "src/mem/graph.rs",
+      "src/mem/mcp.rs",
+      "src/mem/mod.rs",
+      "src/mem/store/conn.rs",
+      "src/mem/store/decay.rs",
+      "src/mem/store/dedup.rs",
+      "src/mem/store/edge.rs",
+      "src/mem/store/index.rs",
+      "src/mem/store/mod.rs",
+      "src/mem/store/node.rs",
+      "src/mem/store/recall.rs",
+      "src/mem/store/schema.rs",
+      "src/mem/store/search.rs",
+      "src/mem/store/tests.rs",
+      "src/mem/store/types.rs",
+      "src/mem/store/util.rs",
+      "src/orbit_cli.rs",
+      "src/orchestrate/mod.rs",
+      "src/orchestrate/state.rs",
+      "src/runtime_bundle/filesystem.rs",
+      "src/runtime_bundle/mod.rs",
+      "src/runtime_bundle/outer_manifest.rs",
+      "src/serve.rs",
+      "src/shared/classify.rs",
+      "src/shared/evolution.rs",
+      "src/shared/helpers.rs",
+      "src/shared/host.rs",
+      "src/shared/mod.rs",
+      "src/shared/obs.rs",
+      "src/shared/orbit.rs",
+      "src/shared/paths.rs",
+      "src/shared/sanitize.rs",
+      "src/shared/scoring.rs",
+      "src/shared/types.rs",
+      "src/store/evolution.rs",
+      "src/store/evolved.rs",
+      "src/store/global.rs",
+      "src/store/merge_project.rs",
+      "src/store/metrics.rs",
+      "src/store/migrate.rs",
+      "src/store/mod.rs",
+      "src/store/observations.rs",
+      "src/store/orbit_store.rs",
+      "src/store/orchestrator.rs",
+      "src/store/pool.rs",
+      "src/store/runtime.rs",
+      "src/store/schema.rs",
+      "src/store/sessions.rs",
+      "src/store/tests.rs",
+      "src/team/cli.rs",
+      "src/team/codex.rs",
+      "src/team/mod.rs",
+      "src/team/store.rs",
+      "src/telemetry.rs",
+      "src/update.rs"
+    ],
+    "artifact_paths": [
+      ".claude-plugin/plugin.json",
+      ".codex-plugin/hooks.json",
+      ".codex-plugin/plugin.json",
+      "hooks/hooks.json",
+      "mcp_config.json",
+      "package.json",
+      "registry/presets/go/evo-go-care.md",
+      "registry/presets/java/evo-java-care.md",
+      "registry/presets/kotlin/evo-kt-care.md",
+      "registry/presets/node/evo-fix-build-fail.md",
+      "registry/presets/node/evo-ts-care.md",
+      "registry/presets/php/evo-php-care.md",
+      "registry/presets/python/evo-py-care.md",
+      "registry/presets/ruby/evo-rb-care.md",
+      "registry/presets/rust/evo-rs-care.md",
+      "registry/scripts/install.js",
+      "registry/scripts/run-hook.cmd",
+      "runtime-revision.txt",
+      "skills/_critic/SKILL.md",
+      "skills/_dispatch/SKILL.md",
+      "skills/agent-introspection/SKILL.md",
+      "skills/audit/SKILL.md",
+      "skills/commit/SKILL.md",
+      "skills/context/SKILL.md",
+      "skills/council/SKILL.md",
+      "skills/debug/SKILL.md",
+      "skills/discover/SKILL.md",
+      "skills/document/SKILL.md",
+      "skills/eval/SKILL.md",
+      "skills/evolve/SKILL.md",
+      "skills/go/SKILL.md",
+      "skills/orbit/SKILL.md",
+      "skills/orchestrate/SKILL.md",
+      "skills/perf/SKILL.md",
+      "skills/reflect/SKILL.md",
+      "skills/secure/SKILL.md",
+      "skills/ship/SKILL.md",
+      "skills/simplify/SKILL.md",
+      "skills/spec/SKILL.md",
+      "skills/tdd/SKILL.md",
+      "skills/team/SKILL.md",
+      "skills/threat-model/SKILL.md",
+      "skills/triage/SKILL.md",
+      "skills/verify/SKILL.md",
+      "skills/vuln-scan/SKILL.md"
+    ]
+  }
+}
