@@ -34,7 +34,7 @@ A plugin for Claude Code and Codex that **consolidates 30+ commands into 3 comma
 
 ### Web Dashboard — auto-launches on session start
 
-10-screen real-time metrics for eval scores, tool stats, orbit pipelines, evolved skills, and hook health. Opens automatically when a Claude Code or Codex session starts or resumes — no manual setup needed. The **Eval & Evolve** screen surfaces the HarnessX evolution-engine state: reward-hacking warnings, seesaw solved-task registry, variant pool, and the adaptation landscape (persistent failures + untried edit types).
+10-screen real-time metrics for eval scores, tool stats, orbit pipelines, evolved skills, and hook health. Opens automatically when a Claude Code or Codex session starts or resumes — no manual setup needed. Session context does not wait for dashboard startup or browser launch; a detached worker owns that work. A startup failure is reported once on a later session start. The **Eval & Evolve** screen surfaces the HarnessX evolution-engine state: reward-hacking warnings, seesaw solved-task registry, variant pool, and the adaptation landscape (persistent failures + untried edit types).
 
 <p align="center">
   <img src="./assets/dashboard.png" alt="Dashboard" width="49%" />
@@ -106,7 +106,9 @@ node --version  # must report v22.x or later
 /plugin install epic@epicsagas
 ```
 
-Auto-installs the binary, skills, hooks, and the `harness-mem` MCP server in one step.
+Registers the skills, hooks, and `harness-mem` MCP server. Install the matching
+`epic-harness` release on `PATH` before starting the host; normal hooks do not
+install or repair the executable.
 
 ### Codex CLI
 
@@ -114,10 +116,24 @@ Auto-installs the binary, skills, hooks, and the `harness-mem` MCP server in one
 codex plugin marketplace add epicsagas/plugins
 ```
 
-Skills and agents are available immediately. On the first session, the plugin
-installs the exact matching `epic-harness` binary and verifies its version
-before it runs `resume`. An install or compatibility failure stops the hook and
-reports the required version.
+Install the release's matching `epic-harness` executable and make sure it is on
+`PATH` before starting Codex. Normal hooks are verification-only: before a hook
+subcommand runs, the Node runner checks the executable, plugin bundle, runtime
+revision, and build identity. It does not install, update, download, or repair
+the runtime during session startup.
+
+Use the supported Codex diagnostics when startup reports a mismatch:
+
+```bash
+epic-harness codex doctor          # read-only human report
+epic-harness codex doctor --json   # read-only machine report
+epic-harness codex doctor --repair # explicit, journaled cache repair
+```
+
+Diagnosis identifies the selected active cache, all nine hook chains, the
+memory MCP command, every matching executable on `PATH`, and the exact
+release/runtime/build identity mismatch. Repair is the only command that
+mutates an Epic-owned Codex cache bundle.
 
 ### Binary-only (no plugin host)
 
@@ -153,7 +169,7 @@ Prerequisites: **Git**. Source/binary installs also need the [Rust toolchain](ht
 ### Verify
 
 ```bash
-epic --version              # Binary installed
+epic-harness version --json # Release, runtime revision, and build identity
 ls ~/.harness/              # Data directory (auto-created on first session)
 ```
 
@@ -450,6 +466,11 @@ Polish feeds back into observe: format failure → `lint_fail`, TypeScript error
 SQLite stores observations by host session. The sanitized host session ID stays
 stable across hook processes, so concurrent sessions remain separate; JSONL is
 compatibility fallback data.
+
+For Codex, a guard denial is valid only when the current policy evaluation
+matches a block rule. The response includes that rule's exact reason. Invalid
+hook input, a missing runtime, malformed output, and runner failures are
+infrastructure errors; they are not converted into policy denials.
 
 ### Hook Profiles
 
@@ -762,14 +783,16 @@ xattr -d com.apple.quarantine ~/.cargo/bin/epic
 <details>
 <summary>epic: binary not found inside plugin hooks</summary>
 
-The SessionStart bootstrap installs the plugin's base binary version and exact
-runtime revision, then verifies both before any hook subcommand runs. A Codex
-`+codex.<cachebuster>` suffix identifies the plugin cache only and is not part
-of the binary version. This
-prevents an unreleased plugin fix from reusing an older binary with the same
-semantic version. If it reports a failure, install the required revision shown
-in the error and make sure `epic-harness` is on `PATH`. The plugin does not use
-a bundled `hooks/bin` fallback.
+Normal hooks never install or repair the runtime. Install the required
+`epic-harness` release, make sure it is on `PATH`, and run
+`epic-harness codex doctor`. The report compares the executing binary with the
+active plugin cache and tells you which release, runtime revision, build
+identity, executable authority, hook chain, or owned artifact is wrong.
+
+If the report recommends cache repair, run `epic-harness codex doctor --repair`
+explicitly, then rerun the read-only doctor. A Codex `+codex.<cachebuster>`
+suffix identifies the plugin cache only; it is not part of the binary release
+version. The plugin does not use a bundled `hooks/bin` fallback.
 </details>
 
 ---
@@ -782,8 +805,12 @@ cargo test                                                    # Tests
 ```
 
 Hooks use the cross-platform Node runner in `registry/scripts/install.js`. It
-resolves one `epic-harness` binary from `PATH`; SessionStart verifies that its
-base version and runtime revision match the plugin before it runs `resume`.
+resolves one `epic-harness` binary from `PATH`. Every hook has bounded input,
+verification, child-process, and teardown time. SessionStart dispatches after
+one complete JSON value instead of waiting for stdin EOF. Before it runs
+`resume`, the runner verifies the release version, runtime revision, and checked
+build identity against the plugin bundle. Hooks and the memory MCP use the same
+executable command.
 
 ---
 

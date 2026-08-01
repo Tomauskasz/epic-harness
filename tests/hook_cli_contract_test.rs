@@ -83,26 +83,6 @@ fn path_ignores_unrelated_piped_stdin() {
     );
 }
 
-#[test]
-fn direct_guard_rejects_malformed_hook_input() {
-    let temp = tempfile::tempdir().expect("temporary test directory");
-    let project = project_path(temp.path());
-    fs::create_dir_all(&project).expect("project directory");
-
-    let output = run_hook(temp.path(), &project, "guard", "unrelated stdin");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"}}"#
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("invalid hook input JSON"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 fn establish_host_session_state(home: &Path, project: &Path, session_id: &str) {
     let harness = harness_path(home, project);
     fs::create_dir_all(&harness).expect("harness directory");
@@ -367,6 +347,39 @@ impl Drop for FakeDashboard {
     }
 }
 
+#[cfg(unix)]
+fn hold_dashboard_startup_lock(path: &Path) -> fs::File {
+    use std::os::fd::AsRawFd;
+
+    fs::create_dir_all(path.parent().expect("dashboard lock parent"))
+        .expect("dashboard lock parent");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .expect("dashboard startup lock");
+    assert_eq!(
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0,
+        "hold dashboard startup lock: {}",
+        std::io::Error::last_os_error()
+    );
+    file
+}
+
+#[cfg(not(unix))]
+fn hold_dashboard_startup_lock(path: &Path) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_secs();
+    fs::create_dir_all(path.parent().expect("dashboard lock parent"))
+        .expect("dashboard lock parent");
+    fs::write(path, format!("{now}:test-owner")).expect("dashboard startup lock");
+}
+
 /// Run one SessionStart against a listener already holding the dashboard port.
 #[cfg(unix)]
 fn session_start_against_listener(port: u16) -> Output {
@@ -396,6 +409,7 @@ fn session_start_against_listener(port: u16) -> Output {
 
 #[cfg(unix)]
 #[test]
+#[serial_test::serial]
 fn a_dashboard_from_a_previous_version_is_reused_not_rejected() {
     // The probe used to demand an exact `CARGO_PKG_VERSION` match, so after an
     // upgrade the new binary called its own dashboard a foreign service. Since
@@ -418,27 +432,263 @@ fn a_dashboard_from_a_previous_version_is_reused_not_rejected() {
 
 #[cfg(unix)]
 #[test]
-fn a_foreign_listener_costs_the_dashboard_but_not_the_context() {
-    // `runHook` in install.js throws away the hook's stdout when the binary
-    // exits non-zero and sends `{}` instead. So a non-zero resume does not just
-    // skip the dashboard — it deletes every evolved skill, memory and
-    // orchestration hint resume had already assembled for the model.
+#[serial_test::serial]
+fn a_foreign_listener_is_reported_by_the_next_session_start() {
+    // Dashboard probe/startup is detached from SessionStart. The current hook
+    // must not wait for this foreign listener; its worker leaves a bounded
+    // diagnostic marker which the next SessionStart surfaces and clears.
     let dashboard = FakeDashboard::foreign();
-    let output = session_start_against_listener(dashboard.port);
+    let root = tempfile::tempdir().expect("temp root");
+    let project = project_path(root.path());
+    fs::create_dir_all(&project).expect("project");
+    let global_harness = root.path().join(".harness");
+    fs::create_dir_all(&global_harness).expect("global harness");
+    let config = global_harness.join("config.toml");
+    fs::write(
+        &config,
+        format!(
+            "[dashboard]\nport = {}\nauto_open = false\n",
+            dashboard.port
+        ),
+    )
+    .expect("test config");
+
+    let first = run_hook(
+        root.path(),
+        &project,
+        "resume",
+        &serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "foreign-dashboard-first-session",
+            "source": "startup",
+        })
+        .to_string(),
+    );
+
+    assert!(
+        first.status.success(),
+        "a foreign listener must not fail the SessionStart hook: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        !session_start_context(&first).contains("non-Epic service"),
+        "the current SessionStart must not wait for the detached dashboard probe"
+    );
+    assert!(
+        session_start_context(&first).contains("Ring 3 evolution loop active"),
+        "the rest of the SessionStart context still reaches the model"
+    );
+
+    let marker = harness_path(root.path(), &project).join("dashboard.error");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !marker.is_file() {
+        assert!(
+            Instant::now() < deadline,
+            "the detached dashboard worker did not persist its diagnostic"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    // Disable the next launch so this session consumes the prior marker without
+    // creating another foreign-listener diagnostic behind the assertion.
+    fs::write(&config, "[dashboard]\nport = 0\nauto_open = false\n")
+        .expect("disable dashboard relaunch");
+    let reported = run_hook(
+        root.path(),
+        &project,
+        "resume",
+        &serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "foreign-dashboard-report-session",
+            "source": "startup",
+        })
+        .to_string(),
+    );
+    let context = session_start_context(&reported);
+    assert!(
+        reported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reported.stderr)
+    );
+    assert!(
+        context.contains("non-Epic service"),
+        "the next SessionStart must surface the detached dashboard diagnostic: {context}"
+    );
+    assert!(
+        !marker.exists(),
+        "a surfaced dashboard diagnostic must be cleared"
+    );
+
+    let cleared = run_hook(
+        root.path(),
+        &project,
+        "resume",
+        &serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "foreign-dashboard-cleared-session",
+            "source": "startup",
+        })
+        .to_string(),
+    );
+    assert!(
+        !session_start_context(&cleared).contains("non-Epic service"),
+        "a dashboard diagnostic must be delivered once"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn session_start_returns_context_before_dashboard_startup_wait_completes() {
+    // A synchronous SessionStart waits five seconds for a dashboard startup
+    // owner. The detached implementation returns context first, while its
+    // worker completes that wait and publishes the exact durable diagnostic.
+    let root = tempfile::tempdir().expect("temp root");
+    let project = project_path(root.path());
+    fs::create_dir_all(&project).expect("project");
+    let harness = harness_path(root.path(), &project);
+    fs::create_dir_all(&harness).expect("harness");
+    let _held_lock = hold_dashboard_startup_lock(&harness.join("dashboard.lock"));
+
+    let port_probe = TcpListener::bind(("127.0.0.1", 0)).expect("allocate dashboard port");
+    let port = port_probe.local_addr().expect("dashboard port").port();
+    drop(port_probe);
+
+    let global_harness = root.path().join(".harness");
+    fs::create_dir_all(&global_harness).expect("global harness");
+    fs::write(
+        global_harness.join("config.toml"),
+        format!("[dashboard]\nport = {port}\nauto_open = false\n"),
+    )
+    .expect("test config");
+
+    let marker = harness.join("dashboard.error");
+    let started = Instant::now();
+    let output = run_hook(
+        root.path(),
+        &project,
+        "resume",
+        &serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "delayed-dashboard-session",
+            "source": "startup",
+        })
+        .to_string(),
+    );
+    let elapsed = started.elapsed();
 
     assert!(
         output.status.success(),
-        "a foreign listener must not fail the SessionStart hook: {}",
+        "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let context = session_start_context(&output);
     assert!(
-        context.contains("non-Epic service"),
-        "the dashboard problem is still reported: {context}"
+        session_start_context(&output).contains("Ring 3 evolution loop active"),
+        "SessionStart must still return its normal context"
     );
     assert!(
-        context.contains("Ring 3 evolution loop active"),
-        "the rest of the SessionStart context still reaches the model: {context}"
+        elapsed < Duration::from_secs(2),
+        "SessionStart waited {elapsed:?} for dashboard startup ownership"
+    );
+    assert!(
+        !marker.exists(),
+        "SessionStart must return before the detached dashboard worker finishes"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !marker.is_file() {
+        assert!(
+            Instant::now() < deadline,
+            "the detached dashboard worker did not finish"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let diagnostic = fs::read_to_string(&marker).expect("dashboard diagnostic");
+    assert!(
+        diagnostic.contains("Dashboard startup owner did not become healthy"),
+        "unexpected dashboard result: {diagnostic}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn dashboard_startup_lock_io_failure_is_reported_by_next_session_start() {
+    let root = tempfile::tempdir().expect("temp root");
+    let project = project_path(root.path());
+    fs::create_dir_all(&project).expect("project");
+    let harness = harness_path(root.path(), &project);
+    fs::create_dir_all(&harness).expect("harness");
+    fs::create_dir(harness.join("dashboard.lock")).expect("lock path directory");
+
+    let port_probe = TcpListener::bind(("127.0.0.1", 0)).expect("allocate dashboard port");
+    let port = port_probe.local_addr().expect("dashboard port").port();
+    drop(port_probe);
+
+    let global_harness = root.path().join(".harness");
+    fs::create_dir_all(&global_harness).expect("global harness");
+    let config = global_harness.join("config.toml");
+    fs::write(
+        &config,
+        format!("[dashboard]\nport = {port}\nauto_open = false\n"),
+    )
+    .expect("test config");
+
+    let marker = harness.join("dashboard.error");
+    let first = run_hook(
+        root.path(),
+        &project,
+        "resume",
+        &serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "dashboard-lock-io-first-session",
+            "source": "startup",
+        })
+        .to_string(),
+    );
+    assert!(
+        first.status.success(),
+        "SessionStart must keep its context when dashboard lock setup fails: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        session_start_context(&first).contains("Ring 3 evolution loop active"),
+        "SessionStart context must be available before the detached worker reports"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !marker.is_file() {
+        assert!(
+            Instant::now() < deadline,
+            "the detached dashboard worker did not persist its lock I/O diagnostic"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    let diagnostic = fs::read_to_string(&marker).expect("dashboard diagnostic");
+    assert!(
+        diagnostic.contains("Dashboard startup lock failed"),
+        "lock I/O failure must remain distinguishable from contention: {diagnostic}"
+    );
+
+    fs::write(&config, "[dashboard]\nport = 0\nauto_open = false\n").expect("disable relaunch");
+    let reported = run_hook(
+        root.path(),
+        &project,
+        "resume",
+        &serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "dashboard-lock-io-report-session",
+            "source": "startup",
+        })
+        .to_string(),
+    );
+    let context = session_start_context(&reported);
+    assert!(reported.status.success());
+    assert!(
+        context.contains("Dashboard startup lock failed"),
+        "the next SessionStart must surface the explicit lock I/O diagnostic: {context}"
+    );
+    assert!(
+        !marker.exists(),
+        "surfaced diagnostics must be consumed once"
     );
 }
 
@@ -532,7 +782,7 @@ fn record_failed_observations(home: &Path, project: &Path, session_id: &str, err
 }
 
 #[test]
-fn invalid_codex_guard_inputs_fail_closed_with_exit_two() {
+fn invalid_codex_guard_inputs_are_infrastructure_failures_not_policy_denials() {
     let root = tempfile::tempdir().expect("temp root");
     let project = project_path(root.path());
     fs::create_dir_all(&project).expect("project");
@@ -555,20 +805,11 @@ fn invalid_codex_guard_inputs_fail_closed_with_exit_two() {
     ] {
         let output = run_hook(root.path(), &project, "guard", input);
 
-        assert_eq!(output.status.code(), Some(2), "{label}");
-        let stdout: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("one deny JSON object");
-        assert_eq!(
-            stdout["hookSpecificOutput"]["permissionDecision"], "deny",
-            "{label}"
-        );
-        assert_eq!(
-            String::from_utf8(output.stdout)
-                .expect("deny output is UTF-8")
-                .lines()
-                .count(),
-            1,
-            "{label}"
+        assert_eq!(output.status.code(), Some(1), "{label}");
+        assert!(
+            output.stdout.is_empty(),
+            "{label} must not emit a policy denial: {}",
+            String::from_utf8_lossy(&output.stdout)
         );
         assert!(
             String::from_utf8_lossy(&output.stderr).contains("invalid hook input"),
@@ -638,6 +879,64 @@ fn guard_continues_safety_evaluation_when_control_state_is_unavailable() {
     assert_eq!(paused.status.code(), Some(2));
     let deny: serde_json::Value = serde_json::from_slice(&paused.stdout).expect("guard deny JSON");
     assert_eq!(deny["hookSpecificOutput"]["permissionDecision"], "deny");
+}
+
+#[test]
+fn guard_denials_report_the_current_matched_policy_reason_without_leakage() {
+    let root = tempfile::tempdir().expect("temp root");
+    let project = project_path(root.path());
+    fs::create_dir_all(&project).expect("project");
+    let session_id = "guard-reasons";
+    establish_host_session_state(root.path(), &project, session_id);
+    let harness = harness_path(root.path(), &project);
+    fs::create_dir_all(&harness).expect("harness");
+    fs::write(
+        harness.join("guard-rules.yaml"),
+        "blocked:\n  - pattern: deploy\\s+production | msg: production deploy requires approval\n",
+    )
+    .expect("custom guard rules");
+
+    let invoke = |command: &str| {
+        run_hook(
+            root.path(),
+            &project,
+            "guard",
+            &serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": session_id,
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+            })
+            .to_string(),
+        )
+    };
+
+    let benign = invoke("cargo metadata --no-deps");
+    assert_eq!(benign.status.code(), Some(0));
+    assert!(benign.stdout.is_empty());
+
+    let configured = invoke("deploy production");
+    assert_eq!(configured.status.code(), Some(2));
+    let configured_json: serde_json::Value =
+        serde_json::from_slice(&configured.stdout).expect("configured deny JSON");
+    assert_eq!(
+        configured_json["hookSpecificOutput"]["permissionDecisionReason"],
+        "production deploy requires approval"
+    );
+
+    let builtin = invoke(concat!("git push --", "force origin main"));
+    assert_eq!(builtin.status.code(), Some(2));
+    let builtin_json: serde_json::Value =
+        serde_json::from_slice(&builtin.stdout).expect("built-in deny JSON");
+    assert_eq!(
+        builtin_json["hookSpecificOutput"]["permissionDecisionReason"],
+        "Force push to main/master blocked"
+    );
+    assert_ne!(
+        builtin_json["hookSpecificOutput"]["permissionDecisionReason"],
+        configured_json["hookSpecificOutput"]["permissionDecisionReason"],
+        "a later invocation must not reuse the prior denial reason"
+    );
 }
 
 #[test]

@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "harness-mem": {
-      "command": "epic",
+      "command": "epic-harness",
       "args": ["mem", "mcp"]
     }
   }

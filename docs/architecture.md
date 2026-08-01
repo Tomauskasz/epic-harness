@@ -11,7 +11,8 @@ While other harnesses expand breadth with 20-37 commands, epic-harness takes a d
 1. **Minimal Surface Area**: 30+ commands compressed to 8. The rest are auto-triggered (Ring 2) or learned from observation (Ring 3).
 2. **Observability**: Every tool call is quantitatively scored on 3 axes. Decisions are data-driven, not gut-driven.
 3. **Safe Evolution**: Evolved skills must survive gating (validation + cap + stagnation rollback). Static skills always take priority.
-4. **Zero Dependencies**: Only Node.js built-in modules. No install burden.
+4. **Bounded Bootstrap**: The Node hook runner uses only built-in modules. Each
+   hook owns finite input, verification, child-process, and teardown deadlines.
 
 ## 4-Ring Model
 
@@ -65,6 +66,48 @@ Ring 3 (Self-Evolve)   observe → analyze → detect patterns → seed skills �
 | Ring 3 → Ring 2 | evolved → dispatch | Evolved skills join auto-skills in the next session |
 | Ring 1 → Ring 2 | /go → tdd, verify | Skills auto-trigger during pipeline execution |
 | Ring 0 → Ring 1 | resume → /go | Session restore provides context for pipelines |
+
+### Codex Hook and Runtime Boundary
+
+Codex has two runtime layers with one checked contract:
+
+```text
+Codex event
+    → registry/scripts/install.js (bounded, verification-only runner)
+    → epic-harness hook subcommand
+    → structured event-specific response
+
+epic-harness executable
+    ↔ embedded owned-artifact projection
+    ↔ registry/scripts/bundle-manifest.json
+    ↔ active Codex plugin cache
+```
+
+`build.rs` computes a framed SHA-256 build identity from Rust/Cargo inputs and
+the semantic projection of every owned runtime artifact. The checked bundle
+manifest binds both plugin manifests, both hook manifests, the MCP config, the
+Node runner, the Windows wrapper, and the runtime revision. Canonical JSON,
+Codex cachebuster stripping, and LF-normalized text prevent packaging-only
+materialization from creating false drift. A real source or owned-artifact
+change invalidates the identity.
+
+Normal hooks do not install, update, download, or repair the bundle. They verify
+the executable and active cache, then either run the event subcommand or report
+the exact mismatch. SessionStart consumes one complete bounded JSON value
+without waiting for EOF. Dashboard startup and browser launch run in a detached
+worker with null standard streams, so context delivery does not wait for them.
+
+`epic-harness codex doctor` is the read-only operational view of this contract.
+It derives the nine hook chains from the manifest and reports the selected
+cache, owned-artifact digests, executable authorities, all matching `PATH`
+entries, and release/runtime/build identity. `--repair` is the only cache
+mutation authority. It stages and validates a complete cache root, preserves
+unowned files, records a durable promotion journal, keeps a backup, verifies
+the promoted root, and rolls back a mismatch.
+
+That repair protocol provides application-level all-old or all-new recovery. It
+does not claim one operating-system atomic transaction across the independently
+installed executable and plugin cache.
 
 ### Ring 1: /orbit — Autonomous Pipeline
 
@@ -216,7 +259,7 @@ Invalid skills are automatically removed with a log message. This prevents malfo
 
 | Layer | Protects Against | Mechanism |
 |-------|-----------------|-----------|
-| guard hook | Dangerous commands (force-push, rm -rf, DROP) | PreToolUse block (exit 2) |
+| guard hook | Dangerous commands (force-push, rm -rf, DROP) | One evaluated policy match returns exit 2 and its exact reason; infrastructure failure is not a denial |
 | Skill cap | Evolved skill overflow | MAX_EVOLVED_SKILLS = 10 |
 | Stagnation rollback | Bad evolution | 3 sessions without improvement → restore best checkpoint |
 | Skill validation | Malformed skills | Frontmatter parsing + required section check |

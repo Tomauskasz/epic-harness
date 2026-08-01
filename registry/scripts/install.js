@@ -1,36 +1,35 @@
 #!/usr/bin/env node
 // Epic Harness plugin bootstrap and cross-platform hook runner.
-// Uses only Node.js built-ins — no npm install needed.
+// Uses only Node.js built-ins; no package setup is needed.
 
 "use strict";
 
 import { spawn } from "node:child_process";
-import {
-  chmodSync,
-  createWriteStream,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-} from "node:fs";
-import { join } from "node:path";
-import https from "node:https";
-import os from "node:os";
-import { pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const REPO = "epicsagas/epic-harness";
 const BINARY = "epic-harness";
-const CARGO_PKG = "epic-harness";
-const INSTALLER_MAX_REDIRECTS = 5;
-const INSTALLER_REQUEST_TIMEOUT_MS = 15_000;
-const INSTALLER_TOTAL_TIMEOUT_MS = 60_000;
-const SESSION_START_CHILD_TIMEOUT_MS = 30_000;
-const SESSION_START_CHILD_TEARDOWN_GRACE_MS = 1_000;
-const SESSION_START_INPUT_TIMEOUT_MS = 5_000;
-const SESSION_START_INPUT_MAX_BYTES = 1_048_576;
-const STRUCTURED_CODEX_EVENTS = new Set([
+const ADAPTER_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+const SESSION_START_RUNNER_TIMEOUT_MS = 30_000;
+// All manifest hooks must own a finite input lifetime. SessionStart retains
+// its legacy overrides because its host may keep stdin open for the response.
+const HOOK_INPUT_TIMEOUT_MS = 5_000;
+const HOOK_INPUT_MAX_BYTES = 1_048_576;
+const HOOK_CHILD_TIMEOUT_MS = 30_000;
+const HOOK_CHILD_TEARDOWN_GRACE_MS = 1_000;
+const HOOK_RUNNER_TIMEOUT_MS = 30_000;
+// Codex gives SessionEnd three seconds. Keep 500 ms for host scheduling and
+// process shutdown after the runner has completed its own work.
+const SESSION_END_RUNNER_TIMEOUT_MS = 2_500;
+const STRUCTURED_OUTPUT_EVENTS = new Set([
   "SessionStart",
   "SubagentStop",
   "PreCompact",
+  "SessionEnd",
+]);
+const REQUIRED_STRUCTURED_OUTPUT_EVENTS = new Set([
+  "SessionStart",
   "SessionEnd",
 ]);
 const HOOK_COMMANDS = new Map([
@@ -56,20 +55,72 @@ function positiveIntegerEnvironment(name, fallback) {
   return Number.isSafeInteger(parsed) ? parsed : fallback;
 }
 
-function sessionStartLimits() {
-  return {
-    childTimeoutMs: positiveIntegerEnvironment(
-      "EPIC_HOOK_SESSIONSTART_CHILD_TIMEOUT_MS",
-      SESSION_START_CHILD_TIMEOUT_MS,
+function hookInputLimits(event) {
+  const generic = {
+    inputMaxBytes: positiveIntegerEnvironment(
+      "EPIC_HOOK_INPUT_MAX_BYTES",
+      HOOK_INPUT_MAX_BYTES,
     ),
+    inputTimeoutMs: positiveIntegerEnvironment(
+      "EPIC_HOOK_INPUT_TIMEOUT_MS",
+      HOOK_INPUT_TIMEOUT_MS,
+    ),
+  };
+  if (event !== "SessionStart") return generic;
+  return {
     inputMaxBytes: positiveIntegerEnvironment(
       "EPIC_HOOK_SESSIONSTART_INPUT_MAX_BYTES",
-      SESSION_START_INPUT_MAX_BYTES,
+      generic.inputMaxBytes,
     ),
     inputTimeoutMs: positiveIntegerEnvironment(
       "EPIC_HOOK_SESSIONSTART_INPUT_TIMEOUT_MS",
-      SESSION_START_INPUT_TIMEOUT_MS,
+      generic.inputTimeoutMs,
     ),
+  };
+}
+
+function hookChildLimits(event) {
+  const generic = {
+    childTimeoutMs: positiveIntegerEnvironment(
+      "EPIC_HOOK_CHILD_TIMEOUT_MS",
+      HOOK_CHILD_TIMEOUT_MS,
+    ),
+    teardownGraceMs: positiveIntegerEnvironment(
+      "EPIC_HOOK_CHILD_TEARDOWN_GRACE_MS",
+      HOOK_CHILD_TEARDOWN_GRACE_MS,
+    ),
+  };
+  if (event !== "SessionStart") return generic;
+  return {
+    ...generic,
+    childTimeoutMs: positiveIntegerEnvironment(
+      "EPIC_HOOK_SESSIONSTART_CHILD_TIMEOUT_MS",
+      generic.childTimeoutMs,
+    ),
+  };
+}
+
+function hookRunnerTimeoutMs(event) {
+  const timeoutMs = positiveIntegerEnvironment(
+    "EPIC_HOOK_RUNNER_TIMEOUT_MS",
+    HOOK_RUNNER_TIMEOUT_MS,
+  );
+  return event === "SessionEnd"
+    ? Math.min(timeoutMs, SESSION_END_RUNNER_TIMEOUT_MS)
+    : timeoutMs;
+}
+
+function sessionStartRunnerTimeoutMs() {
+  return positiveIntegerEnvironment(
+    "EPIC_HOOK_SESSIONSTART_RUNNER_TIMEOUT_MS",
+    SESSION_START_RUNNER_TIMEOUT_MS,
+  );
+}
+
+function sessionStartLimits() {
+  return {
+    ...hookChildLimits("SessionStart"),
+    ...hookInputLimits("SessionStart"),
   };
 }
 
@@ -78,8 +129,26 @@ function runChild(command, args, {
   captureStderr = false,
   input,
   label,
+  teardownGraceMs = HOOK_CHILD_TEARDOWN_GRACE_MS,
+  deadlineAt,
   timeoutMs,
 } = {}) {
+  let effectiveTimeoutMs = timeoutMs;
+  if (deadlineAt !== undefined) {
+    const remainingMs = deadlineAt - Date.now() - teardownGraceMs;
+    if (remainingMs <= 0) {
+      return Promise.resolve({
+        error: new Error(`${label ?? command} runner deadline expired before start`),
+        status: null,
+        stderr: "",
+        stdout: "",
+      });
+    }
+    effectiveTimeoutMs = Math.min(
+      timeoutMs ?? remainingMs,
+      remainingMs,
+    );
+  }
   return new Promise((resolve) => {
     let child;
     let settled = false;
@@ -104,7 +173,7 @@ function runChild(command, args, {
           captureStdout ? "pipe" : "ignore",
           captureStderr ? "pipe" : "inherit",
         ],
-        detached: process.platform !== "win32" && timeoutMs !== undefined,
+        detached: process.platform !== "win32" && effectiveTimeoutMs !== undefined,
         windowsHide: true,
       });
     } catch (error) {
@@ -126,7 +195,7 @@ function runChild(command, args, {
     child.once("close", (status, signal) => {
       if (timedOut) {
         finish({
-          error: new Error(`${label ?? command} timed out after ${timeoutMs} ms`),
+          error: new Error(`${label ?? command} timed out after ${effectiveTimeoutMs} ms`),
           status,
           stderr,
           stdout,
@@ -135,7 +204,7 @@ function runChild(command, args, {
       }
       finish({ signal, status, stderr, stdout });
     });
-    if (timeoutMs !== undefined) {
+    if (effectiveTimeoutMs !== undefined) {
       timer = setTimeout(() => {
         timedOut = true;
         if (process.platform === "win32" && child.pid !== undefined) {
@@ -165,13 +234,13 @@ function runChild(command, args, {
           child.stderr?.destroy();
           child.unref();
           finish({
-            error: new Error(`${label ?? command} timed out after ${timeoutMs} ms`),
+            error: new Error(`${label ?? command} timed out after ${effectiveTimeoutMs} ms`),
             status: null,
             stderr,
             stdout,
           });
-        }, SESSION_START_CHILD_TEARDOWN_GRACE_MS);
-      }, timeoutMs);
+        }, teardownGraceMs);
+      }, effectiveTimeoutMs);
     }
     if (input !== undefined) {
       child.stdin.once("error", (error) => {
@@ -184,17 +253,6 @@ function runChild(command, args, {
   });
 }
 
-async function hasCommand(command, timeoutMs) {
-  const result = await runChild(command, ["version"], {
-    captureStderr: true,
-    label: `${command} version probe`,
-    timeoutMs,
-  });
-  if (result.error?.code === "ENOENT") return false;
-  if (result.error) throw result.error;
-  return result.status === 0;
-}
-
 class HookRunError extends Error {
   constructor(message, exitCode) {
     super(message);
@@ -202,10 +260,21 @@ class HookRunError extends Error {
   }
 }
 
-async function getBinaryRuntime(timeoutMs) {
+function parseVersionContract(output) {
+  const trimmed = output.trim();
+  const match = /^epic-harness\s+(\d+\.\d+\.\d+)\s+runtime-revision\s+([1-9]\d*)\s+build-identity\s+(sha256:[0-9a-f]{64})$/.exec(
+    trimmed,
+  );
+  return match
+    ? { version: match[1], revision: match[2], buildIdentity: match[3] }
+    : null;
+}
+
+async function getBinaryRuntime(timeoutMs, deadlineAt) {
   const result = await runChild(BINARY, ["version"], {
     captureStderr: true,
     captureStdout: true,
+    deadlineAt,
     label: `${BINARY} version probe`,
     timeoutMs,
   });
@@ -213,311 +282,114 @@ async function getBinaryRuntime(timeoutMs) {
   if (result.error) throw result.error;
   if (result.status !== 0) return null;
 
-  const output = [result.stderr, result.stdout]
-    .filter(Boolean)
-    .join("\n");
-  const match = output.match(
-    /(?:^|\r?\n)epic-harness\s+v?(\d+\.\d+\.\d+)\s+runtime-revision\s+([1-9]\d*)(?=\s|$)/,
-  );
-  return match ? { version: match[1], revision: match[2] } : null;
+  return parseVersionContract([result.stdout, result.stderr].filter(Boolean).join("\n"));
+}
+
+function readJsonFile(path, label) {
+  try {
+    const value = JSON.parse(readFileSync(path, "utf8"));
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("must contain a JSON object");
+    }
+    return value;
+  } catch (error) {
+    throw new Error(`cannot read ${label} ${path}: ${error.message}`);
+  }
+}
+
+function getPluginRoot() {
+  const pluginRoot = resolve(ADAPTER_ROOT);
+  for (const name of ["CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT"]) {
+    const locator = process.env[name];
+    if (!locator) continue;
+    if (resolve(locator) !== pluginRoot) {
+      throw new Error(
+        `${name} locates ${resolve(locator)}, but this adapter is installed at ${pluginRoot}`,
+      );
+    }
+  }
+  return pluginRoot;
 }
 
 function getPluginRuntime() {
-  const isClaude = !!process.env.CLAUDE_PLUGIN_ROOT;
-  const pluginRoot =
-    process.env.CLAUDE_PLUGIN_ROOT || process.env.PLUGIN_ROOT || "";
-  if (!pluginRoot) {
-    throw new Error("plugin root is unavailable");
-  }
+  const pluginRoot = getPluginRoot();
 
-  const manifestPath = join(
-    pluginRoot,
-    isClaude ? ".claude-plugin" : ".codex-plugin",
-    "plugin.json",
-  );
-  let manifest;
-  try {
-    manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-  } catch (error) {
-    throw new Error(
-      `cannot read plugin manifest ${manifestPath}: ${error.message}`,
-    );
-  }
-  const versionMatch =
-    /^(\d+\.\d+\.\d+)(?:\+codex\.[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(
-      manifest.version ?? "",
-    );
-  if (!versionMatch) {
-    throw new Error(`plugin manifest has an invalid version: ${manifest.version}`);
-  }
   const revisionPath = join(pluginRoot, "runtime-revision.txt");
   let revision;
   try {
     revision = readFileSync(revisionPath, "utf8").trim();
   } catch (error) {
-    throw new Error(
-      `cannot read runtime revision ${revisionPath}: ${error.message}`,
-    );
+    throw new Error(`cannot read runtime revision ${revisionPath}: ${error.message}`);
   }
   if (!/^[1-9]\d*$/.test(revision)) {
     throw new Error(`runtime revision must be a positive integer: ${revision}`);
   }
-  return { version: versionMatch[1], revision };
-}
 
-function installerUrl(version, extension) {
-  return `https://github.com/${REPO}/releases/download/v${version}/epic-harness-installer.${extension}`;
-}
-
-export function downloadFile(
-  url,
-  destination,
-  {
-    requestTimeoutMs = INSTALLER_REQUEST_TIMEOUT_MS,
-    totalTimeoutMs = INSTALLER_TOTAL_TIMEOUT_MS,
-  } = {},
-) {
-  return new Promise((resolve, reject) => {
-    const file = createWriteStream(destination, {
-      flags: "wx",
-      mode: 0o600,
-    });
-    let settled = false;
-    let activeRequest;
-    let totalTimer;
-    const fail = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(totalTimer);
-      activeRequest?.destroy();
-      file.destroy();
-      reject(error);
-    };
-    totalTimer = setTimeout(() => {
-      fail(
-        new Error(
-          `installer download exceeded ${totalTimeoutMs} ms total timeout`,
-        ),
-      );
-    }, totalTimeoutMs);
-    file.once("error", fail);
-
-    const follow = (currentUrl, redirects = 0) => {
-      let parsedUrl;
-      try {
-        parsedUrl = new URL(currentUrl);
-      } catch (error) {
-        fail(new Error(`invalid installer URL ${currentUrl}: ${error.message}`));
-        return;
-      }
-      if (parsedUrl.protocol !== "https:") {
-        fail(new Error(`installer URL must use HTTPS: ${currentUrl}`));
-        return;
-      }
-      activeRequest = https.get(parsedUrl, (response) => {
-          if ([301, 302, 307, 308].includes(response.statusCode)) {
-            if (!response.headers.location) {
-              fail(new Error(`redirect without a location for ${currentUrl}`));
-              return;
-            }
-            response.resume();
-            if (redirects >= INSTALLER_MAX_REDIRECTS) {
-              fail(
-                new Error(
-                  `installer redirect limit of ${INSTALLER_MAX_REDIRECTS} exceeded`,
-                ),
-              );
-              return;
-            }
-            follow(
-              new URL(response.headers.location, parsedUrl).toString(),
-              redirects + 1,
-            );
-            return;
-          }
-          if (response.statusCode !== 200) {
-            fail(new Error(`HTTP ${response.statusCode} for ${currentUrl}`));
-            response.resume();
-            return;
-          }
-          response.pipe(file);
-          file.once("finish", () => {
-            file.close((error) => {
-              if (error) {
-                fail(error);
-              } else if (!settled) {
-                settled = true;
-                clearTimeout(totalTimer);
-                resolve();
-              }
-            });
-          });
-        })
-        .on("error", fail);
-      activeRequest.setTimeout(requestTimeoutMs, () => {
-        fail(
-          new Error(
-            `installer request timed out after ${requestTimeoutMs} ms for ${currentUrl}`,
-          ),
-        );
-      });
-    };
-    follow(url);
-  });
-}
-
-function sameRuntime(left, right) {
-  return (
-    left?.version === right?.version && left?.revision === right?.revision
-  );
+  const bundlePath = join(pluginRoot, "registry", "scripts", "bundle-manifest.json");
+  const bundle = readJsonFile(bundlePath, "bundle manifest");
+  if (!/^\d+\.\d+\.\d+$/.test(bundle.release_version ?? "")) {
+    throw new Error(`bundle manifest has an invalid release_version: ${bundle.release_version}`);
+  }
+  if (!/^[1-9]\d*$/.test(bundle.runtime_revision ?? "")) {
+    throw new Error(
+      `bundle manifest has an invalid runtime_revision: ${bundle.runtime_revision}`,
+    );
+  }
+  if (!/^sha256:[0-9a-f]{64}$/.test(bundle.build_identity ?? "")) {
+    throw new Error(
+      `bundle manifest has an invalid build_identity: ${bundle.build_identity}`,
+    );
+  }
+  if (bundle.runtime_revision !== revision) {
+    throw new Error(
+      `runtime revision ${revision} does not match bundle revision ${bundle.runtime_revision}`,
+    );
+  }
+  return {
+    pluginRoot,
+    version: bundle.release_version,
+    revision,
+    buildIdentity: bundle.build_identity,
+  };
 }
 
 function runtimeLabel(runtime) {
-  return `${runtime.version} (revision ${runtime.revision})`;
+  return `${runtime.version} runtime-revision ${runtime.revision} build-identity ${runtime.buildIdentity}`;
 }
 
-async function install(requiredRuntime, childTimeoutMs) {
-  const requiredVersion = requiredRuntime.version;
-  const platform = os.platform();
-
-  if (platform === "darwin") {
-    const brewProbe = await runChild("brew", ["--version"], {
-      label: "Homebrew probe",
-      timeoutMs: childTimeoutMs,
-    });
-    if (brewProbe.error) throw brewProbe.error;
-    if (brewProbe.status === 0) {
-      log(`Homebrew detected — installing ${requiredVersion}...`);
-      const result = await runChild(
-        "brew",
-        ["install", "epicsagas/tap/epic-harness"],
-        { label: "Homebrew installer", timeoutMs: childTimeoutMs },
-      );
-      if (result.error) throw result.error;
-      if (
-        result.status === 0 &&
-        sameRuntime(await getBinaryRuntime(childTimeoutMs), requiredRuntime)
-      ) {
-        return;
-      }
-      log("Homebrew did not provide the required version; trying next method...");
-    }
-  }
-
-  const binstallProbe = await runChild("cargo", ["binstall", "--version"], {
-    label: "cargo-binstall probe",
-    timeoutMs: childTimeoutMs,
-  });
-  if (binstallProbe.error) throw binstallProbe.error;
-  if (binstallProbe.status === 0) {
-    log(`cargo-binstall detected — installing ${requiredVersion}...`);
-    const result = await runChild(
-      "cargo",
-      [
-        "binstall",
-        `${CARGO_PKG}@${requiredVersion}`,
-        "--no-confirm",
-        "--force",
-      ],
-      { label: "cargo-binstall installer", timeoutMs: childTimeoutMs },
-    );
-    if (result.error) throw result.error;
-    if (result.status === 0) return;
-    log("cargo-binstall failed; falling back to the release installer...");
-  }
-
-  if (platform === "win32") {
-    const privateDirectory = mkdtempSync(
-      join(os.tmpdir(), "epic-harness-installer-"),
-    );
-    try {
-      const destination = join(privateDirectory, "installer.ps1");
-      log(`Downloading Windows installer for ${requiredVersion}...`);
-      await downloadFile(installerUrl(requiredVersion, "ps1"), destination);
-      const result = await runChild(
-        "powershell",
-        ["-ExecutionPolicy", "Bypass", "-File", destination],
-        { label: "PowerShell installer", timeoutMs: childTimeoutMs },
-      );
-      if (result.error) throw result.error;
-      if (result.status !== 0) throw new Error("PowerShell installer failed");
-      return;
-    } finally {
-      rmSync(privateDirectory, { recursive: true, force: true });
-    }
-  }
-
-  const privateDirectory = mkdtempSync(
-    join(os.tmpdir(), "epic-harness-installer-"),
-  );
-  try {
-    const destination = join(privateDirectory, "installer.sh");
-    log(`Downloading installer for ${requiredVersion}...`);
-    await downloadFile(installerUrl(requiredVersion, "sh"), destination);
-    chmodSync(destination, 0o700);
-    const result = await runChild("sh", [destination], {
-      label: "shell installer",
-      timeoutMs: childTimeoutMs,
-    });
-    if (result.error) throw result.error;
-    if (result.status !== 0) throw new Error("shell installer failed");
-  } finally {
-    rmSync(privateDirectory, { recursive: true, force: true });
-  }
-}
-
-async function ensureCompatibleRuntime(childTimeoutMs) {
-  const requiredRuntime = getPluginRuntime();
-  const present = await hasCommand(BINARY, childTimeoutMs);
-  const currentRuntime = present ? await getBinaryRuntime(childTimeoutMs) : null;
-
-  if (sameRuntime(currentRuntime, requiredRuntime)) return;
-
-  if (!present) {
-    log(`${BINARY} not found — installing ${runtimeLabel(requiredRuntime)}...`);
-  } else if (currentRuntime) {
-    log(
-      `Updating ${BINARY} ${currentRuntime.version} → ${requiredRuntime.version} ` +
-        `(runtime revision ${currentRuntime.revision} → ${requiredRuntime.revision})...`,
-    );
-  } else {
-    log(
-      `${BINARY} has an unreadable version or runtime revision — installing ${runtimeLabel(requiredRuntime)}...`,
-    );
-  }
-
-  await install(requiredRuntime, childTimeoutMs);
-
-  const installedRuntime = await getBinaryRuntime(childTimeoutMs);
-  if (!sameRuntime(installedRuntime, requiredRuntime)) {
-    const actual = installedRuntime
-      ? runtimeLabel(installedRuntime)
-      : "no readable version";
-    throw new Error(
-      `required ${BINARY} ${requiredRuntime.version} is unavailable after installation ` +
-        `(runtime revision ${requiredRuntime.revision}; found ${actual})`,
-    );
-  }
-
-  log(
-    present
-      ? `Updated to ${runtimeLabel(installedRuntime)}`
-      : `Installed ${BINARY} ${runtimeLabel(installedRuntime)}`,
+function verificationFailure(message, runtime) {
+  return new HookRunError(
+    `runtime verification failed: ${message}; check the epic-harness binary and plugin bundle at ${runtime?.pluginRoot ?? ADAPTER_ROOT}`,
+    1,
   );
 }
 
-function runnerProvenance(input) {
-  if (!input.trim()) return input;
-  try {
-    const payload = JSON.parse(input);
-    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
-      return input;
-    }
-    const host = process.env.CLAUDE_PLUGIN_ROOT ? "claude" : "codex";
-    return JSON.stringify({ ...payload, host });
-  } catch {
-    return input;
+async function verifyBinaryRuntime(runtime, timeoutMs, deadlineAt) {
+  const current = await getBinaryRuntime(timeoutMs, deadlineAt);
+  if (!current) {
+    throw verificationFailure(`${BINARY} was not found or emitted an invalid version contract`, runtime);
   }
+  if (
+    current.version !== runtime.version ||
+    current.revision !== runtime.revision ||
+    current.buildIdentity !== runtime.buildIdentity
+  ) {
+    throw verificationFailure(
+      `expected ${runtimeLabel(runtime)}, found ${runtimeLabel(current)}`,
+      runtime,
+    );
+  }
+}
+
+async function verifyRuntime(timeoutMs, deadlineAt) {
+  let runtime;
+  try {
+    runtime = getPluginRuntime();
+  } catch (error) {
+    throw verificationFailure(error.message);
+  }
+  await verifyBinaryRuntime(runtime, timeoutMs, deadlineAt);
+  return runtime;
 }
 
 function validatedGuardDeny(output) {
@@ -539,20 +411,101 @@ function validatedGuardDeny(output) {
     typeof hookSpecificOutput !== "object" ||
     Array.isArray(hookSpecificOutput) ||
     hookSpecificOutput.hookEventName !== "PreToolUse" ||
-    hookSpecificOutput.permissionDecision !== "deny"
+    hookSpecificOutput.permissionDecision !== "deny" ||
+    typeof hookSpecificOutput.permissionDecisionReason !== "string" ||
+    !hookSpecificOutput.permissionDecisionReason.trim()
   ) {
     return null;
   }
   return trimmed;
 }
 
-function readHookInput(event) {
+function completeJsonValueEnd(input) {
+  let index = 0;
+  while (index < input.length && /\s/.test(input[index])) index += 1;
+  if (index === input.length) return null;
+
+  const first = input[index];
+  if (first === "{" || first === "[") {
+    const opening = first;
+    const stack = [opening === "{" ? "}" : "]"];
+    let inString = false;
+    let escaped = false;
+
+    for (index += 1; index < input.length; index += 1) {
+      const character = input[index];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (character === "\\") {
+          escaped = true;
+        } else if (character === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+      if (character === "\"") {
+        inString = true;
+      } else if (character === "{") {
+        stack.push("}");
+      } else if (character === "[") {
+        stack.push("]");
+      } else if (character === "}" || character === "]") {
+        if (stack.pop() !== character) return null;
+        if (stack.length === 0) return index + 1;
+      }
+    }
+    return null;
+  }
+
+  if (first === "\"") {
+    let escaped = false;
+    for (index += 1; index < input.length; index += 1) {
+      const character = input[index];
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === "\"") {
+        return index + 1;
+      }
+    }
+    return null;
+  }
+
+  for (const literal of ["true", "false", "null"]) {
+    if (input.startsWith(literal, index)) return index + literal.length;
+  }
+  const number = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(
+    input.slice(index),
+  );
+  return number ? index + number[0].length : null;
+}
+
+function completeSessionStartInput(input) {
+  const valueEnd = completeJsonValueEnd(input);
+  if (valueEnd === null) return false;
+  try {
+    JSON.parse(input.slice(0, valueEnd));
+  } catch {
+    return false;
+  }
+  if (input.slice(valueEnd).trim()) {
+    throw new Error("SessionStart input has trailing non-whitespace data");
+  }
+  return true;
+}
+
+function readHookInput(event, deadlineAt) {
   return new Promise((resolve, reject) => {
     let input = "";
     let inputBytes = 0;
     let settled = false;
-    const limits = event === "SessionStart" ? sessionStartLimits() : null;
+    const limits = hookInputLimits(event);
+    const remainingMs = Math.max(1, deadlineAt - Date.now());
+    const inputTimeoutMs = Math.min(limits.inputTimeoutMs, remainingMs);
     let timer;
+    let sessionStartCompletionScheduled = false;
     const finish = () => {
       if (!settled) {
         settled = true;
@@ -571,28 +524,52 @@ function readHookInput(event) {
 
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => {
+      if (settled) return;
       inputBytes += Buffer.byteLength(chunk, "utf8");
-      if (limits && inputBytes > limits.inputMaxBytes) {
+      if (inputBytes > limits.inputMaxBytes) {
         fail(
           new Error(
-            `SessionStart input exceeded ${limits.inputMaxBytes} byte limit`,
+            `${event} input exceeded ${limits.inputMaxBytes} byte limit`,
           ),
         );
         return;
       }
       input += chunk;
       if (event === "SessionStart") {
+        // Codex keeps SessionStart stdin open while waiting for this command.
+        // Only this event may dispatch before EOF.
+        let complete;
         try {
-          JSON.parse(input);
-          // Codex keeps SessionStart stdin open while waiting for this command.
-          // Only this event may dispatch before EOF.
+          complete = completeSessionStartInput(input);
+        } catch (error) {
+          fail(error);
+          return;
+        }
+        if (!complete) {
+          // The JSON may be split across chunks; the bounded timer handles an
+          // incomplete held-open payload while EOF retains the legacy path.
+          return;
+        }
+        if (sessionStartCompletionScheduled) return;
+        sessionStartCompletionScheduled = true;
+        // Do not wait for EOF, but give chunks that are already queued behind
+        // the completed JSON one event-loop turn to reach the trailing-data
+        // check before resume can run.
+        setImmediate(() => {
+          sessionStartCompletionScheduled = false;
+          if (settled) return;
+          let completeAfterDrain;
+          try {
+            completeAfterDrain = completeSessionStartInput(input);
+          } catch (error) {
+            fail(error);
+            return;
+          }
+          if (!completeAfterDrain) return;
           process.stdin.pause();
           process.stdin.destroy();
           finish();
-        } catch {
-          // The JSON may be split across chunks; the bounded timer handles an
-          // incomplete held-open payload while EOF retains the legacy path.
-        }
+        });
       }
     });
     process.stdin.once("end", () => {
@@ -607,32 +584,60 @@ function readHookInput(event) {
       finish();
     });
     process.stdin.once("error", fail);
-    if (limits) {
-      timer = setTimeout(() => {
-        fail(
-          new Error(
-            `SessionStart input timed out after ${limits.inputTimeoutMs} ms`,
-          ),
-        );
-      }, limits.inputTimeoutMs);
-    }
+    timer = setTimeout(() => {
+      fail(
+        new Error(
+          `${event} input timed out after ${inputTimeoutMs} ms`,
+        ),
+      );
+    }, inputTimeoutMs);
   });
 }
 
-async function runHook(event, subcommand) {
+async function runHook(event, subcommand, outerDeadlineAt) {
   if (!HOOK_COMMANDS.get(event)?.has(subcommand)) {
     throw new Error(`unsupported hook command: ${event} ${subcommand}`);
   }
 
   const captureStdout =
-    event === "PreToolUse" || STRUCTURED_CODEX_EVENTS.has(event);
-  const input = runnerProvenance(await readHookInput(event));
+    event === "PreToolUse" || STRUCTURED_OUTPUT_EVENTS.has(event);
+  const deadlineAt = Math.min(
+    outerDeadlineAt ?? Infinity,
+    Date.now() + hookRunnerTimeoutMs(event),
+  );
+  const input = await readHookInput(event, deadlineAt);
+  const limits =
+    event === "SessionStart" ? sessionStartLimits() : hookChildLimits(event);
+  const remainingMs = deadlineAt - Date.now();
+  let childTimeoutMs = Math.min(
+    limits.childTimeoutMs,
+    remainingMs - limits.teardownGraceMs,
+  );
+  if (childTimeoutMs <= 0) {
+    throw new HookRunError(
+      `${event} runner deadline expired before starting ${subcommand}`,
+      1,
+    );
+  }
+  await verifyRuntime(childTimeoutMs, deadlineAt);
+  const hookRemainingMs = deadlineAt - Date.now();
+  childTimeoutMs = Math.min(
+    limits.childTimeoutMs,
+    hookRemainingMs - limits.teardownGraceMs,
+  );
+  if (childTimeoutMs <= 0) {
+    throw new HookRunError(
+      `${event} runner deadline expired before starting ${subcommand}`,
+      1,
+    );
+  }
   const result = await runChild(BINARY, [subcommand], {
     captureStdout,
+    deadlineAt,
     input,
     label: `${BINARY} ${subcommand}`,
-    timeoutMs:
-      event === "SessionStart" ? sessionStartLimits().childTimeoutMs : undefined,
+    teardownGraceMs: limits.teardownGraceMs,
+    timeoutMs: childTimeoutMs,
   });
 
   if (result.error?.code === "ENOENT") {
@@ -675,12 +680,18 @@ async function runHook(event, subcommand) {
     );
   }
 
-  if (STRUCTURED_CODEX_EVENTS.has(event)) {
+  if (STRUCTURED_OUTPUT_EVENTS.has(event)) {
     let output = result.stdout.trim();
     if (!output && event === "SubagentStop") {
       output = "{}";
     }
     if (!output) {
+      if (REQUIRED_STRUCTURED_OUTPUT_EVENTS.has(event)) {
+        throw new HookRunError(
+          `${BINARY} ${subcommand} emitted no required structured output for ${event}`,
+          1,
+        );
+      }
       return;
     }
 
@@ -706,7 +717,7 @@ function failureOutputForInvocation() {
   if (mode !== "hook") {
     return null;
   }
-  if (STRUCTURED_CODEX_EVENTS.has(event)) {
+  if (STRUCTURED_OUTPUT_EVENTS.has(event)) {
     return "{}";
   }
   return null;
@@ -715,16 +726,14 @@ function failureOutputForInvocation() {
 async function main() {
   const [mode, event, subcommand, ...extra] = process.argv.slice(2);
 
-  if (mode === undefined) {
-    await ensureCompatibleRuntime();
-    return;
-  }
   if (mode !== "hook" || !event || !subcommand || extra.length > 0) {
-    throw new Error("usage: install.js [hook <event> <subcommand>]");
+    throw new Error("usage: install.js hook <event> <subcommand>");
   }
 
   if (event === "SessionStart") {
-    await ensureCompatibleRuntime(sessionStartLimits().childTimeoutMs);
+    const deadlineAt = Date.now() + sessionStartRunnerTimeoutMs();
+    await runHook(event, subcommand, deadlineAt);
+    return;
   }
   await runHook(event, subcommand);
 }

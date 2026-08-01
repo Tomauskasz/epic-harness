@@ -1,11 +1,36 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import os from "node:os";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const BUNDLE_MANIFEST_PATH = join(
+  ROOT,
+  "registry",
+  "scripts",
+  "bundle-manifest.json",
+);
+const BUNDLE_GENERATOR_PATH = join(
+  ROOT,
+  "registry",
+  "scripts",
+  "generate-bundle-manifest.js",
+);
 const CODEX_PATH = join(ROOT, ".codex-plugin", "hooks.json");
 const CLAUDE_PATH = join(ROOT, "hooks", "hooks.json");
 const CODEX = JSON.parse(readFileSync(CODEX_PATH, "utf8"));
@@ -48,6 +73,137 @@ function handlers(manifest) {
       group.hooks.map((handler) => ({ event, group, handler })),
     ),
   );
+}
+
+function runBundleGenerator(root, ...args) {
+  return spawnSync(process.execPath, [
+    BUNDLE_GENERATOR_PATH,
+    "--root",
+    root,
+    ...args,
+  ], {
+    cwd: ROOT,
+    encoding: "utf8",
+  });
+}
+
+function relativePath(root, path) {
+  return relative(root, path).replaceAll("\\", "/");
+}
+
+function regularFiles(root, directory) {
+  const files = [];
+  const visit = (current) => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = join(current, entry.name);
+      const metadata = lstatSync(path);
+      assert.ok(!metadata.isSymbolicLink(), `${relativePath(root, path)} must not be a symlink`);
+      if (metadata.isDirectory()) {
+        visit(path);
+      } else if (metadata.isFile()) {
+        files.push(relativePath(root, path));
+      }
+    }
+  };
+  visit(directory);
+  return files.sort();
+}
+
+function pluginTargetFiles(root, target) {
+  const relativeTarget = target.replace(/^\.\//, "").replace(/\/$/, "");
+  const path = join(root, relativeTarget);
+  assert.ok(existsSync(path), `plugin target ${target} must exist`);
+  return lstatSync(path).isDirectory()
+    ? regularFiles(root, path)
+    : [relativePath(root, path)];
+}
+
+function hookRunnerFiles(root) {
+  const paths = new Set();
+  for (const manifest of [CODEX, CLAUDE]) {
+    for (const { handler } of handlers(manifest)) {
+      for (const command of [handler.command, handler.commandWindows].filter(Boolean)) {
+        for (const match of command.matchAll(/(registry[\\/]scripts[\\/][A-Za-z0-9._-]+)/g)) {
+          paths.add(match[1].replaceAll("\\", "/"));
+        }
+      }
+    }
+  }
+  for (const path of paths) {
+    assert.ok(existsSync(join(root, path)), `hook runner target ${path} must exist`);
+  }
+  return [...paths].sort();
+}
+
+function packageDeclaresPath(packageJson, path) {
+  return packageJson.files.some((entry) => {
+    const declared = entry.replace(/\/$/, "");
+    return path === declared || path.startsWith(`${declared}/`);
+  });
+}
+
+// Derive expected files from package reachability and the two host manifests.
+// This deliberately does not read bundle-spec.json or a producer-side list.
+function independentlyReachableRuntimeFiles(root) {
+  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const files = new Set(["package.json"]);
+  const pluginPaths = [
+    ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+  ];
+  for (const pluginPath of pluginPaths) {
+    files.add(pluginPath);
+    const plugin = JSON.parse(readFileSync(join(root, pluginPath), "utf8"));
+    for (const target of [plugin.skills, plugin.mcpServers, plugin.hooks].filter(Boolean)) {
+      for (const path of pluginTargetFiles(root, target)) files.add(path);
+    }
+  }
+
+  // Claude discovers this manifest at a fixed package path rather than from
+  // plugin.json, so prove that it is packaged and reachable separately.
+  const claudeHooks = "hooks/hooks.json";
+  assert.ok(existsSync(join(root, claudeHooks)), "Claude hook manifest must exist");
+  files.add(claudeHooks);
+  for (const path of hookRunnerFiles(root)) files.add(path);
+
+  const runner = readFileSync(join(root, "registry", "scripts", "install.js"), "utf8");
+  assert.match(runner, /runtime-revision\.txt/);
+  assert.match(runner, /bundle-manifest\.json/);
+  files.add("runtime-revision.txt");
+
+  assert.ok(packageJson.files.includes("registry/presets/"));
+  for (const path of regularFiles(root, join(root, "registry", "presets"))) {
+    files.add(path);
+  }
+
+  for (const path of files) {
+    assert.ok(
+      path === "package.json" || packageDeclaresPath(packageJson, path),
+      `${path} must be reachable from package.json files`,
+    );
+  }
+  return [...files].sort();
+}
+
+function copyFixtureFile(fixture, path) {
+  const target = join(fixture, path);
+  mkdirSync(dirname(target), { recursive: true });
+  copyFileSync(join(ROOT, path), target);
+}
+
+function makeBundleFixture() {
+  const fixture = mkdtempSync(join(os.tmpdir(), "epic-harness-bundle-"));
+  cpSync(join(ROOT, "src"), join(fixture, "src"), { recursive: true });
+  for (const path of [
+    "Cargo.toml",
+    "Cargo.lock",
+    "build.rs",
+    "registry/scripts/bundle-spec.json",
+    ...independentlyReachableRuntimeFiles(ROOT),
+  ]) {
+    copyFixtureFile(fixture, path);
+  }
+  return fixture;
 }
 
 test("matcher groups contain only supported matcher and hooks fields", () => {
@@ -198,6 +354,21 @@ test("manifest component paths resolve inside the plugin root", () => {
   }
 });
 
+test("hooks and the memory MCP use one executable authority", () => {
+  const runner = readFileSync(
+    join(ROOT, "registry", "scripts", "install.js"),
+    "utf8",
+  );
+  const mcp = JSON.parse(readFileSync(join(ROOT, "mcp_config.json"), "utf8"));
+
+  assert.match(runner, /const BINARY = "epic-harness";/);
+  assert.equal(
+    mcp.mcpServers["harness-mem"].command,
+    "epic-harness",
+    "hooks and harness-mem must not resolve different PATH executables",
+  );
+});
+
 test("all package and plugin version owners agree", () => {
   const versions = new Map([
     [
@@ -241,6 +412,352 @@ test("all package and plugin version owners agree", () => {
 test("canonical runtime revision is a positive integer", () => {
   const revision = readFileSync(join(ROOT, "runtime-revision.txt"), "utf8");
   assert.match(revision, /^[1-9]\d*\r?\n$/);
+});
+
+test("one declarative bundle inventory names the complete host runtime closure", () => {
+  const spec = JSON.parse(
+    readFileSync(join(ROOT, "registry", "scripts", "bundle-spec.json"), "utf8"),
+  );
+
+  assert.equal(spec.schema_version, 1);
+  assert.equal(spec.logical.manifest_path, "registry/scripts/bundle-manifest.json");
+  assert.equal(spec.outer.target_executable.selector, "target-executable-v1");
+  assert.ok(
+    spec.logical.artifacts.some((entry) => entry.path === "skills"),
+    "the skill tree must be part of the declared runtime closure",
+  );
+  assert.ok(
+    spec.logical.artifacts.some((entry) => entry.path === "registry/presets"),
+    "the preset tree must be part of the declared runtime closure",
+  );
+  assert.ok(
+    spec.logical.artifacts.some((entry) => entry.path === "hooks/hooks.json"),
+    "the Claude hook manifest must be part of the declared runtime closure",
+  );
+
+  const declaredSelectors = new Set(spec.logical.artifacts.map((entry) => entry.path));
+  for (const path of independentlyReachableRuntimeFiles(ROOT)) {
+    assert.ok(
+      [...declaredSelectors].some(
+        (selector) => path === selector || path.startsWith(`${selector}/`),
+      ),
+      `${path} is reachable from a package or host manifest but absent from bundle-spec.json`,
+    );
+  }
+});
+
+test("checked bundle manifest independently binds each runtime artifact and build input", () => {
+  const check = runBundleGenerator(ROOT, "--check");
+  assert.equal(check.status, 0, check.stderr);
+
+  const manifest = JSON.parse(readFileSync(BUNDLE_MANIFEST_PATH, "utf8"));
+  assert.deepEqual(Object.keys(manifest).sort(), [
+    "artifacts",
+    "build_identity",
+    "identity_inputs",
+    "manifest_kind",
+    "release_version",
+    "runtime_revision",
+    "schema_version",
+  ]);
+  assert.equal(manifest.schema_version, 1);
+  assert.equal(manifest.manifest_kind, "logical-runtime-v1");
+  assert.equal(
+    manifest.release_version,
+    JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version,
+  );
+  assert.equal(
+    manifest.runtime_revision,
+    readFileSync(join(ROOT, "runtime-revision.txt"), "utf8").trim(),
+  );
+  assert.match(manifest.build_identity, /^sha256:[a-f0-9]{64}$/);
+  assert.deepEqual(Object.keys(manifest.identity_inputs).sort(), [
+    "algorithm",
+    "artifact_paths",
+    "inventory_path",
+    "source_paths",
+  ]);
+  assert.equal(
+    manifest.identity_inputs.algorithm,
+    "sha256-framed-logical-source-and-artifact-projection-v3",
+  );
+  assert.equal(manifest.identity_inputs.inventory_path, "registry/scripts/bundle-spec.json");
+
+  const reachable = independentlyReachableRuntimeFiles(ROOT);
+  assert.deepEqual(manifest.artifacts.map((artifact) => artifact.path), reachable);
+  assert.equal(new Set(reachable).size, reachable.length, "closure must not duplicate paths");
+  for (const artifact of manifest.artifacts) {
+    assert.deepEqual(Object.keys(artifact).sort(), [
+      "digest_mode",
+      "path",
+      "sha256",
+      "type",
+    ]);
+    assert.equal(artifact.type, "file");
+    assert.match(artifact.sha256, /^sha256:[a-f0-9]{64}$/);
+  }
+
+  assert.ok(
+    manifest.identity_inputs.source_paths.includes("registry/scripts/bundle-spec.json"),
+    "the inventory must be a build-identity input",
+  );
+  assert.deepEqual(manifest.identity_inputs.artifact_paths, reachable);
+});
+
+test("logical build identity normalizes source line endings but preserves semantic changes", (t) => {
+  const lfFixture = makeBundleFixture();
+  const crlfFixture = makeBundleFixture();
+  t.after(() => {
+    rmSync(lfFixture, { recursive: true, force: true });
+    rmSync(crlfFixture, { recursive: true, force: true });
+  });
+
+  const lfGenerated = runBundleGenerator(lfFixture, "--write");
+  assert.equal(lfGenerated.status, 0, lfGenerated.stderr);
+  const lfManifest = JSON.parse(
+    readFileSync(join(lfFixture, "registry", "scripts", "bundle-manifest.json"), "utf8"),
+  );
+
+  for (const path of lfManifest.identity_inputs.source_paths) {
+    const source = join(crlfFixture, path);
+    const text = readFileSync(source, "utf8").replace(/\r\n?/g, "\n");
+    writeFileSync(source, text.replace(/\n/g, "\r\n"), "utf8");
+  }
+  const loneCrSource = join(crlfFixture, "build.rs");
+  const loneCrText = readFileSync(loneCrSource, "utf8").replace(/\r\n?/g, "\n");
+  writeFileSync(loneCrSource, loneCrText.replace(/\n/g, "\r"), "utf8");
+  const crlfGenerated = runBundleGenerator(crlfFixture, "--write");
+  assert.equal(crlfGenerated.status, 0, crlfGenerated.stderr);
+  const crlfManifest = JSON.parse(
+    readFileSync(join(crlfFixture, "registry", "scripts", "bundle-manifest.json"), "utf8"),
+  );
+  assert.equal(
+    crlfManifest.build_identity,
+    lfManifest.build_identity,
+    "equivalent LF and CRLF source projections must have one build identity",
+  );
+
+  const semanticSource = crlfManifest.identity_inputs.source_paths.find(
+    (path) => path.startsWith("src/") && path.endsWith(".rs"),
+  );
+  assert.ok(semanticSource, "the fixture must contain a Rust source identity input");
+  const semanticPath = join(crlfFixture, semanticSource);
+  const semanticText = readFileSync(semanticPath, "utf8");
+  const semanticEdit = `${semanticText}\r\nconst _IDENTITY_SEMANTIC_EDIT: usize = 1;\r\n`;
+  writeFileSync(semanticPath, semanticEdit, "utf8");
+  const semanticGenerated = runBundleGenerator(crlfFixture, "--write");
+  assert.equal(semanticGenerated.status, 0, semanticGenerated.stderr);
+  const semanticManifest = JSON.parse(
+    readFileSync(join(crlfFixture, "registry", "scripts", "bundle-manifest.json"), "utf8"),
+  );
+  assert.notEqual(
+    semanticManifest.build_identity,
+    lfManifest.build_identity,
+    "a non-EOL source edit must change the build identity",
+  );
+});
+
+test("logical bundle closure rejects drift until it is regenerated", (t) => {
+  const fixture = makeBundleFixture();
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+
+  const absent = runBundleGenerator(fixture, "--check");
+  assert.notEqual(absent.status, 0, "a checked manifest must not be invented");
+  assert.match(absent.stderr, /cannot read logical bundle manifest/);
+
+  const generated = runBundleGenerator(fixture, "--write");
+  assert.equal(generated.status, 0, generated.stderr);
+  const clean = runBundleGenerator(fixture, "--check");
+  assert.equal(clean.status, 0, clean.stderr);
+
+  const codexPlugin = join(fixture, ".codex-plugin", "plugin.json");
+  const cachedPlugin = JSON.parse(readFileSync(codexPlugin, "utf8"));
+  cachedPlugin.version = `${cachedPlugin.version}+codex.cachebuster.1`;
+  writeFileSync(codexPlugin, `\r\n${JSON.stringify(cachedPlugin)}\r\n`);
+  const semanticallyMaterialized = runBundleGenerator(fixture, "--check");
+  assert.equal(
+    semanticallyMaterialized.status,
+    0,
+    semanticallyMaterialized.stderr,
+  );
+
+  const runner = join(fixture, "registry", "scripts", "install.js");
+  const runnerBytes = readFileSync(runner);
+  runnerBytes[0] ^= 1;
+  writeFileSync(runner, runnerBytes);
+  const runnerDrift = runBundleGenerator(fixture, "--check");
+  assert.notEqual(runnerDrift.status, 0, "one runner byte must invalidate the manifest");
+  assert.match(runnerDrift.stderr, /artifact sha256 mismatch: registry\/scripts\/install\.js/);
+
+  assert.equal(runBundleGenerator(fixture, "--write").status, 0);
+  assert.equal(runBundleGenerator(fixture, "--check").status, 0);
+
+  const source = join(fixture, "src", "main.rs");
+  const sourceBytes = readFileSync(source);
+  sourceBytes[0] ^= 1;
+  writeFileSync(source, sourceBytes);
+  const sourceDrift = runBundleGenerator(fixture, "--check");
+  assert.notEqual(sourceDrift.status, 0, "one source byte must invalidate the manifest");
+  assert.match(sourceDrift.stderr, /build_identity mismatch/);
+
+  assert.equal(runBundleGenerator(fixture, "--write").status, 0);
+  const regenerated = runBundleGenerator(fixture, "--check");
+  assert.equal(regenerated.status, 0, regenerated.stderr);
+});
+
+test("logical inventory rejects omitted host closure files and unsafe selectors", (t) => {
+  const omissionPaths = [
+    "hooks/hooks.json",
+    independentlyReachableRuntimeFiles(ROOT).find((path) => path.startsWith("skills/")),
+    independentlyReachableRuntimeFiles(ROOT).find((path) => path.startsWith("registry/presets/")),
+  ];
+  for (const path of omissionPaths) {
+    assert.ok(path, "the fixture must contain each required closure class");
+    const fixture = makeBundleFixture();
+    t.after(() => rmSync(fixture, { recursive: true, force: true }));
+    assert.equal(runBundleGenerator(fixture, "--write").status, 0);
+    rmSync(join(fixture, path));
+    const check = runBundleGenerator(fixture, "--check");
+    assert.notEqual(check.status, 0, `${path} must invalidate the declared closure`);
+    assert.match(check.stderr, /cannot inspect|selected no files|artifact path projection mismatch/);
+  }
+
+  const duplicate = makeBundleFixture();
+  t.after(() => rmSync(duplicate, { recursive: true, force: true }));
+  const duplicateSpec = JSON.parse(
+    readFileSync(join(duplicate, "registry", "scripts", "bundle-spec.json"), "utf8"),
+  );
+  duplicateSpec.logical.artifacts.push({ ...duplicateSpec.logical.artifacts[0] });
+  writeFileSync(
+    join(duplicate, "registry", "scripts", "bundle-spec.json"),
+    JSON.stringify(duplicateSpec),
+  );
+  const duplicateCheck = runBundleGenerator(duplicate, "--check");
+  assert.notEqual(duplicateCheck.status, 0);
+  assert.match(duplicateCheck.stderr, /duplicate logical artifact path/);
+
+  const traversal = makeBundleFixture();
+  t.after(() => rmSync(traversal, { recursive: true, force: true }));
+  const traversalSpec = JSON.parse(
+    readFileSync(join(traversal, "registry", "scripts", "bundle-spec.json"), "utf8"),
+  );
+  traversalSpec.logical.artifacts[0].path = "../runtime-revision.txt";
+  writeFileSync(
+    join(traversal, "registry", "scripts", "bundle-spec.json"),
+    JSON.stringify(traversalSpec),
+  );
+  const traversalCheck = runBundleGenerator(traversal, "--check");
+  assert.notEqual(traversalCheck.status, 0);
+  assert.match(traversalCheck.stderr, /traversal|unsupported path/);
+
+  const unpackaged = makeBundleFixture();
+  t.after(() => rmSync(unpackaged, { recursive: true, force: true }));
+  const unpackagedPackage = JSON.parse(readFileSync(join(unpackaged, "package.json"), "utf8"));
+  unpackagedPackage.files = unpackagedPackage.files.filter(
+    (entry) => entry !== "registry/presets/",
+  );
+  writeFileSync(join(unpackaged, "package.json"), JSON.stringify(unpackagedPackage));
+  const unpackagedCheck = runBundleGenerator(unpackaged, "--check");
+  assert.notEqual(unpackagedCheck.status, 0);
+  assert.match(unpackagedCheck.stderr, /package\.json files does not ship required runtime path/);
+
+  const symlinkStyle = makeBundleFixture();
+  t.after(() => rmSync(symlinkStyle, { recursive: true, force: true }));
+  const symlinkStyleSpec = JSON.parse(
+    readFileSync(join(symlinkStyle, "registry", "scripts", "bundle-spec.json"), "utf8"),
+  );
+  symlinkStyleSpec.logical.artifacts[0].path = "skills\\linked.md";
+  writeFileSync(
+    join(symlinkStyle, "registry", "scripts", "bundle-spec.json"),
+    JSON.stringify(symlinkStyleSpec),
+  );
+  const symlinkStyleCheck = runBundleGenerator(symlinkStyle, "--check");
+  assert.notEqual(symlinkStyleCheck.status, 0);
+  assert.match(symlinkStyleCheck.stderr, /backslash path separator/);
+
+  const actualSymlink = makeBundleFixture();
+  t.after(() => rmSync(actualSymlink, { recursive: true, force: true }));
+  const link = join(actualSymlink, "skills", "symlinked-skill.md");
+  try {
+    symlinkSync(join(actualSymlink, "skills", "tdd", "SKILL.md"), link, "file");
+  } catch (error) {
+    t.diagnostic(`platform cannot create a file symlink: ${error.code}`);
+    return;
+  }
+  const actualSymlinkCheck = runBundleGenerator(actualSymlink, "--check");
+  assert.notEqual(actualSymlinkCheck.status, 0);
+  assert.match(actualSymlinkCheck.stderr, /symbolic-link-style entry/);
+});
+
+test("post-link outer bundle binds executable bytes and every materialized file", (t) => {
+  const fixture = makeBundleFixture();
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  assert.equal(runBundleGenerator(fixture, "--write").status, 0);
+
+  const executable = join(fixture, "bin", "epic-harness");
+  mkdirSync(dirname(executable), { recursive: true });
+  writeFileSync(executable, Buffer.from("first executable bytes"));
+  const outer = join(os.tmpdir(), `epic-harness-outer-${Date.now()}-${Math.random()}.json`);
+  t.after(() => rmSync(outer, { force: true }));
+
+  const outerArgs = [
+    "--outer",
+    "--materialized-root",
+    fixture,
+    "--executable",
+    "bin/epic-harness",
+    "--target",
+    "x86_64-pc-windows-msvc",
+    "--output",
+    outer,
+  ];
+  const missingExecutable = runBundleGenerator(fixture, ...outerArgs.map((argument) =>
+    argument === "bin/epic-harness" ? "bin/missing" : argument,
+  ));
+  assert.notEqual(missingExecutable.status, 0, "an outer bundle requires its executable");
+  assert.match(missingExecutable.stderr, /target executable/);
+
+  const first = runBundleGenerator(fixture, "--write", ...outerArgs);
+  assert.equal(first.status, 0, first.stderr);
+  const firstOuter = JSON.parse(readFileSync(outer, "utf8"));
+  assert.equal(firstOuter.manifest_kind, "post-link-runtime-bundle-v1");
+  assert.equal(firstOuter.selector_protocol, "epic-harness-materialized-runtime-v1");
+  assert.equal(firstOuter.target_triple, "x86_64-pc-windows-msvc");
+  assert.equal(firstOuter.executable.path, "bin/epic-harness");
+  assert.equal(firstOuter.executable.type, "file");
+  assert.match(firstOuter.executable.sha256, /^sha256:[a-f0-9]{64}$/);
+  const expectedOuterFiles = [
+    ...independentlyReachableRuntimeFiles(fixture),
+    "registry/scripts/bundle-manifest.json",
+  ].sort();
+  assert.deepEqual(
+    firstOuter.materialized_files.map((file) => file.path),
+    expectedOuterFiles,
+  );
+  for (const file of firstOuter.materialized_files) {
+    assert.deepEqual(Object.keys(file).sort(), [
+      "digest_mode",
+      "mode",
+      "path",
+      "sha256",
+      "size",
+      "type",
+    ]);
+    assert.equal(file.type, "file");
+    assert.equal(file.digest_mode, "raw-bytes-v1");
+    assert.match(file.mode, /^0[0-7]{3}$/);
+    assert.equal(typeof file.size, "number");
+    assert.match(file.sha256, /^sha256:[a-f0-9]{64}$/);
+  }
+  assert.equal(runBundleGenerator(fixture, "--check", ...outerArgs).status, 0);
+
+  writeFileSync(executable, Buffer.from("second executable bytes"));
+  const stale = runBundleGenerator(fixture, "--check", ...outerArgs);
+  assert.notEqual(stale.status, 0, "changing executable bytes must invalidate the outer bundle");
+  assert.match(stale.stderr, /post-link bundle manifest drift/);
+  assert.equal(runBundleGenerator(fixture, "--write", ...outerArgs).status, 0);
+  const secondOuter = JSON.parse(readFileSync(outer, "utf8"));
+  assert.notEqual(secondOuter.bundle_id, firstOuter.bundle_id);
 });
 
 test("runtime changes after a release require a new package version", (t) => {
@@ -430,6 +947,7 @@ test("npm package includes the hook runners and every plugin manifest target", (
     "hooks/hooks.json",
     "registry/scripts/install.js",
     "registry/scripts/run-hook.cmd",
+    "registry/scripts/bundle-manifest.json",
     "runtime-revision.txt",
   ]) {
     assert.ok(files.has(path), `${path} is missing from the npm artifact`);

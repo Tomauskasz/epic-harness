@@ -819,9 +819,36 @@ fn check_control_json_pause(current_agent: Option<&str>, orch_dir: &Path) -> Res
     ))
 }
 
-pub fn run(input: &HookInput) -> i32 {
+/// Result of one guard policy evaluation.
+///
+/// The denial reason belongs to this value so callers cannot accidentally
+/// reuse a reason from an earlier hook invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardOutcome {
+    pub exit_code: i32,
+    pub permission_decision_reason: Option<String>,
+}
+
+impl GuardOutcome {
+    fn allow() -> Self {
+        Self {
+            exit_code: 0,
+            permission_decision_reason: None,
+        }
+    }
+
+    fn deny(reason: impl Into<String>) -> Self {
+        Self {
+            exit_code: 2,
+            permission_decision_reason: Some(reason.into()),
+        }
+    }
+}
+
+/// Evaluate one hook input and retain the matched policy reason in the result.
+pub fn evaluate(input: &HookInput) -> GuardOutcome {
     if !should_run(PROFILE_GUARD) {
-        return 0;
+        return GuardOutcome::allow();
     }
 
     // ── Orchestration checks (file-writing tools only) ────
@@ -836,14 +863,12 @@ pub fn run(input: &HookInput) -> i32 {
             if let Some(ref orch) = orch_dir {
                 match check_control_json_pause(agent_id.as_deref(), orch) {
                     Ok(true) => {
-                        hint(
-                            "guard",
-                            &format!(
-                                "BLOCKED: control.json pause directive active for agent {}",
-                                agent_id.as_deref().unwrap_or("unknown")
-                            ),
+                        let reason = format!(
+                            "control.json pause directive active for agent {}",
+                            agent_id.as_deref().unwrap_or("unknown")
                         );
-                        return 2;
+                        hint("guard", &format!("BLOCKED: {reason}"));
+                        return GuardOutcome::deny(reason);
                     }
                     Ok(false) => {}
                     Err(error) => {
@@ -887,7 +912,7 @@ pub fn run(input: &HookInput) -> i32 {
         .unwrap_or("");
 
     if cmd.is_empty() {
-        return 0;
+        return GuardOutcome::allow();
     }
 
     // Lazy: construct Telemetry (file I/O) only when a block or warn actually fires.
@@ -899,14 +924,14 @@ pub fn run(input: &HookInput) -> i32 {
     if let Some(msg) = check_blocked(cmd) {
         hint("guard", &format!("BLOCKED: {msg}"));
         get_telemetry().track_hook_blocked(RuleKind::Builtin);
-        return 2;
+        return GuardOutcome::deny(msg);
     }
 
     // Check conventional commit format
     if let Some(msg) = check_conventional_commit(cmd) {
         hint("guard", &format!("BLOCKED: {msg}"));
         get_telemetry().track_hook_blocked(RuleKind::ConventionalCommit);
-        return 2;
+        return GuardOutcome::deny(msg);
     }
 
     // Check custom blocked rules
@@ -916,19 +941,17 @@ pub fn run(input: &HookInput) -> i32 {
         && let Ok(content) = std::fs::read_to_string(&rules_file)
     {
         if let Err(problem) = validate_guard_rule_patterns(&content) {
-            hint(
-                "guard",
-                &format!("BLOCKED: invalid configured guard rule: {problem}"),
-            );
+            let reason = format!("invalid configured guard rule: {problem}");
+            hint("guard", &format!("BLOCKED: {reason}"));
             get_telemetry().track_hook_blocked(RuleKind::Custom);
-            return 2;
+            return GuardOutcome::deny(reason);
         }
         let (custom_blocked, custom_warned) = common::parse_guard_rules(&content);
         for rule in &custom_blocked {
             if rule.pattern.is_match(cmd) {
                 hint("guard", &format!("BLOCKED: {}", rule.msg));
                 get_telemetry().track_hook_blocked(RuleKind::Custom);
-                return 2;
+                return GuardOutcome::deny(rule.msg.clone());
             }
         }
         // Evaluate builtin + custom warned together (same order as TS implementation)
@@ -942,7 +965,7 @@ pub fn run(input: &HookInput) -> i32 {
                 get_telemetry().track_hook_warned(RuleKind::Custom);
             }
         }
-        return 0;
+        return GuardOutcome::allow();
     }
 
     // No custom rules file — just check builtin warned rules
@@ -951,7 +974,12 @@ pub fn run(input: &HookInput) -> i32 {
         get_telemetry().track_hook_warned(RuleKind::Builtin);
     }
 
-    0
+    GuardOutcome::allow()
+}
+
+/// Compatibility adapter for processor users that only consume an exit code.
+pub fn run(input: &HookInput) -> i32 {
+    evaluate(input).exit_code
 }
 
 // ── Guard rule file editor (for HarnessEdit::AddGuardRule) ──────

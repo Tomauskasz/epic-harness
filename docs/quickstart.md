@@ -8,13 +8,15 @@
 - Git
 - Node.js 22 LTS or a newer LTS release for Codex plugin hook bootstrap and
   lifecycle (`node --version` must report `v22.x` or later)
-- [Rust toolchain](https://rustup.rs) (for source/binary install — plugin marketplace doesn't need this)
+- A matching `epic-harness` release on `PATH`. A Rust toolchain is needed only
+  when you build the binary from source.
 
 ## Install
 
-epic-harness supports **Claude Code** and **Codex CLI** plugins. There is no
-`install` step; the plugin self-seeds `~/.harness/config.toml` and
-`HARNESS.md` on the first session.
+epic-harness supports **Claude Code** and **Codex CLI** plugins. Install the
+plugin and its matching `epic-harness` release before you start the host. There
+is no harness setup wizard: the first hook run self-seeds
+`~/.harness/config.toml` and `HARNESS.md`.
 
 ### Claude Code (recommended)
 
@@ -23,13 +25,18 @@ epic-harness supports **Claude Code** and **Codex CLI** plugins. There is no
 /plugin install epic@epicsagas
 ```
 
-The binary is auto-installed and all hooks register in one step.
+The plugin registers its hooks. The release or install step must provide the
+matching `epic-harness` executable on `PATH`; normal hooks do not install or
+repair it.
 
 ### Codex CLI
 
 ```bash
 codex plugin marketplace add epicsagas/plugins
 ```
+
+Codex startup is verification-only. It checks the executable and cached plugin
+bundle before it runs a hook; it does not download or update either one.
 
 ### Binary-only (no plugin host)
 
@@ -51,7 +58,7 @@ Windows:
 irm https://github.com/epicsagas/epic-harness/releases/latest/download/epic-harness-installer.ps1 | iex
 ```
 
-> **Telemetry**: anonymous usage reporting is on by default (opt-out). Disable with `epic-harness telemetry off` — see the README [Telemetry](../../README.md#telemetry) section for what is collected.
+> **Telemetry**: anonymous usage reporting is on by default (opt-out). Disable with `epic-harness telemetry off` — see the README [Telemetry](../README.md#telemetry) section for what is collected.
 
 ## First Session
 
@@ -107,13 +114,15 @@ verification signal.
 
 | Symptom | Fix |
 |---------|-----|
-| Hooks not running | Verify `epic-harness` is in PATH; reinstall the affected Claude Code or Codex plugin using the commands above, then restart that host |
+| Codex hook fails before its subcommand | Run `epic-harness codex doctor`. It is read-only and reports the exact executable, cache artifact, hook chain, or identity mismatch. |
+| Codex doctor recommends cache repair | Run `epic-harness codex doctor --repair`, then rerun `epic-harness codex doctor`. Repair is explicit and journaled. |
+| `epic-harness` not found | Install the matching release, add it to `PATH`, and restart the host. Normal hooks do not install it. |
 | `~/.harness/projects/` not created | Restart the Claude Code or Codex session (the resume hook initializes it) |
 | `/evolve status` empty | Need at least 1 completed session first |
 
 ## Next Steps
 
 - Create `.harness/guard-rules.yaml` in your project root to share safety rules with your team.
-- Read [README.md](README.md) for the full architecture
-- See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup
+- Read [README.md](../README.md) for the full architecture
+- See [CONTRIBUTING.md](../CONTRIBUTING.md) for development setup
 - Report issues: [GitHub Issues](https://github.com/epicsagas/epic-harness/issues)
