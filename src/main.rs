@@ -16,9 +16,9 @@ mod update;
 use std::env;
 use std::io::{self, IsTerminal, Read};
 
+use epic_harness::codex;
+
 const HOOK_STDIN_MAX_BYTES: usize = 1024 * 1024;
-const CODEX_GUARD_DENY: &str =
-    r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"}}"#;
 
 fn read_hook_input(mut reader: impl Read) -> Result<(hooks::common::HookInput, String), String> {
     let mut bytes = Vec::new();
@@ -44,12 +44,15 @@ fn read_hook_input(mut reader: impl Read) -> Result<(hooks::common::HookInput, S
     Ok((input, raw))
 }
 
-fn invalid_hook_input_exit_code(subcmd: &str) -> i32 {
-    if subcmd == "guard" { 2 } else { 1 }
-}
-
-fn invalid_hook_input_response(subcmd: &str) -> Option<&'static str> {
-    (subcmd == "guard").then_some(CODEX_GUARD_DENY)
+fn codex_guard_deny(reason: &str) -> String {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    })
+    .to_string()
 }
 
 fn is_hook_subcommand(subcmd: &str) -> bool {
@@ -142,10 +145,20 @@ fn validate_established_session_identity(subcmd: &str) -> Result<(), String> {
 
 fn version_line() -> String {
     format!(
-        "epic-harness {} runtime-revision {}",
+        "epic-harness {} runtime-revision {} build-identity {}",
         env!("CARGO_PKG_VERSION"),
-        env!("EPIC_HARNESS_RUNTIME_REVISION")
+        env!("EPIC_HARNESS_RUNTIME_REVISION"),
+        env!("EPIC_HARNESS_BUILD_IDENTITY")
     )
+}
+
+fn version_json() -> String {
+    serde_json::json!({
+        "release_version": env!("CARGO_PKG_VERSION"),
+        "runtime_revision": env!("EPIC_HARNESS_RUNTIME_REVISION"),
+        "build_identity": env!("EPIC_HARNESS_BUILD_IDENTITY"),
+    })
+    .to_string()
 }
 
 /// Parse `--flag <value>` or `--flag=<value>` → Option<u32>
@@ -196,12 +209,113 @@ fn parse_flag_multi(args: &[String], flag: &str) -> Vec<String> {
     results
 }
 
+fn run_codex_cli(args: &[String]) -> i32 {
+    if args
+        .first()
+        .is_some_and(|argument| matches!(argument.as_str(), "help" | "--help" | "-h"))
+    {
+        eprintln!("USAGE:");
+        eprintln!(
+            "  epic-harness codex doctor [--json] [--repair] [--plugin-root <absolute-path>]"
+        );
+        return 0;
+    }
+    if args.first().map(String::as_str) != Some("doctor") {
+        eprintln!("error: expected `epic-harness codex doctor`");
+        return 1;
+    }
+
+    let mut json = false;
+    let mut repair = false;
+    let mut plugin_root = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" if !json => json = true,
+            "--repair" if !repair => repair = true,
+            "--plugin-root" if plugin_root.is_none() => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("error: --plugin-root requires an absolute path");
+                    return 1;
+                };
+                plugin_root = Some(std::path::PathBuf::from(value));
+                index += 1;
+            }
+            "--help" | "-h" => {
+                eprintln!("USAGE:");
+                eprintln!(
+                    "  epic-harness codex doctor [--json] [--repair] [--plugin-root <absolute-path>]"
+                );
+                return 0;
+            }
+            argument => {
+                eprintln!("error: unsupported codex doctor argument `{argument}`");
+                return 1;
+            }
+        }
+        index += 1;
+    }
+
+    let options = codex::DiagnoseOptions { plugin_root };
+    if repair {
+        match codex::repair(&options) {
+            Ok(report) => {
+                if json {
+                    match serde_json::to_string_pretty(&report) {
+                        Ok(output) => println!("{output}"),
+                        Err(error) => {
+                            eprintln!(
+                                "codex doctor could not serialize its repair report: {error}"
+                            );
+                            return 1;
+                        }
+                    }
+                } else {
+                    println!(
+                        "Codex bundle repair: {}",
+                        if report.repaired {
+                            "completed"
+                        } else {
+                            "not required"
+                        }
+                    );
+                    println!("{}", report.diagnosis_after.render_human());
+                    println!("{}", report.atomicity_note);
+                }
+                if report.diagnosis_after.healthy { 0 } else { 1 }
+            }
+            Err(error) => {
+                eprintln!("codex doctor repair failed: {error}");
+                1
+            }
+        }
+    } else {
+        let report = codex::diagnose(&options);
+        if json {
+            match serde_json::to_string_pretty(&report) {
+                Ok(output) => println!("{output}"),
+                Err(error) => {
+                    eprintln!("codex doctor could not serialize its report: {error}");
+                    return 1;
+                }
+            }
+        } else {
+            println!("{}", report.render_human());
+        }
+        if report.healthy { 0 } else { 1 }
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let subcmd = args.get(1).map(|s| s.as_str()).unwrap_or("help");
 
     if subcmd == "--version" || subcmd == "-v" {
         eprintln!("{}", version_line());
+        std::process::exit(0);
+    }
+    if subcmd == "version" && args.get(2).is_some_and(|argument| argument == "--json") {
+        println!("{}", version_json());
         std::process::exit(0);
     }
 
@@ -213,6 +327,9 @@ fn main() {
     if subcmd == "update" {
         let code = update::run(&args[2..]);
         std::process::exit(code);
+    }
+    if subcmd == "codex" {
+        std::process::exit(run_codex_cli(&args[2..]));
     }
 
     // All other subcommands: auto-enable telemetry on first run (opt-out model).
@@ -308,19 +425,13 @@ fn main() {
             Ok((input, raw)) => {
                 if let Err(error) = validate_hook_input_for_subcommand(subcmd, &input, &raw) {
                     eprintln!("[{subcmd}] invalid hook input: {error}");
-                    if let Some(response) = invalid_hook_input_response(subcmd) {
-                        println!("{response}");
-                    }
-                    exit_with_cleanup(invalid_hook_input_exit_code(subcmd), true);
+                    exit_with_cleanup(1, true);
                 }
                 (input, raw)
             }
             Err(error) => {
                 eprintln!("[{subcmd}] {error}");
-                if let Some(response) = invalid_hook_input_response(subcmd) {
-                    println!("{response}");
-                }
-                exit_with_cleanup(invalid_hook_input_exit_code(subcmd), true);
+                exit_with_cleanup(1, true);
             }
         }
     } else {
@@ -335,14 +446,13 @@ fn main() {
 
     let identity_gap = validate_established_session_identity(subcmd).err();
 
-    let exit_code = match identity_gap {
+    let mut guard_outcome = None;
+    let mut exit_code = match identity_gap {
         // `guard` is the one hook whose exit code decides whether the user's
         // tool call runs at all. A gap in the harness's own session bookkeeping
-        // is not a safety condition, and `invalid_hook_input_exit_code("guard")`
-        // is a *deny* — so this path blocked every Bash, Edit and Write until
-        // the next SessionStart. Upgrading the plugin mid-session reproduces it
-        // on a live install: no record exists for the running session, and the
-        // harness locks the user out of their own shell.
+        // is not a safety condition. Upgrading the plugin mid-session can leave
+        // no record for the running session, but that bookkeeping gap must not
+        // become a policy denial.
         //
         // Report the gap and run the safety rules anyway. `session_id()` falls
         // back to today's date, so the only cost is a session that spans
@@ -350,15 +460,23 @@ fn main() {
         // than refusing to let anyone work.
         Some(error) if subcmd == "guard" => {
             eprintln!("[guard] {error}; continuing with today's date");
-            hooks::guard::run(&input)
+            let outcome = hooks::guard::evaluate(&input);
+            let exit_code = outcome.exit_code;
+            guard_outcome = Some(outcome);
+            exit_code
         }
         Some(error) => {
             eprintln!("[{subcmd}] {error}");
-            invalid_hook_input_exit_code(subcmd)
+            1
         }
         None => match subcmd {
             "resume" => hooks::resume::run(&input),
-            "guard" => hooks::guard::run(&input),
+            "guard" => {
+                let outcome = hooks::guard::evaluate(&input);
+                let exit_code = outcome.exit_code;
+                guard_outcome = Some(outcome);
+                exit_code
+            }
             "polish" => hooks::polish::run(&input),
             "observe" => hooks::observe::run(&input),
             "snapshot" => hooks::snapshot::run(&input),
@@ -476,10 +594,16 @@ fn main() {
                 eprintln!("  dashboard    Open web dashboard in browser (default port: 7700)");
                 eprintln!("  serve        Start dashboard web server without opening browser");
                 eprintln!("  update       Self-update to the latest release");
+                eprintln!(
+                    "  codex doctor Diagnose the installed Codex bundle; add --repair to repair it"
+                );
                 eprintln!("  telemetry    Manage telemetry consent  (on|off|status)");
                 eprintln!("  path         Print the harness data directory");
                 eprintln!("  slug         Print the current project slug (worktree-safe)");
                 eprintln!("  version      Print version");
+                eprintln!(
+                    "    --json             Print release, runtime, and build identity as JSON"
+                );
                 eprintln!("  --version, -v  Print version\n");
                 eprintln!("Run 'epic-harness mem help' for memory subcommand details.");
                 if is_unknown { 1 } else { 0 }
@@ -494,8 +618,17 @@ fn main() {
     if input.hook_event_name.is_some() {
         match subcmd {
             "guard" if exit_code == 2 => {
-                // PreToolUse block: explicit deny JSON so Codex never ignores the block
-                println!("{CODEX_GUARD_DENY}");
+                if let Some(reason) = guard_outcome
+                    .as_ref()
+                    .and_then(|outcome| outcome.permission_decision_reason.as_deref())
+                {
+                    // The reason may come from project configuration. Serialize
+                    // it as data so it cannot alter the response structure.
+                    println!("{}", codex_guard_deny(reason));
+                } else {
+                    eprintln!("[guard] policy denial did not include a reason");
+                    exit_code = 1;
+                }
             }
             "observe"
                 if exit_code != 0 && input.hook_event_name.as_deref() == Some("SubagentStop") =>
@@ -546,9 +679,8 @@ fn exit_with_cleanup(code: i32, skip_shutdown: bool) -> ! {
 #[cfg(test)]
 mod tests {
     use super::{
-        HOOK_STDIN_MAX_BYTES, invalid_hook_input_exit_code, invalid_hook_input_response,
-        parse_flag_multi, parse_flag_str, parse_flag_u32, read_hook_input,
-        validate_hook_input_for_subcommand,
+        HOOK_STDIN_MAX_BYTES, codex_guard_deny, parse_flag_multi, parse_flag_str, parse_flag_u32,
+        read_hook_input, validate_hook_input_for_subcommand, version_json,
     };
 
     fn s(v: &[&str]) -> Vec<String> {
@@ -650,14 +782,32 @@ mod tests {
     }
 
     #[test]
-    fn malformed_guard_input_fails_closed() {
+    fn malformed_hook_input_is_rejected() {
         let malformed = br#"{"turn_id":42,"tool_input":{"command":"rm -rf /"}}"#;
         assert!(read_hook_input(&malformed[..]).is_err());
-        assert_eq!(invalid_hook_input_exit_code("guard"), 2);
-        assert!(
-            invalid_hook_input_response("guard")
-                .unwrap()
-                .contains("\"deny\"")
+    }
+
+    #[test]
+    fn guard_denial_reason_is_serialized_as_data() {
+        let response = codex_guard_deny("quote: \" and newline:\nnot JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            parsed["hookSpecificOutput"]["permissionDecisionReason"],
+            "quote: \" and newline:\nnot JSON"
+        );
+    }
+
+    #[test]
+    fn structured_version_contains_the_complete_bundle_identity() {
+        let parsed: serde_json::Value = serde_json::from_str(&version_json()).unwrap();
+        assert_eq!(parsed["release_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            parsed["runtime_revision"],
+            env!("EPIC_HARNESS_RUNTIME_REVISION")
+        );
+        assert_eq!(
+            parsed["build_identity"],
+            env!("EPIC_HARNESS_BUILD_IDENTITY")
         );
     }
 

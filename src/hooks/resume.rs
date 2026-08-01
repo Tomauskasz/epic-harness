@@ -507,6 +507,9 @@ fn initialize_project(harness_was_missing: bool) {
 }
 
 pub fn run(input: &HookInput) -> i32 {
+    if dashboard_worker_requested() {
+        return run_dashboard_worker();
+    }
     if !should_run(PROFILE_RESUME) {
         return 0;
     }
@@ -891,16 +894,18 @@ pub fn run(input: &HookInput) -> i32 {
     // 9a. Clean up stale auto-tracked agent runs (complete > 1h, running > 2h)
     crate::orchestrate::state::auto_cleanup_stale_runs(&harness_dir());
 
-    // 10. Keep one dashboard server and one browser window.
+    // 10. Surface the previous detached dashboard result, then start the next
+    // optional dashboard workflow without putting its port probe, startup lock,
+    // server readiness, or browser lifetime on the SessionStart critical path.
     //
-    // Report a dashboard problem, never fail on one. `runHook` in install.js
-    // discards the hook's stdout when the binary exits non-zero and sends `{}`
-    // instead, so a `return 1` here threw away everything resume had already
-    // built: the evolved-skill bodies, knowledge-graph recall, the previous
-    // session summary, orchestration state and cross-project hints. The
-    // dashboard is optional; the context injection is the product, and the
-    // optional part must not be able to veto it.
-    if let Err(error) = spawn_dashboard_once(plan.open_dashboard) {
+    // The dashboard is optional; the context injection is the product. A
+    // bounded worker records failures in project state. The next SessionStart
+    // displays and consumes that diagnostic, so no dashboard failure can turn
+    // this SessionStart's structured context into `{}`.
+    if let Some(error) = take_dashboard_diagnostic() {
+        hint("resume", &restored_context("Dashboard unavailable", &error));
+    }
+    if let Err(error) = spawn_dashboard_worker(plan.open_dashboard) {
         hint("resume", &error);
     }
 
@@ -911,6 +916,193 @@ pub fn run(input: &HookInput) -> i32 {
 }
 
 // ── Dashboard Auto-Launch ──────────────────────────────
+
+/// Internal marker for a short-lived child that owns the complete optional
+/// dashboard workflow. It is deliberately an environment variable rather than
+/// a public CLI command: the existing `resume` command already has the host
+/// initialization and project-state setup the worker needs.
+const DASHBOARD_WORKER_ENV: &str = "EPIC_HARNESS_DASHBOARD_WORKER";
+const DASHBOARD_WORKER_VALUE: &str = "1";
+const DASHBOARD_WORKER_OPEN_BROWSER_ENV: &str = "EPIC_HARNESS_DASHBOARD_OPEN_BROWSER";
+const DASHBOARD_DIAGNOSTIC_FILE: &str = "dashboard.error";
+const DASHBOARD_DIAGNOSTIC_MAX_BYTES: usize = 2_048;
+const DASHBOARD_DIAGNOSTIC_TEMP_ATTEMPTS: u32 = 16;
+static DASHBOARD_DIAGNOSTIC_SEQUENCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn dashboard_worker_requested() -> bool {
+    matches!(
+        std::env::var(DASHBOARD_WORKER_ENV).as_deref(),
+        Ok(DASHBOARD_WORKER_VALUE)
+    )
+}
+
+fn dashboard_worker_should_open_browser() -> bool {
+    matches!(
+        std::env::var(DASHBOARD_WORKER_OPEN_BROWSER_ENV).as_deref(),
+        Ok(DASHBOARD_WORKER_VALUE)
+    )
+}
+
+fn dashboard_diagnostic_path() -> std::path::PathBuf {
+    harness_dir().join(DASHBOARD_DIAGNOSTIC_FILE)
+}
+
+fn truncate_dashboard_diagnostic(message: &str) -> &str {
+    let mut end = message.len().min(DASHBOARD_DIAGNOSTIC_MAX_BYTES);
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    &message[..end]
+}
+
+/// Publish a bounded dashboard failure for the next SessionStart. The child
+/// has null stdio by design, so a durable marker is the only safe channel for
+/// an asynchronous result.
+fn write_dashboard_diagnostic(error: &str) -> io::Result<()> {
+    let destination = dashboard_diagnostic_path();
+    let parent = destination.parent().ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            "dashboard diagnostic path has no parent",
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+    let content = truncate_dashboard_diagnostic(error).as_bytes();
+
+    for attempt in 0..DASHBOARD_DIAGNOSTIC_TEMP_ATTEMPTS {
+        let sequence =
+            DASHBOARD_DIAGNOSTIC_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temporary = parent.join(format!(
+            ".{DASHBOARD_DIAGNOSTIC_FILE}.{}.{}.{}.tmp",
+            std::process::id(),
+            sequence,
+            attempt
+        ));
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = file.write_all(content).and_then(|()| file.sync_all()) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        drop(file);
+        if let Err(error) = crate::team::codex::atomic_replace_file(&temporary, &destination) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        return Ok(());
+    }
+
+    Err(io::Error::new(
+        ErrorKind::AlreadyExists,
+        format!(
+            "could not allocate a dashboard diagnostic marker in {}",
+            parent.display()
+        ),
+    ))
+}
+
+/// Return and remove one bounded dashboard failure from a prior worker.
+fn take_dashboard_diagnostic() -> Option<String> {
+    let path = dashboard_diagnostic_path();
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
+            metadata
+        }
+        Ok(_) => {
+            return Some(
+                "Dashboard diagnostic marker is not a regular file; it was ignored.".into(),
+            );
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => return None,
+        Err(error) => {
+            return Some(format!(
+                "Dashboard diagnostic marker could not be read: {error}"
+            ));
+        }
+    };
+    if metadata.len() > DASHBOARD_DIAGNOSTIC_MAX_BYTES as u64 {
+        let _ = fs::remove_file(&path);
+        return Some(
+            "Dashboard diagnostic marker exceeded its size limit and was discarded.".into(),
+        );
+    }
+
+    let mut contents = Vec::with_capacity(metadata.len() as usize);
+    let result = fs::File::open(&path).and_then(|mut file| file.read_to_end(&mut contents));
+    let remove_result = fs::remove_file(&path);
+    match result {
+        Ok(_) => {
+            let diagnostic = String::from_utf8_lossy(&contents).trim().to_string();
+            if let Err(error) = remove_result {
+                return Some(format!(
+                    "{diagnostic}\nDashboard diagnostic marker could not be cleared: {error}"
+                ));
+            }
+            if diagnostic.is_empty() {
+                Some("Dashboard worker reported an empty diagnostic.".into())
+            } else {
+                Some(diagnostic)
+            }
+        }
+        Err(error) => Some(format!(
+            "Dashboard diagnostic marker could not be read: {error}"
+        )),
+    }
+}
+
+/// Execute the dashboard work outside the SessionStart process. This worker is
+/// bounded by the dashboard probe and startup timeouts; it can outlive the
+/// hook only because all three standard streams are null.
+fn run_dashboard_worker() -> i32 {
+    match spawn_dashboard_once(dashboard_worker_should_open_browser()) {
+        Ok(()) => {}
+        Err(error) => {
+            if let Err(write_error) = write_dashboard_diagnostic(&error) {
+                eprintln!(
+                    "[resume] dashboard failed ({error}) and its diagnostic could not be persisted: {write_error}"
+                );
+                return 1;
+            }
+        }
+    }
+    0
+}
+
+/// Start the private, bounded dashboard worker. The public SessionStart hook
+/// never waits for it and never lends it a pipe which could keep hook output
+/// open after the context is ready.
+fn spawn_dashboard_worker(open_browser: bool) -> Result<(), String> {
+    if CONFIG.dashboard.port == 0 {
+        return Ok(());
+    }
+    let program = dashboard_server_program()
+        .map_err(|error| format!("Dashboard worker executable resolution failed: {error}"))?;
+    std::process::Command::new(program)
+        .arg("resume")
+        .env(DASHBOARD_WORKER_ENV, DASHBOARD_WORKER_VALUE)
+        .env(
+            DASHBOARD_WORKER_OPEN_BROWSER_ENV,
+            if CONFIG.dashboard.auto_open && open_browser {
+                DASHBOARD_WORKER_VALUE
+            } else {
+                "0"
+            },
+        )
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Dashboard worker spawn failed: {error}"))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DashboardStatus {
@@ -929,18 +1121,36 @@ enum DashboardStatus {
 /// foreign service, and `ensureCompatibleRuntime` auto-updates the binary on
 /// SessionStart — so publishing a release put every user in that state until
 /// they killed the old process by hand.
-fn dashboard_status(port: u16) -> DashboardStatus {
+fn dashboard_status(port: u16) -> Result<DashboardStatus, String> {
+    dashboard_status_with_timeout_setters(
+        port,
+        |stream| stream.set_read_timeout(Some(Duration::from_millis(250))),
+        |stream| stream.set_write_timeout(Some(Duration::from_millis(250))),
+    )
+}
+
+fn dashboard_status_with_timeout_setters<ReadTimeout, WriteTimeout>(
+    port: u16,
+    set_read_timeout: ReadTimeout,
+    set_write_timeout: WriteTimeout,
+) -> Result<DashboardStatus, String>
+where
+    ReadTimeout: FnOnce(&TcpStream) -> io::Result<()>,
+    WriteTimeout: FnOnce(&TcpStream) -> io::Result<()>,
+{
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(250)) else {
-        return DashboardStatus::Available;
+        return Ok(DashboardStatus::Available);
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+    set_read_timeout(&stream)
+        .map_err(|error| format!("Dashboard health probe read timeout setup failed: {error}"))?;
+    set_write_timeout(&stream)
+        .map_err(|error| format!("Dashboard health probe write timeout setup failed: {error}"))?;
     if stream
         .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .is_err()
     {
-        return DashboardStatus::Occupied;
+        return Ok(DashboardStatus::Occupied);
     }
 
     let marker = DASHBOARD_MARKER;
@@ -958,21 +1168,21 @@ fn dashboard_status(port: u16) -> DashboardStatus {
             Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                 break;
             }
-            Err(_) => return DashboardStatus::Occupied,
+            Err(_) => return Ok(DashboardStatus::Occupied),
         }
     }
     let response = String::from_utf8_lossy(&response);
     if (response.starts_with("HTTP/1.0 200") || response.starts_with("HTTP/1.1 200"))
         && response.contains(marker)
     {
-        DashboardStatus::Epic
+        Ok(DashboardStatus::Epic)
     } else {
-        DashboardStatus::Occupied
+        Ok(DashboardStatus::Occupied)
     }
 }
 
-fn is_dashboard_running(port: u16) -> bool {
-    dashboard_status(port) == DashboardStatus::Epic
+fn is_dashboard_running(port: u16) -> Result<bool, String> {
+    Ok(dashboard_status(port)? == DashboardStatus::Epic)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1030,10 +1240,10 @@ fn acquire_dashboard_startup_lock(
     path: &Path,
     now_secs: u64,
     owner_token: &str,
-) -> Option<DashboardStartupLock> {
+) -> io::Result<Option<DashboardStartupLock>> {
     let payload = format!("{now_secs}:{owner_token}");
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent)?;
     }
 
     #[cfg(unix)]
@@ -1045,16 +1255,21 @@ fn acquire_dashboard_startup_lock(
             .truncate(false)
             .read(true)
             .write(true)
-            .open(path)
-            .ok()?;
-        let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-        if !locked {
-            return None;
+            .open(path)?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = io::Error::last_os_error();
+            if matches!(
+                error.raw_os_error(),
+                Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN
+            ) {
+                return Ok(None);
+            }
+            return Err(error);
         }
-        file.set_len(0).ok()?;
-        file.write_all(payload.as_bytes()).ok()?;
-        file.sync_all().ok()?;
-        Some(DashboardStartupLock { _file: file })
+        file.set_len(0)?;
+        file.write_all(payload.as_bytes())?;
+        file.sync_all()?;
+        Ok(Some(DashboardStartupLock { _file: file }))
     }
 
     #[cfg(not(unix))]
@@ -1065,33 +1280,45 @@ fn acquire_dashboard_startup_lock(
             .open(path)
         {
             Ok(mut file) => {
-                if file.write_all(payload.as_bytes()).is_err() || file.sync_all().is_err() {
+                if let Err(error) = file.write_all(payload.as_bytes()) {
                     let _ = fs::remove_file(path);
-                    return None;
+                    return Err(error);
                 }
-                return Some(DashboardStartupLock {
+                if let Err(error) = file.sync_all() {
+                    let _ = fs::remove_file(path);
+                    return Err(error);
+                }
+                return Ok(Some(DashboardStartupLock {
                     path: path.to_path_buf(),
                     payload: payload.clone(),
-                });
+                }));
             }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                let acquired_at = fs::read_to_string(path).ok().and_then(|value| {
-                    value
-                        .split_once(':')
-                        .and_then(|(timestamp, _)| timestamp.parse::<u64>().ok())
-                });
+                let contents = match fs::read_to_string(path) {
+                    Ok(contents) => contents,
+                    Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+                let acquired_at = contents
+                    .split_once(':')
+                    .and_then(|(timestamp, _)| timestamp.parse::<u64>().ok());
                 let stale = acquired_at.is_none_or(|timestamp| {
                     now_secs.saturating_sub(timestamp) > DASHBOARD_LOCK_STALE_SECS
                 });
-                if !stale || fs::remove_file(path).is_err() {
-                    return None;
+                if !stale {
+                    return Ok(None);
+                }
+                match fs::remove_file(path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
                 }
             }
-            Err(_) => return None,
+            Err(error) => return Err(error),
         }
     }
     #[cfg(not(unix))]
-    None
+    Ok(None)
 }
 
 fn dashboard_lock_time_and_token() -> (u64, String) {
@@ -1124,7 +1351,7 @@ pub(crate) fn start_dashboard_on_port(port: u16, open_browser: bool) -> Result<(
     }
 
     let url = format!("http://localhost:{port}");
-    let status = dashboard_status(port);
+    let status = dashboard_status(port)?;
     if status == DashboardStatus::Occupied {
         return Err(format!(
             "Dashboard not started: port {port} is occupied by a non-Epic service"
@@ -1137,11 +1364,13 @@ pub(crate) fn start_dashboard_on_port(port: u16, open_browser: bool) -> Result<(
 
     let lock = harness_dir().join("dashboard.lock");
     let (now_secs, owner_token) = dashboard_lock_time_and_token();
-    let Some(_startup_lock) = acquire_dashboard_startup_lock(&lock, now_secs, &owner_token) else {
+    let Some(_startup_lock) = acquire_dashboard_startup_lock(&lock, now_secs, &owner_token)
+        .map_err(|error| format!("Dashboard startup lock failed: {error}"))?
+    else {
         let deadline = std::time::Instant::now() + DASHBOARD_STARTUP_TIMEOUT;
         while std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
-            match dashboard_status(port) {
+            match dashboard_status(port)? {
                 DashboardStatus::Epic => return Ok(()),
                 DashboardStatus::Occupied => {
                     return Err(format!(
@@ -1155,7 +1384,7 @@ pub(crate) fn start_dashboard_on_port(port: u16, open_browser: bool) -> Result<(
     };
 
     // Double-check after acquiring lock (another process may have started between checks).
-    match dashboard_status(port) {
+    match dashboard_status(port)? {
         DashboardStatus::Epic => return Ok(()),
         DashboardStatus::Occupied => {
             return Err(format!(
@@ -1180,11 +1409,19 @@ pub(crate) fn start_dashboard_on_port(port: u16, open_browser: bool) -> Result<(
             let deadline = std::time::Instant::now() + DASHBOARD_STARTUP_TIMEOUT;
             while std::time::Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(100));
-                if is_dashboard_running(port) {
-                    if plan.open_browser {
-                        open_dashboard_browser(&url)?;
+                match is_dashboard_running(port) {
+                    Ok(true) => {
+                        if plan.open_browser {
+                            open_dashboard_browser(&url)?;
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
+                    Ok(false) => {}
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(error);
+                    }
                 }
                 if let Some(status) = child
                     .try_wait()
@@ -1861,7 +2098,7 @@ mod tests {
         let (port, server) = one_shot_http_server(response);
 
         assert_eq!(
-            dashboard_status(port),
+            dashboard_status(port).expect("foreign dashboard probe"),
             DashboardStatus::Occupied,
             "a listening socket without Epic identity must not be reused"
         );
@@ -1884,7 +2121,7 @@ mod tests {
             let (port, server) = one_shot_http_server(response.clone());
 
             assert_eq!(
-                dashboard_status(port),
+                dashboard_status(port).expect("previous-version dashboard probe"),
                 DashboardStatus::Epic,
                 "a dashboard from any version must be recognised as ours"
             );
@@ -1924,7 +2161,10 @@ mod tests {
         );
         let (port, server) = one_shot_http_server(response);
 
-        assert_eq!(dashboard_status(port), DashboardStatus::Epic);
+        assert_eq!(
+            dashboard_status(port).expect("dashboard probe"),
+            DashboardStatus::Epic
+        );
         server.join().expect("test server");
     }
 
@@ -1947,7 +2187,10 @@ mod tests {
             .expect("write body");
         });
 
-        assert_eq!(dashboard_status(port), DashboardStatus::Epic);
+        assert_eq!(
+            dashboard_status(port).expect("fragmented dashboard probe"),
+            DashboardStatus::Epic
+        );
         server.join().expect("test server");
     }
 
@@ -1960,21 +2203,78 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_health_read_timeout_failure_is_explicit() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind probe listener");
+        let port = listener.local_addr().expect("probe address").port();
+
+        let error = dashboard_status_with_timeout_setters(
+            port,
+            |_| Err(io::Error::other("injected read timeout failure")),
+            |_| Ok(()),
+        )
+        .expect_err("read timeout setup failure must not become an unhealthy status");
+
+        assert_eq!(
+            error,
+            "Dashboard health probe read timeout setup failed: injected read timeout failure"
+        );
+    }
+
+    #[test]
+    fn dashboard_health_write_timeout_failure_is_explicit() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind probe listener");
+        let port = listener.local_addr().expect("probe address").port();
+
+        let error = dashboard_status_with_timeout_setters(
+            port,
+            |_| Ok(()),
+            |_| Err(io::Error::other("injected write timeout failure")),
+        )
+        .expect_err("write timeout setup failure must not become an unhealthy status");
+
+        assert_eq!(
+            error,
+            "Dashboard health probe write timeout setup failed: injected write timeout failure"
+        );
+    }
+
+    #[test]
+    fn dashboard_startup_lock_io_failure_is_explicit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("dashboard.lock");
+        fs::create_dir(&path).expect("lock path directory");
+
+        let result = acquire_dashboard_startup_lock(&path, 100, "owner");
+        let error = result
+            .err()
+            .expect("lock I/O failure must not become contention");
+        #[cfg(unix)]
+        assert_eq!(error.kind(), ErrorKind::IsADirectory);
+        #[cfg(not(unix))]
+        assert_ne!(error.kind(), ErrorKind::WouldBlock);
+    }
+
+    #[test]
     fn fresh_dashboard_startup_lock_has_one_owner() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("dashboard.lock");
 
-        let owner =
-            acquire_dashboard_startup_lock(&path, 100, "owner").expect("first caller owns startup");
+        let owner = acquire_dashboard_startup_lock(&path, 100, "owner")
+            .expect("first caller owns startup")
+            .expect("first caller owns startup");
         assert!(
-            acquire_dashboard_startup_lock(&path, 101, "contender").is_none(),
+            acquire_dashboard_startup_lock(&path, 101, "contender")
+                .expect("healthy contention must not be an I/O error")
+                .is_none(),
             "a fresh owner must not be evicted while it binds the port"
         );
         assert!(path.exists());
 
         drop(owner);
         assert!(
-            acquire_dashboard_startup_lock(&path, 102, "next-owner").is_some(),
+            acquire_dashboard_startup_lock(&path, 102, "next-owner")
+                .expect("next owner lock")
+                .is_some(),
             "dropping the owner must release the startup lock"
         );
     }
@@ -1985,7 +2285,9 @@ mod tests {
         let path = dir.path().join("dashboard.lock");
         std::fs::write(&path, "1:crashed-owner").expect("stale lock file");
 
-        let owner = acquire_dashboard_startup_lock(&path, 100, "new").expect("stale lock takeover");
+        let owner = acquire_dashboard_startup_lock(&path, 100, "new")
+            .expect("stale lock takeover")
+            .expect("stale lock ownership");
         drop(owner);
     }
 

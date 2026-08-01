@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "logical": {
+    "schema_version": 1,
+    "manifest_kind": "logical-runtime-v1",
+    "manifest_path": "registry/scripts/bundle-manifest.json",
+    "identity": {
+      "algorithm": "sha256-framed-logical-source-and-artifact-projection-v3",
+      "domain": "epic-harness-logical-build-identity\u0000v3\u0000"
+    },
+    "artifacts": [
+      {
+        "path": "package.json",
+        "selector": "file-v1",
+        "digest_mode": "canonical-json-v1"
+      },
+      {
+        "path": ".claude-plugin/plugin.json",
+        "selector": "file-v1",
+        "digest_mode": "canonical-plugin-json-v1"
+      },
+      {
+        "path": ".codex-plugin/plugin.json",
+        "selector": "file-v1",
+        "digest_mode": "canonical-plugin-json-v1"
+      },
+      {
+        "path": ".codex-plugin/hooks.json",
+        "selector": "file-v1",
+        "digest_mode": "canonical-json-v1"
+      },
+      {
+        "path": "hooks/hooks.json",
+        "selector": "file-v1",
+        "digest_mode": "canonical-json-v1"
+      },
+      {
+        "path": "mcp_config.json",
+        "selector": "file-v1",
+        "digest_mode": "canonical-json-v1"
+      },
+      {
+        "path": "registry/scripts/install.js",
+        "selector": "file-v1",
+        "digest_mode": "normalized-lf-text-v1"
+      },
+      {
+        "path": "registry/scripts/run-hook.cmd",
+        "selector": "file-v1",
+        "digest_mode": "normalized-lf-text-v1"
+      },
+      {
+        "path": "runtime-revision.txt",
+        "selector": "file-v1",
+        "digest_mode": "normalized-lf-text-v1"
+      },
+      {
+        "path": "skills",
+        "selector": "recursive-files-v1",
+        "digest_mode": "normalized-lf-text-v1"
+      },
+      {
+        "path": "registry/presets",
+        "selector": "recursive-files-v1",
+        "digest_mode": "normalized-lf-text-v1"
+      }
+    ]
+  },
+  "outer": {
+    "schema_version": 1,
+    "manifest_kind": "post-link-runtime-bundle-v1",
+    "selector_protocol": "epic-harness-materialized-runtime-v1",
+    "target_executable": {
+      "selector": "target-executable-v1",
+      "type": "file",
+      "digest_mode": "raw-bytes-v1"
+    }
+  }
+}
