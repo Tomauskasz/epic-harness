@@ -110,3 +110,9 @@ If `metrics.json` exists and `obs/session_*.jsonl` is non-empty, observation is 
 from Git's common directory, including Windows drive and UNC paths. Run these
 commands from the main checkout, a subdirectory, or a linked worktree to find
 the same existing project data. This does not rename or migrate stored data.
+### Reflection path containment
+
+`epic reflect --context` resolves both existing project directories and the
+projects root before checking containment. Alcove vaults and the home directory
+use the same canonical comparison, including Windows extended path prefixes.
+Directory links that resolve outside the allowed root remain rejected.
