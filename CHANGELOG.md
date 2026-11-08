@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Observation classification honors explicit tool outcome metadata, recognizes
   PowerShell reads, and avoids false failures from quoted source and zero
   timeout counts. Stored result and success dimensions remain consistent (#144).
+- Outside file-path actions are masked in full, including Windows UNC/rooted
+  paths and paths containing spaces; project-relative actions remain distinct.
 - On Windows, rooted paths without a drive (such as `/home/user/file`) no
   longer bypass observation action masking as ordinary relative paths.
 - **Dashboard English labels**: 27 translation keys used by the Topbar,
