@@ -371,3 +371,10 @@ remains available. PowerShell/pwsh commands share the shell classifier, whose
 read-only guard recognizes common inspection cmdlets and Git object readers.
 Read/search stdout is quoted material; separate stderr still carries failures.
 This changes new observations only and does not rewrite stored harness data.
+### Windows action path masking
+
+Observation actions keep ordinary project-relative filenames distinct. A rooted
+path without a drive, such as `/home/example/file.rs`, is not an ordinary
+relative filename on Windows and is sent through the outside-path mask. The
+cross-platform `outside_paths_are_still_masked` regression also runs in Windows
+source verification.
