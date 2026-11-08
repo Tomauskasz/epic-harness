@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   using native absolute-path detection for Git's common directory.
 - Reflection compares canonical project/root and vault/home paths consistently
   on Windows, while continuing to reject directory links outside those roots.
+- Antigravity now uses its flat invocation hook schema and a portable adapter
+  for workspace/session normalization and host-specific JSON output. A repeatable
+  migration retires duplicate global workaround hooks while preserving Orca/MCP.
 - **Dashboard English labels**: 27 translation keys used by the Topbar,
   Dashboard, Memory, and Settings pages were missing from `en.ts`, so
   English (and the fallback for every other locale) rendered raw key names
