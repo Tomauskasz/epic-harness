@@ -24,12 +24,25 @@ jobs:
           node-version: 22
       - uses: Swatinem/rust-cache@v2
       - name: Format
+        id: format
         continue-on-error: true
         run: cargo fmt --all -- --check
+      - name: Export formatting corrections
+        shell: bash
+        run: |
+          cargo fmt --all
+          git diff --binary > format.patch
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Linux'
+        with:
+          name: formatting-${{ github.sha }}
+          path: format.patch
       - name: Clippy
+        id: clippy
         continue-on-error: true
         run: cargo clippy -p epic-harness --all-targets -- -D warnings
       - name: Rust tests
+        id: tests
         continue-on-error: true
         run: cargo test -p epic-harness
       - name: Build both executables
@@ -37,7 +50,7 @@ jobs:
       - name: Node integration checks
         shell: bash
         run: |
-          if test -f registry/scripts/hooks/antigravity.test.mjs; then node --test registry/scripts/hooks/antigravity.test.mjs; fi
+          node --test registry/scripts/hooks/*.test.mjs
       - name: Upload commit-bound Windows executables
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v7
@@ -46,3 +59,10 @@ jobs:
           path: |
             target/release/epic.exe
             target/release/epic-harness.exe
+      - name: Enforce verification results
+        if: always()
+        shell: bash
+        run: |
+          test '${{ steps.format.outcome }}' = success
+          test '${{ steps.clippy.outcome }}' = success
+          test '${{ steps.tests.outcome }}' = success
