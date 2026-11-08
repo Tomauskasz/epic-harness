@@ -1,0 +1,48 @@
+name: Local repair source verification
+on:
+  push:
+    branches: [integration/local-repair]
+permissions:
+  contents: read
+env:
+  SKIP_DASHBOARD_BUILD: '1'
+  CARGO_TERM_COLOR: always
+jobs:
+  source:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        continue-on-error: true
+        run: cargo clippy -p epic-harness --all-targets -- -D warnings
+      - name: Rust tests
+        continue-on-error: true
+        run: cargo test -p epic-harness
+      - name: Build both executables
+        run: cargo build -p epic-harness --release --bins
+      - name: Node integration checks
+        shell: bash
+        run: |
+          if test -f registry/scripts/hooks/antigravity.test.mjs; then node --test registry/scripts/hooks/antigravity.test.mjs; fi
+      - name: Upload commit-bound Windows executables
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-${{ github.sha }}
+          path: |
+            target/release/epic.exe
+            target/release/epic-harness.exe
