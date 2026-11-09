@@ -199,7 +199,13 @@ pub fn compute_regression(
     let mut comparison_error = false;
 
     for r in results {
+        if r.verdict == "SKIPPED" {
+            continue;
+        }
         if let Some(prev_dim) = prev.get(&r.dimension) {
+            if prev_dim.get("verdict").and_then(Value::as_str) == Some("SKIPPED") {
+                continue;
+            }
             if r.dimension == "performance" {
                 let delta = performance_delta(r, prev_dim);
                 any_regression |= delta["regressed"].as_bool().unwrap_or(true);

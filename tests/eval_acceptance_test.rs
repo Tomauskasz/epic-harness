@@ -197,6 +197,7 @@ fn fixture_command() {
         }
         "partial-summary" => println!("test result: ok. 9 passed; 1 failed;"),
         "low-summary" => println!("test result: ok. 7 passed; 3 failed;"),
+        "composite-high" => println!("{{\"composite\":0.9}}"),
         "composite-low" => println!("{{\"composite\":0.1}}"),
         "composite-failure" => {
             println!("{{\"composite\":0.1}}");
@@ -414,6 +415,36 @@ fn explicit_performance_metric_changes_cannot_use_legacy_wall_duration() {
         assert_eq!(
             report["dimensions"]["regression"]["details"]["deltas"]["performance"]["comparison_error"],
             !expected_success
+        );
+    }
+}
+
+#[test]
+fn skipped_results_are_not_comparable_measurements() {
+    for previous in [
+        serde_json::json!({"quality":{"score":0,"verdict":"SKIPPED"}}),
+        serde_json::json!({"quality":{"score":0,"verdict":"PASS"}}),
+        serde_json::json!({"benchmark:fixture":{"score":0,"verdict":"SKIPPED"}}),
+    ] {
+        let f = Fixture::new();
+        f.config(&format!("benchmarks:\n  - name: fixture\n    command: {}\n    result_type: composite\ndimensions:\n  quality:\n    enabled: true\n  regression:\n    enabled: true\n", serde_json::to_string(&f.command()).unwrap()));
+        let baselines = f.eval_dir().join("baselines");
+        fs::create_dir_all(&baselines).unwrap();
+        fs::write(
+            baselines.join("latest.json"),
+            serde_json::to_vec(&serde_json::json!({"dimensions":previous})).unwrap(),
+        )
+        .unwrap();
+        let output = f.run("composite-high", &["eval", "--json"]);
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["dimensions"]["quality"]["verdict"], "SKIPPED");
+        assert!(
+            !output.status.success(),
+            "skipped inputs are not measurement evidence: {report}"
+        );
+        assert_eq!(
+            report["dimensions"]["regression"]["details"]["deltas"],
+            serde_json::json!({})
         );
     }
 }

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep correctness verdicts consistent with configured minimum pass rates below 80%; accepted partial results report warnings (#178).
 
 ### Fixed
+- Exclude skipped dimensions from regression comparisons so unmeasured inputs cannot produce a passing evaluation (#179).
 - Released-artifact hook checks retain lifecycle coverage and defer native prompt
   dispatch to changed-source tests, avoiding an unsupported old-release command (#276).
 - Reject explicit performance metric changes instead of comparing unrelated wall-clock durations; retain legacy baseline compatibility (#275).
