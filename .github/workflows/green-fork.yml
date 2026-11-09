@@ -64,7 +64,14 @@ jobs:
           test "${#tests[@]}" -gt 0
           node --test "${tests[@]}"
       - name: Patched frontend dependency regression
-        run: node --test scripts/deepmerge-security.test.mjs
+        run: node --test scripts/deepmerge-security.test.mjs scripts/dependency-audit-policy.test.mjs
+      - name: Audit dashboard dependencies against verified source patches
+        if: runner.os == 'Linux'
+        run: node scripts/audit-dashboard-dependencies.mjs
+      - name: Verify reviewed Rust dependency sources
+        run: |
+          node scripts/check-glib-backport.mjs
+          node scripts/check-sqlite-backport.mjs
       - name: Build both executables from this commit
         run: cargo build -p epic-harness --release --bins --locked
       - name: Acceptance through both changed-source executables
@@ -84,3 +91,28 @@ jobs:
           name: green-${{ runner.os }}-${{ github.sha }}
           path: verified-artifact/
           if-no-files-found: error
+  dependency-backports:
+    name: Native dependency safety regressions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vendor/glib-0.18.5 -> target
+          shared-key: glib-safety-regression
+      - name: Install GLib development library
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libglib2.0-dev
+      - name: Verify exact reviewed dependency sources
+        run: |
+          node scripts/check-glib-backport.mjs
+          node scripts/check-sqlite-backport.mjs
+      - name: Exercise actual optimized GLib variant iterator
+        run: cargo test --manifest-path vendor/glib-0.18.5/Cargo.toml --locked --release --test issue_138_variant_str_iter
+      - name: Exercise actual SQLite WAL initialization
+        run: |
+          cc -O2 scripts/sqlite-wal-initialization-test.c -o "$RUNNER_TEMP/epic-sqlite-wal-test" -ldl -lpthread -lm
+          "$RUNNER_TEMP/epic-sqlite-wal-test"
