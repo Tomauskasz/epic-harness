@@ -761,3 +761,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #213: Display graph node and edge counts from the canonical backend statistics fields.
 - Fixed corrupt non-object Orbit state crashing the dashboard; valid records remain available (#222).
 - Fix #242: reopen orchestration runs for new work and clear stale agent completion metadata.
+
+- Fix #243: serialize orchestration updates with portable interprocess file locks and independent atomic-write files.
