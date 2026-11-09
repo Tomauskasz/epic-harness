@@ -881,3 +881,4 @@ Original files are **not deleted** after import. New users are automatically on 
 - Security (#156): preserve benign null/primitive placeholder merges while rejecting poison keys and failing closed on throwing object introspection.
 
 - Security (#138): backport gtk-rs's mutable-out-pointer fix to Tauri's compatible `glib` dependency and verify the optimized iterator path and Cargo source provenance.
+- Fix #220: contain selected dashboard project reads and nested links, and keep seesaw GET requests read-only.
