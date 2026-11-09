@@ -913,3 +913,10 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #220: contain selected dashboard project reads and nested links, and keep seesaw GET requests read-only.
 
 - Fix #279: Native Orbit lists primary and legacy state together, retains project metadata, and the dashboard reloads safely when the selected project changes.
+- Fix #240: Adopt the verified shared/native contract prerequisite (aa12d43) for local integration validation.
+
+- Fix #268: Adopt the verified shared/native contract prerequisite (4d9fe42) for local integration validation.
+
+- Fix #279: Adopt the verified shared/native contract prerequisite (04892ee) for local integration validation.
+
+- Fix #281: Orbit timelines show audit, eval and evolve stages and normalize legacy check/complete phases for retained pipeline data.
