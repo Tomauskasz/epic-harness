@@ -197,6 +197,10 @@ fn fixture_command() {
         }
         "partial-summary" => println!("test result: ok. 9 passed; 1 failed;"),
         "composite-low" => println!("{{\"composite\":0.1}}"),
+        "composite-failure" => {
+            println!("{{\"composite\":0.1}}");
+            std::process::exit(7);
+        }
         "composite-pretty" => println!("{{\n  \"composite\": 0.1\n}}"),
         "composite-missing" => println!("{{\"samples\":3}}"),
         "composite-out-of-range" => println!("{{\"composite\":2}}"),
@@ -207,6 +211,32 @@ fn fixture_command() {
         _ => println!("test result: ok. 10 passed; 0 failed;"),
     }
     std::process::exit(0);
+}
+
+#[test]
+fn warning_only_regression_policy_does_not_hide_child_failures() {
+    let f = Fixture::new();
+    f.config(&format!("benchmarks:\n  - name: fixture\n    command: {}\n    result_type: composite\ndimensions:\n  regression:\n    enabled: true\n    extra:\n      fail_on_regression: false\n", serde_json::to_string(&f.command()).unwrap()));
+    let baselines = f.eval_dir().join("baselines");
+    fs::create_dir_all(&baselines).unwrap();
+    fs::write(
+        baselines.join("latest.json"),
+        r#"{"dimensions":{"benchmark:fixture":{"score":0.9}}}"#,
+    )
+    .unwrap();
+    let output = f.run("composite-low", &["eval", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success(), "{report}");
+    assert_eq!(report["overall_verdict"], "WARN");
+    assert_eq!(
+        report["dimensions"]["regression"]["details"]["deltas"]["benchmark:fixture"]["regressed"],
+        true
+    );
+    assert!(
+        !f.run("composite-failure", &["eval", "--json"])
+            .status
+            .success()
+    );
 }
 
 #[test]

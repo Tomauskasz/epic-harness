@@ -1,5 +1,7 @@
 # Changelog
 
+- Fix #200: honor warning-only regression policy while retaining measured regression evidence and failing actual child commands or empty comparisons.
+
 - Fix #199: eval init/scaffold JSON modes emit one serialized JSON document with correctly escaped paths and no human stdout preamble.
 
 - Fix #198: propagate report/archive/latest-baseline I/O failures and confirm baseline saves only after durable writes and atomic latest replacement.
