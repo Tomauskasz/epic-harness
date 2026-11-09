@@ -145,6 +145,40 @@ impl Dashboard {
             pool.close().await;
         });
     }
+
+    fn seed_memory(&self, node_type: &str, title: &str) {
+        let _ = self.request("GET", "/api/search?q=initialize");
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            sqlx::any::install_default_drivers();
+            let pool = sqlx::AnyPool::connect(&format!(
+                "sqlite:{}",
+                self._temp.path().join(".harness/memory.db").display()
+            ))
+            .await
+            .unwrap();
+            epic_harness::mem::store::write_node_pool(
+                &pool,
+                &epic_harness::mem::store::Node {
+                    frontmatter: epic_harness::mem::store::NodeFrontmatter {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        node_type: node_type.into(),
+                        title: title.into(),
+                        tags: vec!["fixture".into()],
+                        projects: vec!["project-a".into()],
+                        agents: vec!["synthetic-agent".into()],
+                        created: "2026-11-09T00:00:00Z".into(),
+                        updated: "2026-11-09T00:00:00Z".into(),
+                        importance: 0.8,
+                        ..Default::default()
+                    },
+                    body: "Zebrafixture body".into(),
+                },
+            )
+            .await
+            .unwrap();
+            pool.close().await;
+        });
+    }
 }
 
 impl Drop for Dashboard {
@@ -463,4 +497,19 @@ fn issue_214_duplicate_snapshot_copies_preserve_distinct_projects() {
         projects,
         std::collections::HashSet::from(["project-a", "project-b"])
     );
+}
+
+#[test]
+fn issue_240_memory_search_rows_include_renderable_metadata() {
+    let dashboard = Dashboard::start();
+    dashboard.seed_memory("concept", "Zebrafixture needle");
+    let (status, body) = dashboard.request("GET", "/api/search?q=Zebrafixture");
+    assert_eq!(status, 200);
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(body[0]["tags"], json!(["fixture"]));
+    assert_eq!(body[0]["projects"], json!(["project-a"]));
+    assert_eq!(body[0]["agents"], json!(["synthetic-agent"]));
+    assert!(body[0]["updated"].is_string());
+    assert_eq!(body[0]["importance"], 0.8);
+    assert!(body[0]["snippet"].is_string());
 }
