@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other orgs' agents and correctly deregistering Codex-only links (#249).
 - Project-local team sync keeps other host installations untouched; home-wide
   mirrors now require the explicit `--global` option (#248).
+- Reflection context selects fallback observations by record date rather than session filename, including UUID sessions and excluding records outside the requested window (#203).
 - Reflection preserves distinct anonymous fallback observations and skips only JSONL records with a persisted import identity (#188).
 - Preserve the usefulness penalty for successful empty searches without classifying quoted matches as failures (#260).
 - Score authoritative silent tool outcomes even when no response container is present (#192).
