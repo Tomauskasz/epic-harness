@@ -586,10 +586,18 @@ pub async fn list_dashboard_pipelines_pool(
     project: Option<&str>,
     limit: Option<usize>,
 ) -> std::io::Result<Vec<serde_json::Value>> {
-    let projects = selected_project_dirs(project)?;
-    let mut all = crate::store::orbit_store::list_all_pipelines_pool(pool)
+    let primary = crate::store::orbit_store::list_all_pipelines_pool(pool)
         .await
         .unwrap_or_default();
+    merge_dashboard_pipeline_sidecars(primary, project, limit)
+}
+
+fn merge_dashboard_pipeline_sidecars(
+    mut all: Vec<serde_json::Value>,
+    project: Option<&str>,
+    limit: Option<usize>,
+) -> std::io::Result<Vec<serde_json::Value>> {
+    let projects = selected_project_dirs(project)?;
     all.retain(|pipeline| project.is_none_or(|slug| pipeline["project"].as_str() == Some(slug)));
     for pipeline in &mut all {
         if let Some(slug) = pipeline["project"].as_str().map(str::to_owned) {
@@ -1043,6 +1051,7 @@ fn handle_harness_cmd(cmd: &str, harness_dir: &std::path::Path, project: Option<
                 let pool = crate::store::pool::harness_pool().await?;
                 list_dashboard_pipelines_pool(&pool, project, None).await
             })
+            .or_else(|_| merge_dashboard_pipeline_sidecars(Vec::new(), project, None))
             .unwrap_or_default();
             serde_json::to_string(&pipelines).unwrap_or_else(|_| "[]".into())
         }

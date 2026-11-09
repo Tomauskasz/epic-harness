@@ -616,3 +616,20 @@ fn issue_279_primary_copies_win_without_hiding_foreign_same_id() {
         "listing must not import/rewrite files"
     );
 }
+
+#[test]
+fn issue_279_legacy_pipeline_fallback_survives_unavailable_database() {
+    let dashboard = Dashboard::start();
+    fs::create_dir_all(dashboard.data.join("harness.db")).unwrap();
+    dashboard.file(
+        "projects/project-a/orbit/PIPELINE-legacy.json",
+        &json!({"id":"legacy", "status":"running"}),
+    );
+    let (status, rows) = dashboard.request(
+        "GET",
+        "/api/harness?cmd=get_orbit_pipelines&project=project-a",
+    );
+    assert_eq!(status, 200);
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["id"], "legacy");
+}
