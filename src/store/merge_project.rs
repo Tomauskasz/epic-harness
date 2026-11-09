@@ -16,6 +16,10 @@ use std::str::FromStr;
 use super::sqlx_err;
 use crate::shared::paths::{global_harness_db_path, harness_projects_root};
 
+#[cfg(test)]
+#[path = "regression_254.rs"]
+mod regression_254;
+
 // ── Public entry point ───────────────────────────────────────────────────────
 
 pub fn run_merge(from: &str, to: &str, dry_run: bool, delete_source: bool) -> i32 {
@@ -290,10 +294,14 @@ async fn merge_global_db(db_path: &Path, from: &str, to: &str, dry_run: bool) ->
     .bind(from)
     .execute(&mut conn)
     .await;
-    let _ = sqlx::query("DELETE FROM promotion_counters WHERE project = ?")
-        .bind(from)
-        .execute(&mut conn)
-        .await;
+    let _ = sqlx::query(
+        "DELETE FROM promotion_counters WHERE project = ? \
+         AND pattern_key IN (SELECT pattern_key FROM promotion_counters WHERE project = ?)",
+    )
+    .bind(from)
+    .bind(to)
+    .execute(&mut conn)
+    .await;
     if let Ok(r) = sqlx::query("UPDATE promotion_counters SET project = ? WHERE project = ?")
         .bind(to)
         .bind(from)
