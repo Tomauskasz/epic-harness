@@ -5,6 +5,10 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn exchange(messages: &[Value]) -> Vec<Value> {
+    exchange_lines(&messages.iter().map(Value::to_string).collect::<Vec<_>>())
+}
+
+fn exchange_lines(messages: &[String]) -> Vec<Value> {
     let fixture = tempfile::tempdir().expect("temporary MCP fixture");
     let home = fixture.path().join("home");
     let data = fixture.path().join("data");
@@ -63,5 +67,50 @@ fn issue_235_mcp_ping_returns_empty_result() {
     assert_eq!(
         responses[1],
         json!({"jsonrpc":"2.0","id":"alive","result":{}})
+    );
+}
+
+#[test]
+fn issue_236_mcp_validates_envelopes_and_silences_notifications() {
+    let responses = exchange_lines(&[
+        "{".to_string(),
+        json!({"jsonrpc":"2.0","id":17}).to_string(),
+        json!({"jsonrpc":"1.0","id":18,"method":"tools/list"}).to_string(),
+        json!({"jsonrpc":"2.0","method":"tools/list"}).to_string(),
+        json!({"jsonrpc":"2.0","method":"ping"}).to_string(),
+        json!({"jsonrpc":"2.0","method":"unknown-fixture-method"}).to_string(),
+        json!({"jsonrpc":"2.0","id":19,"method":"tools/list"}).to_string(),
+        json!({"jsonrpc":"2.0","id":20,"method":"unknown-fixture-method"}).to_string(),
+        json!({"jsonrpc":"2.0","id":null,"method":"ping"}).to_string(),
+        json!({"jsonrpc":"2.0","id":21,"method":"tools/call","params":[]}).to_string(),
+    ]);
+    assert_eq!(
+        responses.len(),
+        7,
+        "notifications must not receive responses"
+    );
+    assert!(
+        responses
+            .iter()
+            .any(|r| r["id"].is_null() && r["error"]["code"] == -32700)
+    );
+    for id in [17, 18] {
+        let response = responses.iter().find(|r| r["id"] == id).unwrap();
+        assert_eq!(response["error"]["code"], -32600);
+    }
+    let listed = responses.iter().find(|r| r["id"] == 19).unwrap();
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(
+        responses.iter().find(|r| r["id"] == 20).unwrap()["error"]["code"],
+        -32601
+    );
+    assert!(
+        responses
+            .iter()
+            .any(|r| r["id"].is_null() && r.get("result") == Some(&json!({})))
+    );
+    assert_eq!(
+        responses.iter().find(|r| r["id"] == 21).unwrap()["error"]["code"],
+        -32602
     );
 }
