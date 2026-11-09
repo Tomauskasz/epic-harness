@@ -55,10 +55,8 @@ pub fn run_correctness(cmds: &ResolvedCommands) -> DimResult {
         "FAIL"
     } else if score >= 1.0 {
         "PASS"
-    } else if score >= 0.8 {
-        "WARN"
     } else {
-        "FAIL"
+        "WARN"
     };
 
     DimResult {

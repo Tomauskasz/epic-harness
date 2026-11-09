@@ -196,6 +196,7 @@ fn fixture_command() {
             std::process::exit(7);
         }
         "partial-summary" => println!("test result: ok. 9 passed; 1 failed;"),
+        "low-summary" => println!("test result: ok. 7 passed; 3 failed;"),
         "composite-low" => println!("{{\"composite\":0.1}}"),
         "composite-failure" => {
             println!("{{\"composite\":0.1}}");
@@ -368,4 +369,11 @@ fn correctness_nonzero_and_minimum_pass_rate_fail_the_gate() {
         assert_eq!(report["dimensions"]["correctness"]["passed"], false);
     }
     assert!(f.run("pass", &["eval", "--json"]).status.success());
+
+    f.config(&format!("stack: rust\ndimensions:\n  correctness:\n    enabled: true\n    command: {}\n    extra:\n      min_pass_rate: 0.6\n  regression:\n    enabled: false\n", serde_json::to_string(&f.command()).unwrap()));
+    let relaxed = f.run("low-summary", &["eval", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&relaxed.stdout).unwrap();
+    assert!(relaxed.status.success(), "configured minimum met: {report}");
+    assert_eq!(report["dimensions"]["correctness"]["passed"], true);
+    assert_eq!(report["overall_verdict"], "WARN");
 }

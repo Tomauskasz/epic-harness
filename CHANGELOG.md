@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Keep correctness verdicts consistent with configured minimum pass rates below 80%; accepted partial results report warnings (#178).
+
 ### Fixed
 - Updating an existing team's type now persists it before syncing, so generated
   host agents receive the selected Team Context without losing custom agents (#250).
