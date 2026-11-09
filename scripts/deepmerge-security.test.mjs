@@ -84,3 +84,18 @@ test('issue 156 protects the packaged UMD entry point too', () => {
   assertClean(result);
   assert.deepEqual(umd({ a: 1 }, { b: 2 }), { a: 1, b: 2 });
 });
+
+test('issue 156 preserves benign source fields when merging null or primitive placeholders', () => {
+  assert.deepEqual(merge(null, { safe: 1 }), { safe: 1 });
+  assert.deepEqual(merge(4, { safe: 1 }), { safe: 1 });
+  const result = merge({ session: null }, { session: { safe: 1, ...poison() } });
+  assertClean(result.session);
+  assert.equal(result.session.safe, 1);
+});
+
+test('issue 156 fails closed when target property introspection throws', () => {
+  const target = new Proxy({}, { has() { throw new Error('untrusted introspection'); } });
+  const result = merge(target, { ignored: { safe: 1 } });
+  assertClean(result);
+  assert.deepEqual(result, {});
+});

@@ -1,14 +1,8 @@
 diff --git a/dist/cjs.js b/dist/cjs.js
-index 7c36cbdd06cc22c92d590be3f87a08a91ca06b40..fcb418e69ec3c23a9780b917c4b3b4699162ac0c 100644
+index 7c36cbdd06cc22c92d590be3f87a08a91ca06b40..fd782784a2834607179cd76f2b54fd85209c4d75 100644
 --- a/dist/cjs.js
 +++ b/dist/cjs.js
-@@ -65,22 +65,42 @@ function propertyIsOnObject(object, property) {
- 	try {
- 		return property in object
- 	} catch(_) {
--		return false
-+		return true
- 	}
+@@ -70,17 +70,40 @@ function propertyIsOnObject(object, property) {
  }
  
  // Protects from prototype poisoning and unexpected merging up the prototype chain.
@@ -29,8 +23,11 @@ index 7c36cbdd06cc22c92d590be3f87a08a91ca06b40..fcb418e69ec3c23a9780b917c4b3b469
 +	if (keyIsForbidden(key)) {
 +		return true
 +	}
++	if (target === null || (typeof target !== 'object' && typeof target !== 'function')) {
++		return false
++	}
 +	try {
-+		return propertyIsOnObject(target, key)
++		return key in target
 +			&& !(Object.hasOwnProperty.call(target, key)
 +				&& Object.propertyIsEnumerable.call(target, key))
 +	} catch (_) {
@@ -50,7 +47,7 @@ index 7c36cbdd06cc22c92d590be3f87a08a91ca06b40..fcb418e69ec3c23a9780b917c4b3b469
  		});
  	}
  	getKeys(source).forEach(function(key) {
-@@ -89,9 +109,9 @@ function mergeObject(target, source, options) {
+@@ -89,9 +112,9 @@ function mergeObject(target, source, options) {
  		}
  
  		if (propertyIsOnObject(target, key) && options.isMergeableObject(source[key])) {
@@ -63,16 +60,10 @@ index 7c36cbdd06cc22c92d590be3f87a08a91ca06b40..fcb418e69ec3c23a9780b917c4b3b469
  	});
  	return destination
 diff --git a/dist/umd.js b/dist/umd.js
-index 4071e7c56ec8e5273fe166f6e723ac460fab8b72..49fc33466202259feef5830c06abef136b6d4e4d 100644
+index 4071e7c56ec8e5273fe166f6e723ac460fab8b72..8dcfddfd5bf4d548451b12c31d9bd8ece835e06c 100644
 --- a/dist/umd.js
 +++ b/dist/umd.js
-@@ -69,22 +69,42 @@
- 		try {
- 			return property in object
- 		} catch(_) {
--			return false
-+			return true
- 		}
+@@ -74,17 +74,40 @@
  	}
  
  	// Protects from prototype poisoning and unexpected merging up the prototype chain.
@@ -93,8 +84,11 @@ index 4071e7c56ec8e5273fe166f6e723ac460fab8b72..49fc33466202259feef5830c06abef13
 +		if (keyIsForbidden(key)) {
 +			return true
 +		}
++		if (target === null || (typeof target !== 'object' && typeof target !== 'function')) {
++			return false
++		}
 +		try {
-+			return propertyIsOnObject(target, key)
++			return key in target
 +				&& !(Object.hasOwnProperty.call(target, key)
 +					&& Object.propertyIsEnumerable.call(target, key))
 +		} catch (_) {
@@ -114,7 +108,7 @@ index 4071e7c56ec8e5273fe166f6e723ac460fab8b72..49fc33466202259feef5830c06abef13
  			});
  		}
  		getKeys(source).forEach(function(key) {
-@@ -93,9 +113,9 @@
+@@ -93,9 +116,9 @@
  			}
  
  			if (propertyIsOnObject(target, key) && options.isMergeableObject(source[key])) {
@@ -127,16 +121,10 @@ index 4071e7c56ec8e5273fe166f6e723ac460fab8b72..49fc33466202259feef5830c06abef13
  		});
  		return destination
 diff --git a/index.js b/index.js
-index 77968aed5d456cccc294f60912ef381fa1e52a7b..d1b15547dbf3ab8db89a6283cb9f54cd019c836a 100644
+index 77968aed5d456cccc294f60912ef381fa1e52a7b..1469570ccb3d926e753bf70606f90c12eb5d1655 100644
 --- a/index.js
 +++ b/index.js
-@@ -40,22 +40,42 @@ function propertyIsOnObject(object, property) {
- 	try {
- 		return property in object
- 	} catch(_) {
--		return false
-+		return true
- 	}
+@@ -45,17 +45,40 @@ function propertyIsOnObject(object, property) {
  }
  
  // Protects from prototype poisoning and unexpected merging up the prototype chain.
@@ -157,8 +145,11 @@ index 77968aed5d456cccc294f60912ef381fa1e52a7b..d1b15547dbf3ab8db89a6283cb9f54cd
 +	if (keyIsForbidden(key)) {
 +		return true
 +	}
++	if (target === null || (typeof target !== 'object' && typeof target !== 'function')) {
++		return false
++	}
 +	try {
-+		return propertyIsOnObject(target, key)
++		return key in target
 +			&& !(Object.hasOwnProperty.call(target, key)
 +				&& Object.propertyIsEnumerable.call(target, key))
 +	} catch (_) {
@@ -178,7 +169,7 @@ index 77968aed5d456cccc294f60912ef381fa1e52a7b..d1b15547dbf3ab8db89a6283cb9f54cd
  		})
  	}
  	getKeys(source).forEach(function(key) {
-@@ -64,9 +84,9 @@ function mergeObject(target, source, options) {
+@@ -64,9 +87,9 @@ function mergeObject(target, source, options) {
  		}
  
  		if (propertyIsOnObject(target, key) && options.isMergeableObject(source[key])) {

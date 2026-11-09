@@ -877,3 +877,4 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #202: Snapshot differences preserve scoring-weight order while retaining set-style skill additions and removals.
 
 - Fix #261: Read-only snapshots no longer create or initialize databases and use project-scoped metrics from an explicitly read-only SQLite connection.
+- Security (#156): preserve benign null/primitive placeholder merges while rejecting poison keys and failing closed on throwing object introspection.

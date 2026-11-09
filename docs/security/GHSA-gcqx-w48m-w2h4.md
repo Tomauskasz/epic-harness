@@ -17,8 +17,12 @@ Run after `pnpm --dir app install --frozen-lockfile`:
 
 ```sh
 node --test scripts/deepmerge-security.test.mjs
+node --test scripts/dependency-audit-policy.test.mjs
+node scripts/audit-dashboard-dependencies.mjs
 ```
 
 The tests resolve `deepmerge` from the actual Svelte plugin, not a test-only copy. They cover null-prototype targets, nested null values, target-side poisoning, nested forbidden keys, symbols, normal cloning/arrays, and custom merge options. Four behavioral tests failed against the original package; all pass with the patch. An additional check verifies lockfile hash and actual patched-module resolution.
 
 Registry-only scanners may continue flagging version 4.3.1 because no upstream patched version exists. That is not evidence the patch was applied: require the hash/resolution checks and adversarial tests before accepting a narrowly scoped source-backport exception. Do not suppress unrelated advisories. Remove this backport only when an upstream fixed version is adopted and the same behavioral tests pass unpatched.
+
+The audit command runs those real-consumer checks before the registry audit. It reports the exact verified source backport explicitly, rejects every other advisory, and rejects missing/inconsistent audit data. Benign null/primitive placeholders and throwing proxies have separate controls so security hardening does not silently discard normal compiler configuration.
