@@ -411,7 +411,9 @@ export async function getHarnessMetrics(project = get(selectedProject)): Promise
 export const getOrbitPipelines = () => invoke<OrbitPipeline[]>('get_orbit_pipelines');
 export async function dismissOrbitPipeline(id: string): Promise<{ ok: boolean }> {
   const res = await fetch(`/api/orbit/${encodeURIComponent(id)}`, { method: 'DELETE' });
-  return res.json();
+  const result = await res.json();
+  if (!res.ok || result?.ok !== true) throw new Error(result?.error ?? 'Pipeline dismissal failed');
+  return result;
 }
 export const getEvolvedSkills = (project = get(selectedProject)) => invoke<EvolutionData>('get_evolved_skills', projectArgs(project));
 export const getObsSummary = () => invoke<ObsSummary>('get_obs_summary', projectArgs());

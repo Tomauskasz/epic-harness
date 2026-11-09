@@ -822,3 +822,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix native dashboard project scoping and aggregate metrics, filtering history and snapshots before limits (#237).
 
 - Register native evolution dashboard handlers with scoped, contained read-only sidecar access (#239).
+
+- Fix #215: Require successful pipeline deletion and show dismissal errors without hiding the row.
