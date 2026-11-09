@@ -843,3 +843,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #238: Load native memory and orchestration data through registered IPC instead of absent HTTP endpoints.
 
 - Remove the duplicate native project resolver after adopting shared canonical validation (#239).
+
+- Add native memory/orchestration IPC access and shared safe dismissal commands instead of unavailable HTTP routes (#238).
