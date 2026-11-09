@@ -734,3 +734,4 @@ Original files are **not deleted** after import. New users are automatically on 
 
 - Apply project scope before the full-text candidate cap so recall retains in-project matches (#230).
 - Fix #270: normalize observed file extensions before stack-specific variant routing.
+- Fix #209: preserve parent metadata when retiring full-pool variants and assign unique fork identities.
