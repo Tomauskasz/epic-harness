@@ -828,3 +828,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #216: Open memory details through a native focusable title button.
 
 - Fix #262: Restore Settings content after a successful project reload following an error.
+
+- Fix #267: Normalize the persisted audit failure count for browser and native Orbit displays.
