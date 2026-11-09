@@ -710,3 +710,4 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #184: report distinct file or evolved-skill merge collisions and retain their sources instead of silently discarding history.
 
 - Fix #259: round-trip scoped text, epoch and boolean metrics without numeric coercion.
+- Fix memory REST deletes to await the configured pool, preserve transactions, and report storage failures (#182).
