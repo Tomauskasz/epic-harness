@@ -64,7 +64,7 @@ fn assert_launcher_form(handlers: &[&str], launcher: &str) {
 fn codex_hook_commands_all_use_launcher() {
     let hooks: Value = serde_json::from_str(CODEX_HOOKS).expect("valid JSON");
     let handlers = command_handlers(&hooks);
-    assert_eq!(handlers.len(), 10, "expected 10 command handlers");
+    assert_eq!(handlers.len(), 11, "expected 11 command handlers");
     assert_launcher_form(&handlers, LAUNCHER);
 }
 
@@ -75,7 +75,7 @@ fn codex_hook_commands_all_use_launcher() {
 fn claude_hook_commands_all_use_launcher() {
     let hooks: Value = serde_json::from_str(CLAUDE_HOOKS).expect("valid JSON");
     let handlers = command_handlers(&hooks);
-    assert_eq!(handlers.len(), 7, "expected 7 command handlers");
+    assert_eq!(handlers.len(), 8, "expected 8 command handlers");
     assert_launcher_form(&handlers, CLAUDE_LAUNCHER);
 }
 

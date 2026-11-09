@@ -56,6 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an existing file with different permissions as a conflict (#217).
 - Explicitly managed source installations retain their verified commit during
   plugin bootstrap and refuse upstream replacement until the rollout removes its pin.
+- Claude Code and supported Codex hosts receive bounded static skill guidance
+  and task-hinted project memory through a native UserPromptSubmit hook. Dispatch
+  logs contain delivery metadata only; guidance does not guarantee model compliance (#276).
 - Plugin hooks read their root through the host environment, preserving literal
   percent references and shell metacharacters in Windows installation paths (#265).
 - New orchestration work reopens completed runs and clears stale completion
