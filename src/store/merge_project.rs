@@ -14,6 +14,9 @@ use std::path::Path;
 use std::str::FromStr;
 
 use super::sqlx_err;
+
+#[path = "global_transfer.rs"]
+mod global_transfer;
 use crate::shared::paths::{global_harness_db_path, harness_projects_root};
 
 #[cfg(test)]
@@ -230,93 +233,7 @@ async fn merge_global_db(db_path: &Path, from: &str, to: &str, dry_run: bool) ->
         return Ok(total);
     }
 
-    conn.execute("BEGIN IMMEDIATE").await.map_err(sqlx_err)?;
-
-    for table in SIMPLE {
-        match sqlx::query(sqlx::AssertSqlSafe(format!(
-            "UPDATE {table} SET project = ? WHERE project = ?"
-        )))
-        .bind(to)
-        .bind(from)
-        .execute(&mut conn)
-        .await
-        {
-            Ok(r) => total += r.rows_affected() as usize,
-            Err(e) if e.to_string().contains("no such") => {}
-            Err(e) => eprintln!("[merge-project] update {table}: {e}"),
-        }
-    }
-
-    // metrics_state: composite PK (key, project) — drop conflicting source rows, then rename.
-    let _ = sqlx::query(
-        "DELETE FROM metrics_state WHERE project = ? \
-         AND key IN (SELECT key FROM metrics_state WHERE project = ?)",
-    )
-    .bind(from)
-    .bind(to)
-    .execute(&mut conn)
-    .await;
-    if let Ok(r) = sqlx::query("UPDATE metrics_state SET project = ? WHERE project = ?")
-        .bind(to)
-        .bind(from)
-        .execute(&mut conn)
-        .await
-    {
-        total += r.rows_affected() as usize;
-    }
-
-    // skill_attribution: composite PK (skill_name, project) — keep target rows on conflict.
-    let _ = sqlx::query(
-        "DELETE FROM skill_attribution WHERE project = ? \
-         AND skill_name IN (SELECT skill_name FROM skill_attribution WHERE project = ?)",
-    )
-    .bind(from)
-    .bind(to)
-    .execute(&mut conn)
-    .await;
-    if let Ok(r) = sqlx::query("UPDATE skill_attribution SET project = ? WHERE project = ?")
-        .bind(to)
-        .bind(from)
-        .execute(&mut conn)
-        .await
-    {
-        total += r.rows_affected() as usize;
-    }
-
-    // promotion_counters: composite PK (pattern_key, project) — sum counts on conflict.
-    let _ = sqlx::query(
-        "UPDATE promotion_counters \
-         SET count = count + (
-             SELECT count FROM promotion_counters AS src
-             WHERE src.project = ? AND src.pattern_key = promotion_counters.pattern_key
-         ) \
-         WHERE project = ? \
-         AND pattern_key IN (SELECT pattern_key FROM promotion_counters WHERE project = ?)",
-    )
-    .bind(from)
-    .bind(to)
-    .bind(from)
-    .execute(&mut conn)
-    .await;
-    let _ = sqlx::query(
-        "DELETE FROM promotion_counters WHERE project = ? \
-         AND pattern_key IN (SELECT pattern_key FROM promotion_counters WHERE project = ?)",
-    )
-    .bind(from)
-    .bind(to)
-    .execute(&mut conn)
-    .await;
-    if let Ok(r) = sqlx::query("UPDATE promotion_counters SET project = ? WHERE project = ?")
-        .bind(to)
-        .bind(from)
-        .execute(&mut conn)
-        .await
-    {
-        total += r.rows_affected() as usize;
-    }
-
-    conn.execute("COMMIT").await.map_err(sqlx_err)?;
-    Ok(total)
+    global_transfer::transfer(&mut conn, from, to).await
 }
 
 // ── Per-project harness.db: ATTACH + INSERT OR IGNORE ───────────────────────
@@ -670,3 +587,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "regression_global_merge.rs"]
+mod regression_global_merge;
