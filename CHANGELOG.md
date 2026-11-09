@@ -747,3 +747,4 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #204: stage complete evolved-skill installs, preserve existing content on failure, and propagate write errors before consuming synthesis.
 - Fix #205: verify synthesis against project-scoped primary Critic state and reject unreadable or invalid gating state.
 - Fix #271: seed permitted cold-start presets before building the first session's evolved-skill context.
+- Windows SessionStart attempts bootstrap before checking for the newly installed executable (#223).
