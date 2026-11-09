@@ -763,3 +763,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #242: reopen orchestration runs for new work and clear stale agent completion metadata.
 
 - Fix #243: serialize orchestration updates with portable interprocess file locks and independent atomic-write files.
+
+- Fix #244: use heartbeat activity for cleanup and retain stale agents as blocked rather than inventing successful completion.
