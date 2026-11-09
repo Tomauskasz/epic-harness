@@ -1,6 +1,55 @@
 #[path = "support/evolution.rs"]
 mod fixture;
 use fixture::Fixture;
+
+#[test]
+fn issue_204_acceptance_persistence_errors_are_retryable() {
+    for obstruction in ["pending_synth.jsonl.tmp", "manifests.jsonl"] {
+        let f = Fixture::new("");
+        f.initialize();
+        let body = f.seed_pending("evo-synthetic");
+        let blocked = f.project.join(obstruction);
+        std::fs::create_dir(&blocked).unwrap();
+        let args = [
+            "evolve",
+            "accept-synth",
+            "--skill",
+            "evo-synthetic",
+            "--file",
+            body.to_str().unwrap(),
+        ];
+        let failed = f.call(&args, serde_json::json!({}));
+        assert_eq!(
+            failed.status.code(),
+            Some(6),
+            "{obstruction}: {}",
+            String::from_utf8_lossy(&failed.stderr)
+        );
+        let pending: serde_json::Value = serde_json::from_str(
+            std::fs::read_to_string(f.project.join("pending_synth.jsonl"))
+                .unwrap()
+                .trim(),
+        )
+        .unwrap();
+        assert_eq!(pending["status"], "pending");
+        assert!(!String::from_utf8_lossy(&failed.stderr).contains("body accepted"));
+        std::fs::remove_dir(&blocked).unwrap();
+        let retry = f.call(&args, serde_json::json!({}));
+        assert!(
+            retry.status.success(),
+            "{}",
+            String::from_utf8_lossy(&retry.stderr)
+        );
+        assert_eq!(f.call(&args, serde_json::json!({})).status.code(), Some(2));
+        assert_eq!(
+            std::fs::read_to_string(f.project.join("manifests.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+    }
+}
 #[test]
 fn issue_204_failed_synthesis_preserves_pending_and_existing_content() {
     let f = Fixture::new("");
