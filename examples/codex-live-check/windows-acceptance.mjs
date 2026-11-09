@@ -9,7 +9,8 @@
 //             `[harness] epic not found` notice (session-start excluded: it
 //             IS the installer, covered by `live`).
 //   live    — epic on PATH (installed from the latest release artifact by
-//             the workflow): every hook exits 0.
+//             the workflow): released lifecycle hooks exit 0. New prompt
+//             dispatch is verified by the source-built Windows job instead.
 //   mcp     — `epic mem mcp` JSON-RPC initialize handshake proves the
 //             harness-mem server starts (this is what mcp_config.json
 //             launches).
@@ -81,6 +82,10 @@ if (mode === "degrade") {
   }
 } else if (mode === "live") {
   for (const hook of hooks) {
+    if (hook.sub === "dispatch") {
+      console.log("SKIP live-release: native prompt dispatch requires source-built acceptance");
+      continue;
+    }
     const r = runHook(hook);
     check(
       `live: ${hook.raw}`,

@@ -46,6 +46,10 @@ These records establish selection/delivery only. They do not measure execution,
 test success, policy enforcement or learning improvement.
 
 Validate the native protocol with `cargo test --test prompt_dispatch_test`.
+Source-built Windows regression checks exercise the changed native command.
+Existing released-artifact acceptance continues to check released lifecycle
+commands, while explicitly deferring new dispatch to source-built checks because
+the previous release does not implement that CLI command.
 Host acceptance additionally requires a real supported host session demonstrating
 that synthetic private task memory reaches the model through `additionalContext`.
 Native tests alone do not prove host consumption or model behavior.

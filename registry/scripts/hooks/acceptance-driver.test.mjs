@@ -24,7 +24,9 @@ test('Windows acceptance executes manifest commands through the actual host shel
     const result = spawnSync(process.execPath, [fileURLToPath(new URL('../../../examples/codex-live-check/windows-acceptance.mjs', import.meta.url)), 'live'], { cwd: root, env, encoding: 'utf8', timeout: 30000, windowsHide: true });
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.equal(fs.existsSync(marker), true, 'argv-only acceptance can hide host shell quoting and .cmd resolution failures');
-    const hooks = Object.values(JSON.parse(fs.readFileSync(path.join(root, '.codex-plugin/hooks.json'), 'utf8')).hooks).flat().flatMap(g => g.hooks).length;
+    // The old released artifact lacks native dispatch; the source-built job
+    // and prompt-dispatch.test.mjs cover that new command separately.
+    const hooks = Object.entries(JSON.parse(fs.readFileSync(path.join(root, '.codex-plugin/hooks.json'), 'utf8')).hooks).filter(([event]) => event !== 'UserPromptSubmit').flatMap(([, groups]) => groups).flatMap(g => g.hooks).length;
     assert.equal(fs.readFileSync(marker, 'utf8').split('called').length - 1, hooks);
   } finally {
     assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep));
