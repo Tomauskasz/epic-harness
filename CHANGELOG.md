@@ -88,6 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Legacy observation imports retain project attribution, migration completion is
   scoped per project, and scoped metrics preserve text and Boolean values
   (#257, #258, #259).
+- Bundled SQLite is updated to 3.54.1 while retaining SQLx's binding API and
+  existing databases, fixing WAL page-cache memory exposure (#278).
 - Linked worktrees on Windows now share the main checkout's harness identity,
   using native absolute-path detection for Git's common directory.
 - Reflection compares canonical project/root and vault/home paths consistently

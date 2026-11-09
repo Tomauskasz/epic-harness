@@ -1,6 +1,6 @@
 [workspace]
 members = [".", "src-tauri"]
-exclude = ["vendor/glib-0.18.5"]
+exclude = ["vendor/glib-0.18.5", "vendor/libsqlite3-sys-0.30.1"]
 
 [package]
 name = "epic-harness"
@@ -87,3 +87,5 @@ codegen-units = 4
 # upstream VariantStrIter safety fix until that family can move together.
 [patch.crates-io]
 glib = { path = "vendor/glib-0.18.5" }
+# SQLx 0.9 requires this binding API; update its bundled engine independently.
+libsqlite3-sys = { path = "vendor/libsqlite3-sys-0.30.1" }
