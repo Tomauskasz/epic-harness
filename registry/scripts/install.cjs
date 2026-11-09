@@ -43,8 +43,8 @@ function managedInstallation() {
     try {
       const marker = JSON.parse(readFileSync(join(dirname(binary), "epic-managed.json"), "utf8"));
       if (marker.schema === 1 && marker.automatic_updates === false
-        && /^[0-9a-f]{40}$/i.test(marker.commit || "")
-        && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(marker.repository || "")) return marker;
+        && typeof marker.commit === "string" && /^[0-9a-f]{40}$/i.test(marker.commit)
+        && typeof marker.repository === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(marker.repository)) return marker;
     } catch (_) {}
     // A later PATH entry cannot pin the executable selected by the host.
     return null;

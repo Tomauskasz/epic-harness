@@ -51,7 +51,7 @@ test('bootstrap preserves an explicitly managed source installation even when th
 });
 
 test('ordinary, invalid, and non-effective markers do not suppress normal updates', async () => {
-  for (const marker of [undefined, { ...pin, automatic_updates: true }, { ...pin, commit: 'not-a-commit' }, { ...pin, schema: 2 }, { ...pin, repository: '' }]) {
+  for (const marker of [undefined, { ...pin, automatic_updates: true }, { ...pin, commit: 'not-a-commit' }, { ...pin, commit: [pin.commit] }, { ...pin, schema: 2 }, { ...pin, repository: '' }, { ...pin, repository: [pin.repository] }]) {
     assert.equal((await bootstrap(marker)).installed, true, JSON.stringify(marker));
   }
   assert.equal((await bootstrap(pin, true)).installed, true, 'a later PATH binary cannot pin the effective installation');
