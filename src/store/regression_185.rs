@@ -128,3 +128,57 @@ async fn issue_185_legacy_optional_columns_keep_documented_defaults() {
         .unwrap();
     assert_eq!(holdout, 0);
 }
+
+#[tokio::test]
+async fn issue_185_preserves_invocation_identity_and_resets_remapped_reflection_cursor() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source.db");
+    let mut s = database(&source).await;
+    let has_column: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('observations') WHERE name='invocation_id'",
+    )
+    .fetch_one(&mut s)
+    .await
+    .unwrap();
+    if has_column == 0 {
+        sqlx::query("ALTER TABLE observations ADD COLUMN invocation_id TEXT")
+            .execute(&mut s)
+            .await
+            .unwrap();
+    }
+    sqlx::raw_sql("INSERT INTO observations(timestamp,session_id,tool,tool_category,action,result,score,invocation_id) VALUES('fixture','session','Bash','bash','echo fixture','success',1,'stable-fixture'); INSERT INTO metrics_state(key,value,project) VALUES('reflection_cursor','999','source');").execute(&mut s).await.unwrap();
+    s.close().await.unwrap();
+    let mut target = database(&temp.path().join("target.db")).await;
+    if has_column == 0 {
+        sqlx::query("ALTER TABLE observations ADD COLUMN invocation_id TEXT")
+            .execute(&mut target)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO metrics_state(key,value,project) VALUES('reflection_cursor','555','target')",
+    )
+    .execute(&mut target)
+    .await
+    .unwrap();
+    sqlx::query("ATTACH DATABASE ? AS src")
+        .bind(source.to_string_lossy().as_ref())
+        .execute(&mut target)
+        .await
+        .unwrap();
+    merge_attached_db_async(&mut target, "target", "src")
+        .await
+        .unwrap();
+    let identity: String = sqlx::query_scalar("SELECT invocation_id FROM observations")
+        .fetch_one(&mut target)
+        .await
+        .unwrap();
+    assert_eq!(identity, "stable-fixture");
+    let cursor: String = sqlx::query_scalar(
+        "SELECT value FROM metrics_state WHERE key='reflection_cursor' AND project='target'",
+    )
+    .fetch_one(&mut target)
+    .await
+    .unwrap();
+    assert_eq!(cursor, "0");
+}

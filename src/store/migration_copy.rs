@@ -62,6 +62,12 @@ pub(super) async fn merge(
                 _ => {}
             }
         }
+        if stats.obs > 0 {
+            // Observation IDs are allocated again at the destination. Replay is
+            // safer than treating a cursor from either ID space as authoritative.
+            sqlx::query("UPDATE metrics_state SET value='0' WHERE key='reflection_cursor' AND project=?")
+                .bind(slug).execute(&mut *conn).await.map_err(sqlx_err)?;
+        }
         Ok(stats)
     }
     .await;
@@ -144,6 +150,17 @@ async fn copy_table(
     }
     let target_columns = columns(conn, "main", table).await?;
     let source_set: HashSet<_> = source_columns.iter().map(String::as_str).collect();
+    if table == "metrics_state" && source_set.contains("key") && source_set.contains("value") {
+        let sql = format!(
+            "UPDATE main.metrics_state SET value='0' WHERE key='reflection_cursor' AND project=? AND EXISTS(SELECT 1 FROM {}.metrics_state WHERE key='reflection_cursor')",
+            quoted(source)
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(slug)
+            .execute(&mut *conn)
+            .await
+            .map_err(sqlx_err)?;
+    }
     if source_columns
         .iter()
         .any(|name| !target_columns.contains(name))
@@ -175,6 +192,9 @@ async fn copy_table(
             dest.push(quoted(&column));
             select.push("?".to_string());
             project = true;
+        } else if table == "metrics_state" && column == "value" && source_set.contains("value") {
+            dest.push(quoted(&column));
+            select.push("CASE WHEN s.key='reflection_cursor' THEN '0' ELSE s.value END".into());
         } else if source_set.contains(column.as_str()) {
             dest.push(quoted(&column));
             select.push(format!("s.{}", quoted(&column)));
