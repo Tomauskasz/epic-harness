@@ -750,3 +750,4 @@ Original files are **not deleted** after import. New users are automatically on 
 - Windows SessionStart attempts bootstrap before checking for the newly installed executable (#223).
 - Bootstrap version detection resolves Codex, Claude and Grok plugin roots without depending on the working directory (#225).
 - Update checks use the running executable and return before all installation, registration, and dashboard side effects (#224).
+- Windows installation fails on locked replacement or hash/copy errors and verifies installed bytes before claiming success (#226).
