@@ -142,6 +142,36 @@ async fn issue_228_project_and_tag_membership_are_exact_literals() {
     );
 }
 
+#[tokio::test]
+async fn issue_230_project_scope_precedes_fts_candidate_limit() {
+    let pool = crate::store::pool::test_memory_pool().await;
+    init_schema_pool(&pool).await.unwrap();
+    for i in 0..12 {
+        let mut outside = make_node(
+            &format!("outside-{i}"),
+            "isolationtoken",
+            "concept",
+            &[],
+            None,
+        );
+        outside.frontmatter.projects = vec!["outside".into()];
+        write_node_pool(&pool, &outside).await.unwrap();
+    }
+    let mut inside = make_node("inside-note", "Inside policy", "decision", &[], None);
+    inside.frontmatter.projects = vec!["inside".into()];
+    inside.body = format!("isolationtoken {}", "filler ".repeat(50));
+    write_node_pool(&pool, &inside).await.unwrap();
+    let recalled = smart_recall_pool(&pool, Some("inside"), Some("isolationtoken"), 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        recalled.len(),
+        1,
+        "foreign-project hits cannot consume the scoped FTS cap"
+    );
+    assert_eq!(recalled[0].node.frontmatter.id, "inside-note");
+}
+
 #[test]
 fn issue_232_legacy_import_defaults_only_missing_importance() {
     let legacy = "---\nid: legacy-decision\ntype: decision\ntitle: Legacy choice\ncreated: 2024-01-01\nupdated: 2024-01-01\n---\nbody";
