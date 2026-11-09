@@ -78,6 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native guard covers the Guard50 destructive/credential and infrastructure rules;
   the benchmark now checks the actual binary in isolated fixtures and reports
   denials, warnings and safe allows without claiming warnings block execution (#274).
+- Memory search HTTP type filters are validated and applied before the result limit (#268).
 - Memory search HTTP results include tags and list-row metadata required by the renderer (#240).
 - Session snapshot APIs return recent project-scoped objects from SQLite and legacy JSON, preserving fields and deduplicating same-project copies (#214).
 - Storage transfers preserve complete operational state and invocation identity,

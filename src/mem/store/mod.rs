@@ -75,4 +75,6 @@ pub use recall::{smart_recall, smart_recall_pool};
 
 // ── Re-exports: search ────────────────────────────────
 
-pub use search::{query_nodes, query_nodes_pool, search_nodes, search_nodes_pool};
+pub use search::{
+    query_nodes, query_nodes_pool, search_nodes, search_nodes_filtered, search_nodes_pool,
+};

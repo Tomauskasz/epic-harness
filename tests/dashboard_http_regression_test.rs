@@ -513,3 +513,28 @@ fn issue_240_memory_search_rows_include_renderable_metadata() {
     assert_eq!(body[0]["importance"], 0.8);
     assert!(body[0]["snippet"].is_string());
 }
+
+#[test]
+fn issue_268_memory_search_filters_type_before_limit() {
+    let dashboard = Dashboard::start();
+    for index in 0..25 {
+        dashboard.seed_memory("concept", &format!("Zebrafixture concept {index}"));
+    }
+    dashboard.seed_memory("decision", "Zebrafixture decision");
+    let (status, body) = dashboard.request("GET", "/api/search?type=decision&q=Zebrafixture");
+    assert_eq!(status, 200);
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(body[0]["type"], "decision");
+    let (_, absent) = dashboard.request("GET", "/api/search?q=Zebrafixture&type=resolution");
+    assert_eq!(absent, json!([]));
+    let (_, all) = dashboard.request("GET", "/api/search?q=Zebrafixture");
+    assert_eq!(all.as_array().unwrap().len(), 20);
+}
+
+#[test]
+fn issue_268_memory_search_rejects_unknown_type() {
+    let dashboard = Dashboard::start();
+    let (status, body) = dashboard.request("GET", "/api/search?q=Zebrafixture&type=bogus");
+    assert_eq!(status, 400);
+    assert!(body["error"].is_string());
+}
