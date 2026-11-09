@@ -1,6 +1,32 @@
 #[path = "support/evolution.rs"]
 mod fixture;
 use fixture::Fixture;
+
+#[test]
+fn issue_218_legacy_watermark_migration_keeps_delayed_fallback() {
+    let f = Fixture::new("");
+    f.initialize();
+    for i in 0..3 {
+        f.sql(&format!("INSERT INTO observations(timestamp,session_id,tool,tool_category,action,result,score,project) VALUES('2024-01-01T00:00:00Z','already-analyzed','Bash','bash','old-{i}','success',1.0,'issue-project')"));
+    }
+    fixture::write(
+        f.project.join("reflect_watermark.txt"),
+        "2025-01-01T00:00:00Z",
+    );
+    let delayed: String = (0..3).map(|i| {
+        serde_json::json!({"timestamp":"2024-01-01T00:00:00Z","tool":"Bash","tool_category":"bash","action":format!("delayed-{i}"),"result":"success","score":1.0}).to_string() + "\n"
+    }).collect();
+    fixture::write(f.project.join("obs/session_delayed.jsonl"), &delayed);
+    f.call(&["reflect"], serde_json::json!({"hook_event_name":"Stop"}));
+    assert_eq!(f.metric()["total_sessions"], 1);
+    assert_eq!(
+        f.metric()["score_history"][0]["observations"],
+        3,
+        "Legacy rows stay consumed but delayed fallback stays eligible"
+    );
+    f.call(&["reflect"], serde_json::json!({"hook_event_name":"Stop"}));
+    assert_eq!(f.metric()["total_sessions"], 1);
+}
 #[test]
 fn issue_218_new_same_second_rows_are_consumed_once() {
     let f = Fixture::new("");
