@@ -299,6 +299,7 @@ export default defineConfig({
   },
   clearScreen: false,
   server: {
+    fs: { allow: [path.resolve(__dirname), path.resolve(__dirname, '../skills')] },
     port: 5173,
     strictPort: true,
     host: host || false,

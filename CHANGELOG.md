@@ -830,3 +830,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #262: Restore Settings content after a successful project reload following an error.
 
 - Fix #267: Normalize the persisted audit failure count for browser and native Orbit displays.
+
+- Fix #263: Generate the skill catalog and copied commands from current skill metadata rather than obsolete names.
