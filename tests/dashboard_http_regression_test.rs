@@ -3,9 +3,18 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+
+// Each fixture owns a server and SQLite pools. Avoid exhausting the Windows
+// runner with a server per test thread; concurrency has separate regressions.
+static DASHBOARD_FIXTURE: Mutex<()> = Mutex::new(());
+
+fn dashboard_test_guard() -> MutexGuard<'static, ()> {
+    DASHBOARD_FIXTURE.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 struct Dashboard {
     _temp: tempfile::TempDir,
@@ -190,6 +199,7 @@ impl Drop for Dashboard {
 
 #[test]
 fn issue_222_nonobject_pipeline_files_do_not_terminate_dashboard() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     dashboard.file("projects/project-a/orbit/PIPELINE-invalid.json", &json!([]));
     dashboard.file(
@@ -208,6 +218,7 @@ fn issue_222_nonobject_pipeline_files_do_not_terminate_dashboard() {
 
 #[test]
 fn issue_222_nonobject_pipeline_database_rows_do_not_terminate_dashboard() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     dashboard.seed_pipeline("invalid", "project-a", "[]");
     dashboard.seed_pipeline("valid", "project-a", "{}");
@@ -220,6 +231,7 @@ fn issue_222_nonobject_pipeline_database_rows_do_not_terminate_dashboard() {
 
 #[test]
 fn issue_221_empty_pipeline_id_rejects_without_deleting_other_projects() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     let a = dashboard.file(
         "projects/project-a/orbit/PIPELINE-alpha.json",
@@ -237,6 +249,7 @@ fn issue_221_empty_pipeline_id_rejects_without_deleting_other_projects() {
 
 #[test]
 fn issue_221_pipeline_id_matches_exactly_and_honors_selected_project() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     let selected = dashboard.file(
         "projects/project-a/orbit/PIPELINE-alpha.json",
@@ -259,6 +272,7 @@ fn issue_221_pipeline_id_matches_exactly_and_honors_selected_project() {
 
 #[test]
 fn issue_264_dismiss_removes_primary_pipeline_and_sidecar() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     dashboard.seed_pipeline("PIPELINE-persisted", "project-a", "{}");
     dashboard.seed_pipeline("PIPELINE-persisted-extra", "project-a", "{}");
@@ -283,6 +297,7 @@ fn issue_264_dismiss_removes_primary_pipeline_and_sidecar() {
 
 #[test]
 fn issue_264_database_only_pipeline_can_be_dismissed_with_project_scope() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     dashboard.seed_pipeline("PIPELINE-db-only", "project-b", "{}");
     let (wrong_status, wrong_body) =
@@ -328,6 +343,7 @@ fn directory_link(link: &std::path::Path, target: &std::path::Path) {
 
 #[test]
 fn issue_220_project_selectors_reject_path_syntax_without_read_or_write() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     let outside = dashboard.data.parent().unwrap().join("outside");
     fs::create_dir_all(&outside).unwrap();
@@ -372,6 +388,7 @@ fn issue_220_project_selectors_reject_path_syntax_without_read_or_write() {
 
 #[test]
 fn issue_220_seesaw_get_is_read_only() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     let file = dashboard.file(
         "projects/project-a/seesaw.json",
@@ -392,6 +409,7 @@ fn issue_220_seesaw_get_is_read_only() {
 
 #[test]
 fn issue_220_project_and_nested_junctions_cannot_escape_project_data() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     let outside = dashboard.data.parent().unwrap().join("outside");
     fs::create_dir_all(&outside).unwrap();
@@ -433,6 +451,7 @@ fn issue_220_project_and_nested_junctions_cannot_escape_project_data() {
 
 #[test]
 fn issue_214_snapshot_api_returns_scoped_database_snapshot_objects() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     dashboard.seed_snapshot("project-a", "local snapshot", 1);
     dashboard.seed_snapshot("project-b", "foreign snapshot", 2);
@@ -453,6 +472,7 @@ fn issue_214_snapshot_api_returns_scoped_database_snapshot_objects() {
 
 #[test]
 fn issue_214_snapshot_api_parses_legacy_files_instead_of_returning_filenames() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     dashboard.file("projects/project-a/sessions/snapshot-old.json", &json!({"timestamp":"2026-11-08T00:00:00Z","type":"pre-compact","summary":"legacy local","pending_tasks":[],"context_usage":0.2}));
     dashboard.file("projects/project-b/sessions/snapshot-other.json", &json!({"timestamp":"2026-11-09T00:00:00Z","type":"pre-compact","summary":"legacy foreign","pending_tasks":[],"context_usage":0.3}));
@@ -477,6 +497,7 @@ fn issue_214_snapshot_api_parses_legacy_files_instead_of_returning_filenames() {
 
 #[test]
 fn issue_214_duplicate_snapshot_copies_preserve_distinct_projects() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     dashboard.seed_snapshot("project-a", "same summary", 1);
     let snapshot = json!({"timestamp":"2026-11-09T00:00:01Z","type":"pre-compact","summary":"same summary","pending_tasks":["pending synthetic task"],"context_usage":0.4});
@@ -501,6 +522,7 @@ fn issue_214_duplicate_snapshot_copies_preserve_distinct_projects() {
 
 #[test]
 fn issue_240_memory_search_rows_include_renderable_metadata() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     dashboard.seed_memory("concept", "Zebrafixture needle");
     let (status, body) = dashboard.request("GET", "/api/search?q=Zebrafixture");
@@ -516,6 +538,7 @@ fn issue_240_memory_search_rows_include_renderable_metadata() {
 
 #[test]
 fn issue_268_memory_search_filters_type_before_limit() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     for index in 0..25 {
         dashboard.seed_memory("concept", &format!("Zebrafixture concept {index}"));
@@ -533,6 +556,7 @@ fn issue_268_memory_search_filters_type_before_limit() {
 
 #[test]
 fn issue_268_memory_search_rejects_unknown_type() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     let (status, body) = dashboard.request("GET", "/api/search?q=Zebrafixture&type=bogus");
     assert_eq!(status, 400);
@@ -541,6 +565,7 @@ fn issue_268_memory_search_rejects_unknown_type() {
 
 #[test]
 fn issue_268_memory_search_preserves_rest_supported_types() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     for node_type in ["instinct", "psychographic"] {
         dashboard.seed_memory(node_type, &format!("Zebrafixture {node_type}"));
@@ -556,6 +581,7 @@ fn issue_268_memory_search_preserves_rest_supported_types() {
 
 #[test]
 fn issue_279_mixed_database_and_legacy_pipeline_lists_preserve_selected_projects() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     dashboard.file(
         "projects/project-a/orbit/PIPELINE-legacy.json",
@@ -583,6 +609,7 @@ fn issue_279_mixed_database_and_legacy_pipeline_lists_preserve_selected_projects
 
 #[test]
 fn issue_279_primary_copies_win_without_hiding_foreign_same_id() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     dashboard.seed_pipeline("shared-id", "project-a", "{}");
     let primary_copy = dashboard.file(
@@ -619,6 +646,7 @@ fn issue_279_primary_copies_win_without_hiding_foreign_same_id() {
 
 #[test]
 fn issue_279_legacy_pipeline_fallback_survives_unavailable_database() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     fs::create_dir_all(dashboard.data.join("harness.db")).unwrap();
     dashboard.file(
@@ -636,6 +664,7 @@ fn issue_279_legacy_pipeline_fallback_survives_unavailable_database() {
 
 #[test]
 fn issue_282_bom_legacy_pipeline_remains_visible_beside_database_rows() {
+    let _guard = dashboard_test_guard();
     let dashboard = Dashboard::start();
     dashboard.seed_pipeline("database", "project-b", "{}");
     let valid = dashboard.file(
