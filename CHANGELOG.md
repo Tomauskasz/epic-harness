@@ -727,3 +727,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Return standard JSON-RPC parse and envelope errors while preserving notification semantics (#236).
 
 - Use exact project and tag membership instead of substring or SQL wildcard matching (#228).
+
+- Preserve ordinary uppercase words when quoting literal full-text recall terms (#231).

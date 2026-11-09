@@ -216,6 +216,19 @@ fn test_parse_iso_epoch_start() {
     assert_eq!(parse_iso_to_secs("1970-01-01T00:00:00Z"), 0);
 }
 
+#[tokio::test]
+async fn issue_231_recall_keeps_operator_substrings_in_words() {
+    let pool = crate::store::pool::test_memory_pool().await;
+    init_schema_pool(&pool).await.unwrap();
+    let node = make_node("algorithm", "ALGORITHM", "concept", &[], None);
+    write_node_pool(&pool, &node).await.unwrap();
+    let recalled = smart_recall_pool(&pool, None, Some("ALGORITHM"), 5)
+        .await
+        .unwrap();
+    assert_eq!(recalled.len(), 1);
+    assert_eq!(recalled[0].node.frontmatter.id, "algorithm");
+}
+
 #[test]
 fn issue_233_malformed_unicode_timestamp_is_rejected_without_panicking() {
     for value in [
