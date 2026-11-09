@@ -643,9 +643,10 @@ fn merge_dashboard_pipeline_sidecars(
             ) else {
                 continue;
             };
-            let Some(serde_json::Value::Object(mut map)) = std::fs::read_to_string(path)
-                .ok()
-                .and_then(|text| crate::shared::helpers::parse_persisted_json::<serde_json::Value>(&text).ok())
+            let Some(serde_json::Value::Object(mut map)) =
+                std::fs::read_to_string(path).ok().and_then(|text| {
+                    crate::shared::helpers::parse_persisted_json::<serde_json::Value>(&text).ok()
+                })
             else {
                 continue;
             };
