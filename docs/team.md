@@ -125,6 +125,9 @@ when `--org` is omitted, Codex-only projects can infer it from the agent TOML.
 
 ## Team Types
 
+Re-running team generation with `--type` updates the canonical type and all synced
+Team Context sections. Existing custom agents are preserved by append/merge.
+
 Type drives default agent composition proposals. User can override at design time.
 
 | Type | Keyword | Default agents |

@@ -258,3 +258,60 @@ fn unlink_rejects_conflicting_mirror_owners() {
     );
     assert!(codex.exists());
 }
+
+#[test]
+fn updating_team_type_persists_selected_type_and_synced_context() {
+    let fixture = Fixture::new();
+    let canonical = fixture.seed_team("alpha", "backend");
+    fs::create_dir_all(fixture.project.join(".codex")).unwrap();
+    let custom = read(&canonical.join("agents/tester.md"));
+
+    for team_type in ["platform", "platform", "subsystem"] {
+        fixture.success(&[
+            "--yes",
+            "--org",
+            "alpha",
+            "--name",
+            "backend",
+            "--type",
+            team_type,
+            "--mission",
+            "Synthetic updated mission",
+        ]);
+        let config: serde_json::Value =
+            serde_json::from_str(&read(&canonical.join("config.json"))).unwrap();
+        assert_eq!(
+            config["type"], team_type,
+            "selected type must persist before sync"
+        );
+        assert_eq!(config["projects"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            read(&canonical.join("agents/tester.md")),
+            custom,
+            "custom agents must survive append/merge"
+        );
+        let label = if team_type == "platform" {
+            "Platform"
+        } else {
+            "Subsystem"
+        };
+        for entry in fs::read_dir(fixture.project.join(".claude/agents/backend")).unwrap() {
+            let content = read(&entry.unwrap().path());
+            assert!(content.contains(&format!("**Team**: backend ({label})")));
+            assert!(content.contains("Synthetic updated mission"));
+            assert!(!content.contains("Stream-aligned"));
+        }
+        for entry in fs::read_dir(fixture.project.join(".codex/agents/backend")).unwrap() {
+            let content: toml::Value = toml::from_str(&read(&entry.unwrap().path())).unwrap();
+            assert!(
+                content["developer_instructions"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("**Team**: backend ({label})"))
+            );
+        }
+    }
+    assert!(canonical.join("agents/api-designer.md").exists());
+    assert!(canonical.join("agents/domain-specialist.md").exists());
+    assert!(canonical.join("agents/tester.md").exists());
+}

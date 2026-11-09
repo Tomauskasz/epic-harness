@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Updating an existing team's type now persists it before syncing, so generated
+  host agents receive the selected Team Context without losing custom agents (#250).
 - Team unlink/delete validates local mirror ownership before removal, preserving
   other orgs' agents and correctly deregistering Codex-only links (#249).
 - Project-local team sync keeps other host installations untouched; home-wide
