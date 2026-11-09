@@ -826,3 +826,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #215: Require successful pipeline deletion and show dismissal errors without hiding the row.
 
 - Fix #216: Open memory details through a native focusable title button.
+
+- Fix #262: Restore Settings content after a successful project reload following an error.
