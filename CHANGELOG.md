@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep correctness verdicts consistent with configured minimum pass rates below 80%; accepted partial results report warnings (#178).
 
 ### Fixed
+- Reject explicit performance metric changes instead of comparing unrelated wall-clock durations; retain legacy baseline compatibility (#275).
 - Preserve native Windows UNC and device roots in evaluation child arguments (#201).
 - Rebuild the bundled dashboard from the integrated source, including live activity, memory search, and persisted Orbit phases.
 - Fix #275: compare measured latency, throughput or native command duration against performance baselines using the configured percentage threshold.

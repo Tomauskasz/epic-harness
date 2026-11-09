@@ -377,3 +377,43 @@ fn correctness_nonzero_and_minimum_pass_rate_fail_the_gate() {
     assert_eq!(report["dimensions"]["correctness"]["passed"], true);
     assert_eq!(report["overall_verdict"], "WARN");
 }
+
+#[test]
+fn explicit_performance_metric_changes_cannot_use_legacy_wall_duration() {
+    for (previous_details, expected_success) in [
+        (
+            serde_json::json!({"metric":"latency_ms", "metric_value":5}),
+            false,
+        ),
+        (
+            serde_json::json!({"metric":"throughput", "metric_value":5}),
+            false,
+        ),
+        (serde_json::json!({"metric":42, "metric_value":5}), false),
+        (serde_json::json!({}), true),
+    ] {
+        let f = Fixture::new();
+        f.config(&format!("dimensions:\n  performance:\n    enabled: true\n    command: {}\n    extra:\n      max_regression_pct: 20\n  regression:\n    enabled: true\n", serde_json::to_string(&f.command()).unwrap()));
+        let baselines = f.eval_dir().join("baselines");
+        fs::create_dir_all(&baselines).unwrap();
+        let baseline = serde_json::json!({"dimensions":{"performance":{
+            "score":1, "duration_ms":1000000, "details":previous_details
+        }}});
+        fs::write(
+            baselines.join("latest.json"),
+            serde_json::to_vec(&baseline).unwrap(),
+        )
+        .unwrap();
+        let output = f.run("wall-duration", &["eval", "--json"]);
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            report["dimensions"]["performance"]["details"]["metric"],
+            "duration_ms"
+        );
+        assert_eq!(output.status.success(), expected_success, "{report}");
+        assert_eq!(
+            report["dimensions"]["regression"]["details"]["deltas"]["performance"]["comparison_error"],
+            !expected_success
+        );
+    }
+}
