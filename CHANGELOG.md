@@ -721,3 +721,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Respond to MCP liveness ping with an empty result object (#235).
 
 - Preserve explicit importance values across database opens and legacy imports (#232).
+
+- Migrate edge IDs and weights additively, delete exact edge identities, and align native edge creation (#227).
