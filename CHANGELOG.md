@@ -753,3 +753,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Windows installation fails on locked replacement or hash/copy errors and verifies installed bytes before claiming success (#226).
 - Release installation uses the published archive layout, installs both CLI names, preserves aliases on failed replacement, and acceptance runs the real host shell and shipped installer (#132).
 - Fix #210: propagate dashboard backend failures instead of displaying fabricated production metrics.
+
+- Fix #211: Discard stale Evolution responses and capture project identity for every panel request.
