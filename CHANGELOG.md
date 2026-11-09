@@ -799,3 +799,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Test portability: retain orbit symlink checks where supported and explicitly handle Windows file-symlink privilege limitations.
 
 - Fix #247: retain fresh Orbit reservations, serialize admission, reject active-pipeline unlocks, and optionally verify EPIC_ORBIT_OWNER.
+
+- Fix #245: record authoritative failed Agent outcomes as failed, preserve terminal timestamps, and keep downstream resolution policy coherent.
