@@ -757,3 +757,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #211: Discard stale Evolution responses and capture project identity for every panel request.
 
 - Fix #212: Show no matches for a completed memory search and discard outdated search responses.
+
+- Fix #213: Display graph node and edge counts from the canonical backend statistics fields.
