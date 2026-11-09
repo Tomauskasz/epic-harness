@@ -845,3 +845,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Remove the duplicate native project resolver after adopting shared canonical validation (#239).
 
 - Add native memory/orchestration IPC access and shared safe dismissal commands instead of unavailable HTTP routes (#238).
+
+- Fix #267: Prefer persisted audit counts when both retry field names are present while accepting legacy-only records.
