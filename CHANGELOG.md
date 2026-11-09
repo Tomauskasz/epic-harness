@@ -692,3 +692,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #269: report legacy directory links and junctions without traversing or copying their external targets.
 
 - Fix #252: validate selected project paths and every existing descendant ancestor before reflection reads.
+
+- Fix #217: retry incomplete legacy imports safely, preserve conflicting destinations and keep originals and project-local resources.
