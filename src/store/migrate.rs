@@ -35,6 +35,9 @@ mod regression_256;
 #[path = "regression_257.rs"]
 mod regression_257;
 
+#[cfg(test)]
+#[path = "regression_258.rs"]
+mod regression_258;
 
 // ── Connection factory ──────────────────────────────────────────────────────
 
@@ -106,8 +109,10 @@ async fn run_subcommand_async(dry_run: bool, reset: bool) -> i32 {
         }
     };
 
+    let marker = legacy_marker();
     let migration_state: Option<String> =
-        sqlx::query("SELECT value FROM _harness_meta WHERE key = 'legacy_migrated'")
+        sqlx::query("SELECT value FROM _harness_meta WHERE key = ?")
+            .bind(&marker)
             .fetch_optional(&mut conn)
             .await
             .ok()
@@ -121,8 +126,9 @@ async fn run_subcommand_async(dry_run: bool, reset: bool) -> i32 {
         }
         Some("in_progress") => {
             if reset {
-                if let Err(e) = conn
-                    .execute("DELETE FROM _harness_meta WHERE key = 'legacy_migrated'")
+                if let Err(e) = sqlx::query("DELETE FROM _harness_meta WHERE key = ?")
+                    .bind(&marker)
+                    .execute(&mut conn)
                     .await
                     .map_err(sqlx_err)
                 {
@@ -244,10 +250,15 @@ pub(crate) fn do_migrate(conn: &mut sqlx::SqliteConnection) -> io::Result<Migrat
     super::runtime::block_on(do_migrate_async(conn))
 }
 
+fn legacy_marker() -> String {
+    format!("legacy_migrated:{}", crate::shared::paths::project_slug())
+}
+
 pub(crate) async fn do_migrate_async(
     conn: &mut sqlx::SqliteConnection,
 ) -> io::Result<MigrationStats> {
     let harness_dir = crate::shared::paths::harness_dir();
+    let marker = legacy_marker();
     let mut stats = MigrationStats {
         obs_imported: 0,
         sess_imported: 0,
@@ -262,7 +273,8 @@ pub(crate) async fn do_migrate_async(
     {
         begin_immediate(conn).await?;
         let already: bool =
-            sqlx::query("SELECT value FROM _harness_meta WHERE key = 'legacy_migrated'")
+            sqlx::query("SELECT value FROM _harness_meta WHERE key = ?")
+                .bind(&marker)
                 .fetch_optional(&mut *conn)
                 .await
                 .ok()
@@ -276,8 +288,9 @@ pub(crate) async fn do_migrate_async(
         }
 
         sqlx::query(
-            "INSERT INTO _harness_meta (key, value) VALUES ('legacy_migrated', 'in_progress') ON CONFLICT (key) DO UPDATE SET value=excluded.value",
+            "INSERT INTO _harness_meta (key, value) VALUES (?, 'in_progress') ON CONFLICT (key) DO UPDATE SET value=excluded.value",
         )
+        .bind(&marker)
         .execute(&mut *conn)
         .await
         .map_err(sqlx_err)?;
@@ -296,8 +309,9 @@ pub(crate) async fn do_migrate_async(
     {
         begin_immediate(conn).await?;
         sqlx::query(
-            "INSERT INTO _harness_meta (key, value) VALUES ('legacy_migrated', '1') ON CONFLICT (key) DO UPDATE SET value=excluded.value",
+            "INSERT INTO _harness_meta (key, value) VALUES (?, '1') ON CONFLICT (key) DO UPDATE SET value=excluded.value",
         )
+        .bind(&marker)
         .execute(&mut *conn)
         .await
         .map_err(sqlx_err)?;
@@ -1237,7 +1251,8 @@ mod tests {
         assert_eq!(stats.sess_imported, 0);
 
         let migrated: String =
-            sqlx::query("SELECT value FROM _harness_meta WHERE key = 'legacy_migrated'")
+            sqlx::query("SELECT value FROM _harness_meta WHERE key = ?")
+                .bind(legacy_marker())
                 .fetch_one(&mut conn)
                 .await
                 .unwrap()
