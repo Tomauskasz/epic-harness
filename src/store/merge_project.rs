@@ -89,16 +89,35 @@ async fn run_merge_async(from: &str, to: &str, dry_run: bool, delete_source: boo
     }
 
     // ── 3. File-based data ───────────────────────────────────────────────────
-    let obs_files = copy_dir_files(&from_dir.join("obs"), &to_dir.join("obs"), dry_run);
-    let session_files = copy_dir_files(
-        &from_dir.join("sessions"),
-        &to_dir.join("sessions"),
-        dry_run,
+    let obs_files = merge_file_count(
+        copy_dir_files(&from_dir.join("obs"), &to_dir.join("obs"), dry_run),
+        "observations",
+        &mut exit,
     );
-    let orbit_files = copy_dir_files(&from_dir.join("orbit"), &to_dir.join("orbit"), dry_run);
-    let evolved_dirs =
-        copy_evolved_dir(&from_dir.join("evolved"), &to_dir.join("evolved"), dry_run);
-    let evo_lines = append_evolution_jsonl(&from_dir, &to_dir, dry_run).unwrap_or(0);
+    let session_files = merge_file_count(
+        copy_dir_files(
+            &from_dir.join("sessions"),
+            &to_dir.join("sessions"),
+            dry_run,
+        ),
+        "sessions",
+        &mut exit,
+    );
+    let orbit_files = merge_file_count(
+        copy_dir_files(&from_dir.join("orbit"), &to_dir.join("orbit"), dry_run),
+        "orbit",
+        &mut exit,
+    );
+    let evolved_dirs = merge_file_count(
+        copy_evolved_dir(&from_dir.join("evolved"), &to_dir.join("evolved"), dry_run),
+        "evolved skills",
+        &mut exit,
+    );
+    let evo_lines = merge_file_count(
+        append_evolution_jsonl(&from_dir, &to_dir, dry_run),
+        "evolution history",
+        &mut exit,
+    );
 
     // ── Summary ──────────────────────────────────────────────────────────────
     println!("\n[merge-project] ─── summary ───────────────────────────");
@@ -110,7 +129,9 @@ async fn run_merge_async(from: &str, to: &str, dry_run: bool, delete_source: boo
     println!("  evolution.jsonl lines    : {evo_lines}");
     println!("  orbit files copied       : {orbit_files}");
 
-    if delete_source {
+    if delete_source && exit != 0 {
+        eprintln!("[merge-project] source retained because at least one transfer failed");
+    } else if delete_source {
         if dry_run {
             println!("  [dry-run] would delete   : {}", from_dir.display());
         } else {
@@ -132,6 +153,17 @@ async fn run_merge_async(from: &str, to: &str, dry_run: bool, delete_source: boo
     }
 
     exit
+}
+
+fn merge_file_count(result: io::Result<usize>, label: &str, exit: &mut i32) -> usize {
+    match result {
+        Ok(count) => count,
+        Err(error) => {
+            eprintln!("[merge-project] {label} transfer failed: {error}");
+            *exit = 1;
+            0
+        }
+    }
 }
 
 // ── Global DB: UPDATE project column ────────────────────────────────────────
@@ -353,12 +385,14 @@ async fn merge_per_project_dbs(
 
 /// Copy files from `src_dir` to `dst_dir`, skipping files that already exist.
 /// Returns the number of files copied (or would copy in dry-run).
-fn copy_dir_files(src_dir: &Path, dst_dir: &Path, dry_run: bool) -> usize {
-    let Ok(entries) = std::fs::read_dir(src_dir) else {
-        return 0;
-    };
+fn copy_dir_files(src_dir: &Path, dst_dir: &Path, dry_run: bool) -> io::Result<usize> {
+    if !src_dir.exists() {
+        return Ok(0);
+    }
+    let entries = std::fs::read_dir(src_dir)?;
     let mut count = 0;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry?;
         let src = entry.path();
         if !src.is_file() {
             continue;
@@ -372,23 +406,24 @@ fn copy_dir_files(src_dir: &Path, dst_dir: &Path, dry_run: bool) -> usize {
             count += 1;
         } else {
             if let Some(parent) = dst.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                std::fs::create_dir_all(parent)?;
             }
-            if std::fs::copy(&src, &dst).is_ok() {
-                count += 1;
-            }
+            std::fs::copy(&src, &dst)?;
+            count += 1;
         }
     }
-    count
+    Ok(count)
 }
 
 /// Copy evolved skill subdirectories that don't already exist in target.
-fn copy_evolved_dir(src_evolved: &Path, dst_evolved: &Path, dry_run: bool) -> usize {
-    let Ok(entries) = std::fs::read_dir(src_evolved) else {
-        return 0;
-    };
+fn copy_evolved_dir(src_evolved: &Path, dst_evolved: &Path, dry_run: bool) -> io::Result<usize> {
+    if !src_evolved.exists() {
+        return Ok(0);
+    }
+    let entries = std::fs::read_dir(src_evolved)?;
     let mut count = 0;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry?;
         let src = entry.path();
         if !src.is_dir() {
             continue;
@@ -398,17 +433,18 @@ fn copy_evolved_dir(src_evolved: &Path, dst_evolved: &Path, dry_run: bool) -> us
         if dst.exists() {
             continue;
         }
-        if !dry_run && copy_dir_recursive(&src, &dst).is_err() {
-            continue;
+        if !dry_run {
+            copy_dir_recursive(&src, &dst)?;
         }
         count += 1;
     }
-    count
+    Ok(count)
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)?.flatten() {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
         let s = entry.path();
         let d = dst.join(entry.file_name());
         if s.is_dir() {
@@ -471,6 +507,81 @@ fn append_evolution_jsonl(from_dir: &Path, to_dir: &Path, dry_run: bool) -> io::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::Connection;
+
+    async fn test_db(path: &Path) -> sqlx::SqliteConnection {
+        let mut conn = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .connect()
+            .await
+            .unwrap();
+        sqlx::raw_sql(crate::store::schema::DDL_SQLITE)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        conn
+    }
+
+    #[tokio::test]
+    async fn issue_183_failed_database_merge_retains_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let home = temp.path().join("home");
+        let source = root.join("projects/source");
+        let target = root.join("projects/target");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(target.join("harness.db")).unwrap();
+        std::fs::create_dir_all(home.join(".config/epic-harness")).unwrap();
+        std::fs::write(home.join(".config/epic-harness/telemetry-consent"), "off").unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[dashboard]\nport=0\nauto_open=false\n",
+        )
+        .unwrap();
+        let mut conn = test_db(&source.join("harness.db")).await;
+        sqlx::query("INSERT INTO sessions(timestamp, summary, created_at_millis, project) VALUES('2026-01-01','retained sentinel',1,'source')")
+            .execute(&mut conn).await.unwrap();
+        conn.close().await.unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "store::merge_project::tests::issue_183_child_merge",
+            ])
+            .current_dir(&source)
+            .env("EPIC_STORAGE_CHILD_CASE", "183")
+            .env("HARNESS_DIR", &root)
+            .env("HARNESS_ROOT", temp.path())
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env_remove("HARNESS_DB_URL")
+            .env_remove("HARNESS_MEM_URL")
+            .env_remove("DATABASE_URL")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            source.join("harness.db").is_file(),
+            "a failed transfer must preserve its only source"
+        );
+        let mut conn = test_db(&source.join("harness.db")).await;
+        let summary: String = sqlx::query_scalar("SELECT summary FROM sessions")
+            .fetch_one(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(summary, "retained sentinel");
+    }
+
+    #[test]
+    fn issue_183_child_merge() {
+        if std::env::var("EPIC_STORAGE_CHILD_CASE").as_deref() == Ok("183") {
+            assert_eq!(run_merge("source", "target", false, true), 1);
+        }
+    }
 
     #[test]
     fn issue_255_preserves_full_records_and_deduplicates_retries() {

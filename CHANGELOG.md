@@ -702,3 +702,5 @@ Original files are **not deleted** after import. New users are automatically on 
 
 - Fix #272: honor per-project sharing consent and documented exports while preserving explicit legacy stores.
 - Fix #255: preserve complete distinct evolution records during project merges and deduplicate identical retry records.
+
+- Fix #183: retain merge sources after database or file-transfer failures and report filesystem errors.
