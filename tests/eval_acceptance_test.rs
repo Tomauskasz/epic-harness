@@ -11,6 +11,38 @@ struct Fixture {
 }
 
 #[test]
+fn init_and_scaffold_json_modes_emit_one_valid_document() {
+    let f = Fixture::new();
+    let init = f.run("pass", &["eval", "--init", "--json"]);
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&init.stdout).unwrap_or_else(|e| {
+        panic!(
+            "init invalid JSON: {e}: {}",
+            String::from_utf8_lossy(&init.stdout)
+        )
+    });
+    assert_eq!(value["action"], "init");
+    assert!(PathBuf::from(value["path"].as_str().unwrap()).exists());
+    fs::write(f.cwd.join("package.json"), "{}").unwrap();
+    for _ in 0..2 {
+        let scaffold = f.run("pass", &["eval", "--scaffold", "--json"]);
+        assert!(scaffold.status.success());
+        let value: serde_json::Value =
+            serde_json::from_slice(&scaffold.stdout).unwrap_or_else(|e| {
+                panic!(
+                    "scaffold invalid JSON: {e}: {}",
+                    String::from_utf8_lossy(&scaffold.stdout)
+                )
+            });
+        assert_eq!(value["action"], "scaffold");
+    }
+}
+
+#[test]
 fn failed_report_and_baseline_writes_return_failure_without_false_confirmation() {
     for broken in ["results", "baselines", "latest"] {
         let f = Fixture::new();
