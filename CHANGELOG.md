@@ -736,3 +736,4 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #270: normalize observed file extensions before stack-specific variant routing.
 - Fix #209: preserve parent metadata when retiring full-pool variants and assign unique fork identities.
 - Fix #206: scope reflection history, snapshots and fallback paths consistently to the selected project.
+- Fix #207: derive reflection pattern and seeded-skill statistics from the current evolution record fields.
