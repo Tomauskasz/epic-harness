@@ -922,3 +922,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #279: Adopt the verified shared/native contract prerequisite (04892ee) for local integration validation.
 
 - Fix #281: Orbit timelines show audit, eval and evolve stages and normalize legacy check/complete phases for retained pipeline data.
+
+- Fix #281: The in-panel Orbit field reference lists the same canonical stages as its timeline.
