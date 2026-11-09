@@ -83,3 +83,25 @@ fn snapshot_distinguishes_blocked_and_warned_rule_sections() {
     assert_ne!(blocked["guard_rules"], warned["guard_rules"]);
     assert_ne!(blocked["hash"], warned["hash"]);
 }
+
+#[test]
+fn snapshot_diff_reports_positional_scoring_weight_changes() {
+    let f = Fixture::new();
+    let before = f.snapshot();
+    let mut after = before.clone();
+    after["config_summary"]["scoring_weights"] = serde_json::json!([0.3, 0.5, 0.2]);
+    let a = f.root.join("before.json");
+    let b = f.root.join("after.json");
+    fs::write(&a, serde_json::to_vec(&before).unwrap()).unwrap();
+    fs::write(&b, serde_json::to_vec(&after).unwrap()).unwrap();
+    let output = f.run(&["harness", "diff", a.to_str().unwrap(), b.to_str().unwrap()]);
+    assert!(output.status.success());
+    let diff = String::from_utf8(output.stdout).unwrap();
+    assert!(diff.contains("config_summary.scoring_weights"), "{diff}");
+    let identical = f.run(&["harness", "diff", a.to_str().unwrap(), a.to_str().unwrap()]);
+    assert!(
+        String::from_utf8(identical.stdout)
+            .unwrap()
+            .contains("no differences")
+    );
+}
