@@ -775,3 +775,5 @@ Original files are **not deleted** after import. New users are automatically on 
 
 - Fix #187: resolve edit-pause directives from the same project-scoped orchestration store as lifecycle hooks.
 - Security (#156): backport prototype-key defenses to the dashboard build's locked `deepmerge` dependency, with real-consumer adversarial and frozen-patch checks.
+
+- Exclude stale-tagged nodes from all smart recall candidates before applying result limits (#266).

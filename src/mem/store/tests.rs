@@ -172,6 +172,39 @@ async fn issue_230_project_scope_precedes_fts_candidate_limit() {
     assert_eq!(recalled[0].node.frontmatter.id, "inside-note");
 }
 
+#[tokio::test]
+async fn issue_266_stale_nodes_are_excluded_before_recall_limits() {
+    let pool = crate::store::pool::test_memory_pool().await;
+    init_schema_pool(&pool).await.unwrap();
+    for i in 0..8 {
+        let mut old = make_node(
+            &format!("old-{i}"),
+            "staletoken",
+            "decision",
+            &["stale"],
+            None,
+        );
+        old.frontmatter.projects = vec!["alpha".into()];
+        write_node_pool(&pool, &old).await.unwrap();
+    }
+    let mut current = make_node(
+        "current",
+        "staletoken current",
+        "concept",
+        &["staleness"],
+        Some(0.5),
+    );
+    current.frontmatter.projects = vec!["alpha".into()];
+    write_node_pool(&pool, &current).await.unwrap();
+    for project in [None, Some("alpha")] {
+        for hint in [None, Some("staletoken")] {
+            let recalled = smart_recall_pool(&pool, project, hint, 1).await.unwrap();
+            assert_eq!(recalled.len(), 1);
+            assert_eq!(recalled[0].node.frontmatter.id, "current");
+        }
+    }
+}
+
 #[test]
 fn issue_232_legacy_import_defaults_only_missing_importance() {
     let legacy = "---\nid: legacy-decision\ntype: decision\ntitle: Legacy choice\ncreated: 2024-01-01\nupdated: 2024-01-01\n---\nbody";

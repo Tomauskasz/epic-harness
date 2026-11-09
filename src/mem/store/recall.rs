@@ -38,7 +38,7 @@ pub(crate) async fn smart_recall_async(
         let fts_query = escape_fts(query);
         // Get matching rowids from FTS, then fetch full nodes — avoids JOIN column ambiguity
         // with sqlx AnyPool which doesn't support FTS5 virtual table column access reliably.
-        let mut sql = "SELECT nodes_fts.rowid FROM nodes_fts JOIN nodes ON nodes.rowid = nodes_fts.rowid WHERE nodes_fts MATCH ?".to_string();
+        let mut sql = "SELECT nodes_fts.rowid FROM nodes_fts JOIN nodes ON nodes.rowid = nodes_fts.rowid WHERE nodes_fts MATCH ? AND instr(',' || nodes.tags || ',', ',stale,') = 0".to_string();
         if project.is_some() {
             sql.push_str(" AND instr(',' || nodes.projects || ',', ',' || ? || ',') > 0");
         }
@@ -65,7 +65,7 @@ pub(crate) async fn smart_recall_async(
         let placeholders = rowids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         if let Some(proj) = project {
             let sql = format!(
-                "SELECT {NODE_COLUMNS} FROM nodes WHERE rowid IN ({placeholders}) AND instr(',' || projects || ',', ',' || ? || ',') > 0 \
+                "SELECT {NODE_COLUMNS} FROM nodes WHERE rowid IN ({placeholders}) AND instr(',' || tags || ',', ',stale,') = 0 AND instr(',' || projects || ',', ',' || ? || ',') > 0 \
                  ORDER BY importance DESC"
             );
             let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
@@ -75,7 +75,7 @@ pub(crate) async fn smart_recall_async(
             q.bind(proj).fetch_all(pool).await
         } else {
             let sql = format!(
-                "SELECT {NODE_COLUMNS} FROM nodes WHERE rowid IN ({placeholders}) \
+                "SELECT {NODE_COLUMNS} FROM nodes WHERE rowid IN ({placeholders}) AND instr(',' || tags || ',', ',stale,') = 0 \
                  ORDER BY importance DESC"
             );
             let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
@@ -86,7 +86,7 @@ pub(crate) async fn smart_recall_async(
         }
     } else if let Some(proj) = project {
         sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT {NODE_COLUMNS} FROM nodes WHERE instr(',' || projects || ',', ',' || ? || ',') > 0 \
+            "SELECT {NODE_COLUMNS} FROM nodes WHERE instr(',' || projects || ',', ',' || ? || ',') > 0 AND instr(',' || tags || ',', ',stale,') = 0 \
              ORDER BY importance DESC LIMIT ?"
         )))
         .bind(proj)
@@ -95,7 +95,7 @@ pub(crate) async fn smart_recall_async(
         .await
     } else {
         sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT {NODE_COLUMNS} FROM nodes ORDER BY importance DESC LIMIT ?"
+            "SELECT {NODE_COLUMNS} FROM nodes WHERE instr(',' || tags || ',', ',stale,') = 0 ORDER BY importance DESC LIMIT ?"
         )))
         .bind(limit as i64 * 3)
         .fetch_all(pool)
