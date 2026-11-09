@@ -116,6 +116,35 @@ impl Dashboard {
             pool.close().await;
         });
     }
+
+    fn seed_snapshot(&self, project: &str, summary: &str, millis: i64) {
+        let _ = self.request("GET", "/api/harness?cmd=get_orbit_pipelines");
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            sqlx::any::install_default_drivers();
+            let pool = sqlx::AnyPool::connect(&format!(
+                "sqlite:{}",
+                self.data.join("harness.db").display()
+            ))
+            .await
+            .unwrap();
+            epic_harness::store::sessions::insert_snapshot_pool(
+                &pool,
+                &epic_harness::shared::types::SessionSnapshot {
+                    timestamp: format!("2026-11-09T00:00:0{millis}Z"),
+                    snap_type: "pre-compact".into(),
+                    summary: summary.into(),
+                    pending_tasks: vec!["pending synthetic task".into()],
+                    context_usage: Some(0.4),
+                    pipeline_state: None,
+                },
+                millis,
+                project,
+            )
+            .await
+            .unwrap();
+            pool.close().await;
+        });
+    }
 }
 
 impl Drop for Dashboard {
@@ -366,4 +395,72 @@ fn issue_220_project_and_nested_junctions_cannot_escape_project_data() {
             "{folder} descendant must remain contained"
         );
     }
+}
+
+#[test]
+fn issue_214_snapshot_api_returns_scoped_database_snapshot_objects() {
+    let dashboard = Dashboard::start();
+    dashboard.seed_snapshot("project-a", "local snapshot", 1);
+    dashboard.seed_snapshot("project-b", "foreign snapshot", 2);
+    let (status, body) = dashboard.request(
+        "GET",
+        "/api/harness?cmd=get_session_snapshots&project=project-a",
+    );
+    assert_eq!(status, 200);
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(body[0]["summary"], "local snapshot");
+    assert_eq!(body[0]["type"], "pre-compact");
+    assert_eq!(body[0]["context_usage"], 0.4);
+    assert_eq!(body[0]["pending_tasks"][0], "pending synthetic task");
+    assert!(body[0]["timestamp"].is_string());
+    let (_, all) = dashboard.request("GET", "/api/harness?cmd=get_session_snapshots");
+    assert_eq!(all.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn issue_214_snapshot_api_parses_legacy_files_instead_of_returning_filenames() {
+    let dashboard = Dashboard::start();
+    dashboard.file("projects/project-a/sessions/snapshot-old.json", &json!({"timestamp":"2026-11-08T00:00:00Z","type":"pre-compact","summary":"legacy local","pending_tasks":[],"context_usage":0.2}));
+    dashboard.file("projects/project-b/sessions/snapshot-other.json", &json!({"timestamp":"2026-11-09T00:00:00Z","type":"pre-compact","summary":"legacy foreign","pending_tasks":[],"context_usage":0.3}));
+    let (_, body) = dashboard.request(
+        "GET",
+        "/api/harness?cmd=get_session_snapshots&project=project-a",
+    );
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(body[0]["summary"], "legacy local");
+    assert_eq!(body[0]["type"], "pre-compact");
+    assert!(body[0]["timestamp"].is_string());
+    assert_eq!(
+        dashboard
+            .request("GET", "/api/harness?cmd=get_session_snapshots")
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn issue_214_duplicate_snapshot_copies_preserve_distinct_projects() {
+    let dashboard = Dashboard::start();
+    dashboard.seed_snapshot("project-a", "same summary", 1);
+    let snapshot = json!({"timestamp":"2026-11-09T00:00:01Z","type":"pre-compact","summary":"same summary","pending_tasks":["pending synthetic task"],"context_usage":0.4});
+    dashboard.file("projects/project-a/sessions/copied.json", &snapshot);
+    dashboard.file("projects/project-b/sessions/other-project.json", &snapshot);
+    let (_, body) = dashboard.request("GET", "/api/harness?cmd=get_session_snapshots");
+    let rows = body.as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        2,
+        "deduplicate the same project's file/DB copy, never another project's identical snapshot"
+    );
+    let projects: std::collections::HashSet<_> = rows
+        .iter()
+        .filter_map(|row| row["project"].as_str())
+        .collect();
+    assert_eq!(
+        projects,
+        std::collections::HashSet::from(["project-a", "project-b"])
+    );
 }

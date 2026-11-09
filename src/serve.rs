@@ -1108,20 +1108,68 @@ fn handle_harness_cmd(cmd: &str, harness_dir: &std::path::Path, project: Option<
         }
         // ── Previously-broken panels (returned "null" via the fallthrough) ─
         "get_session_snapshots" => {
-            // List session snapshot files in the project's sessions/ dir.
-            let sessions_dir = harness_dir.join("sessions");
-            let mut snaps: Vec<String> = Vec::new();
-            if let Ok(rd) = std::fs::read_dir(&sessions_dir) {
-                for e in rd.flatten() {
-                    if let Some(n) = e.file_name().to_str()
-                        && n.ends_with(".json")
-                    {
-                        snaps.push(n.to_string());
+            let mut snapshots = crate::store::runtime::block_on(async {
+                let pool = crate::store::pool::harness_pool().await?;
+                crate::store::sessions::list_recent_snapshot_rows_scoped_pool(&pool, 50, project)
+                    .await
+            })
+            .unwrap_or_default();
+            // Preserve legacy snapshots that have not yet been imported into
+            // SQLite. Return the same typed object contract from both stores.
+            let mut seen: std::collections::HashSet<(String, String)> = snapshots
+                .iter()
+                .filter_map(|(slug, snapshot)| {
+                    serde_json::to_string(snapshot)
+                        .ok()
+                        .map(|identity| (slug.clone(), identity))
+                })
+                .collect();
+            if let Ok(projects) = selected_project_dirs(project) {
+                for (slug, _) in projects {
+                    let Ok(sessions) =
+                        crate::shared::paths::checked_harness_path_for_slug(&slug, "sessions")
+                    else {
+                        continue;
+                    };
+                    let Ok(entries) = fs::read_dir(sessions) else {
+                        continue;
+                    };
+                    for entry in entries.flatten() {
+                        if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
+                            continue;
+                        }
+                        let relative = std::path::Path::new("sessions").join(entry.file_name());
+                        let Ok(path) =
+                            crate::shared::paths::checked_harness_path_for_slug(&slug, relative)
+                        else {
+                            continue;
+                        };
+                        let snapshot = fs::read_to_string(path).ok().and_then(|text| {
+                            serde_json::from_str::<crate::shared::types::SessionSnapshot>(&text)
+                                .ok()
+                        });
+                        if let Some(snapshot) = snapshot
+                            && let Ok(identity) = serde_json::to_string(&snapshot)
+                            && seen.insert((slug.clone(), identity))
+                        {
+                            snapshots.push((slug.clone(), snapshot));
+                        }
                     }
                 }
             }
-            snaps.sort();
-            serde_json::to_string(&snaps).unwrap_or_else(|_| "[]".into())
+            snapshots.sort_by(|a, b| b.1.timestamp.cmp(&a.1.timestamp));
+            snapshots.truncate(50);
+            let values: Vec<_> = snapshots
+                .into_iter()
+                .filter_map(|(slug, snapshot)| {
+                    let mut value = serde_json::to_value(snapshot).ok()?;
+                    if let serde_json::Value::Object(ref mut map) = value {
+                        map.insert("project".into(), serde_json::Value::String(slug));
+                    }
+                    Some(value)
+                })
+                .collect();
+            serde_json::to_string(&values).unwrap_or_else(|_| "[]".into())
         }
         "get_global_patterns" => {
             // Cross-project global patterns (opt-in feature). Parse the JSONL

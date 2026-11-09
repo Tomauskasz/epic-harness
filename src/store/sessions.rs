@@ -106,16 +106,29 @@ pub async fn list_recent_snapshots_scoped_pool(
     limit: i64,
     project: Option<&str>,
 ) -> io::Result<Vec<SessionSnapshot>> {
+    Ok(list_recent_snapshot_rows_scoped_pool(pool, limit, project)
+        .await?
+        .into_iter()
+        .map(|(_, snapshot)| snapshot)
+        .collect())
+}
+
+/// List scoped snapshots while retaining project identity for merged views.
+pub async fn list_recent_snapshot_rows_scoped_pool(
+    pool: &AnyPool,
+    limit: i64,
+    project: Option<&str>,
+) -> io::Result<Vec<(String, SessionSnapshot)>> {
     let query = if let Some(project) = project {
         sqlx::query(
-            "SELECT timestamp, snap_type, summary, pending_tasks, context_usage, pipeline_state
+            "SELECT timestamp, snap_type, summary, pending_tasks, context_usage, pipeline_state, project
              FROM sessions WHERE project = ? ORDER BY id DESC LIMIT ?",
         )
         .bind(project)
         .bind(limit)
     } else {
         sqlx::query(
-            "SELECT timestamp, snap_type, summary, pending_tasks, context_usage, pipeline_state
+            "SELECT timestamp, snap_type, summary, pending_tasks, context_usage, pipeline_state, project
              FROM sessions ORDER BY id DESC LIMIT ?",
         )
         .bind(limit)
@@ -130,14 +143,17 @@ pub async fn list_recent_snapshots_scoped_pool(
         let pipeline_state: Option<serde_json::Value> = pipeline_json
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
-        snaps.push(SessionSnapshot {
-            timestamp: r.try_get(0).map_err(super::sqlx_err)?,
-            snap_type: r.try_get(1).map_err(super::sqlx_err)?,
-            summary: r.try_get(2).map_err(super::sqlx_err)?,
-            pending_tasks,
-            context_usage: r.try_get(4).map_err(super::sqlx_err)?,
-            pipeline_state,
-        });
+        snaps.push((
+            r.try_get(6).map_err(super::sqlx_err)?,
+            SessionSnapshot {
+                timestamp: r.try_get(0).map_err(super::sqlx_err)?,
+                snap_type: r.try_get(1).map_err(super::sqlx_err)?,
+                summary: r.try_get(2).map_err(super::sqlx_err)?,
+                pending_tasks,
+                context_usage: r.try_get(4).map_err(super::sqlx_err)?,
+                pipeline_state,
+            },
+        ));
     }
     Ok(snaps)
 }
