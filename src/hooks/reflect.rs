@@ -850,10 +850,9 @@ async fn backfill_jsonl_to_sqlite(pool: &sqlx::AnyPool, _today_str: &str) {
     }
     let project = crate::shared::paths::project_slug();
     for fname in list_files(&obs_dir(), ".jsonl") {
-        let recs = read_jsonl_typed(&obs_dir().join(&fname));
-        if recs.is_empty() {
+        let Ok(content) = fs::read_to_string(obs_dir().join(&fname)) else {
             continue;
-        }
+        };
         // session_{sid}.jsonl → recover the session id for attribution.
         let sid = fname
             .strip_prefix("session_")
@@ -861,17 +860,25 @@ async fn backfill_jsonl_to_sqlite(pool: &sqlx::AnyPool, _today_str: &str) {
             .unwrap_or("backfill")
             .to_string();
         let mut all_ok = true;
-        for (index, rec) in recs.iter().enumerate() {
-            // Stable, content-qualified import identity makes a partially
-            // completed backfill retryable without conflating real calls.
-            let Ok(content) = serde_json::to_string(rec) else {
+        for (index, line) in content.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(rec) = serde_json::from_str::<ObsRecord>(line) else {
                 all_ok = false;
                 continue;
             };
-            let identity = format!("jsonl:{fname}:{index}:{content}");
+            // Stable, content-qualified import identity makes a partially
+            // completed backfill retryable without conflating real calls.
+            let Ok(identity) =
+                crate::store::observations::jsonl_import_identity(&fname, index, &rec)
+            else {
+                all_ok = false;
+                continue;
+            };
             if crate::store::observations::insert_observation_with_identity_pool(
                 pool,
-                rec,
+                &rec,
                 &sid,
                 &project,
                 Some(&identity),
