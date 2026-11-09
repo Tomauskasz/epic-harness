@@ -11,6 +11,29 @@ struct Fixture {
 }
 
 #[test]
+fn failed_report_and_baseline_writes_return_failure_without_false_confirmation() {
+    for broken in ["results", "baselines", "latest"] {
+        let f = Fixture::new();
+        f.config(&format!("benchmarks:\n  - name: fixture\n    command: {}\ndimensions:\n  regression:\n    enabled: false\n", serde_json::to_string(&f.command()).unwrap()));
+        match broken {
+            "results" => {
+                fs::create_dir_all(f.cwd.join("benchmarks")).unwrap();
+                fs::write(f.cwd.join("benchmarks/results"), "not a directory").unwrap();
+            }
+            "baselines" => {
+                fs::write(f.eval_dir().join("baselines"), "not a directory").unwrap();
+            }
+            _ => {
+                fs::create_dir_all(f.eval_dir().join("baselines/latest.json")).unwrap();
+            }
+        }
+        let output = f.run("pass", &["eval", "--baseline-update", "--json"]);
+        assert!(!output.status.success(), "{broken} write falsely succeeded");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("baseline saved:"));
+    }
+}
+
+#[test]
 fn malformed_existing_baselines_do_not_silently_disable_regression() {
     let f = Fixture::new();
     f.config(&format!(

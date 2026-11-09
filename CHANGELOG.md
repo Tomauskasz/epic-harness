@@ -1,5 +1,7 @@
 # Changelog
 
+- Fix #198: propagate report/archive/latest-baseline I/O failures and confirm baseline saves only after durable writes and atomic latest replacement.
+
 - Fix #197: distinguish a missing first baseline from unreadable or malformed existing baseline data; invalid baselines fail explicitly.
 
 - Fix #196: eval help exits before running project commands; unknown arguments and missing/unknown dimension values are rejected.
