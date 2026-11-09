@@ -779,3 +779,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Exclude stale-tagged nodes from all smart recall candidates before applying result limits (#266).
 
 - Allow legacy edge writers to omit additive IDs until reopen assigns unique identities (#227).
+
+- Align existing edge integration coverage with persisted edge IDs and reject accidental deletion by source node (#227).
