@@ -767,3 +767,4 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #244: use heartbeat activity for cleanup and retain stale agents as blocked rather than inventing successful completion.
 
 - Fix #187: resolve edit-pause directives from the same project-scoped orchestration store as lifecycle hooks.
+- Security (#156): backport prototype-key defenses to the dashboard build's locked `deepmerge` dependency, with real-consumer adversarial and frozen-patch checks.
