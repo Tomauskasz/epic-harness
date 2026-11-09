@@ -706,3 +706,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #183: retain merge sources after database or file-transfer failures and report filesystem errors.
 
 - Fix #254: retain source-only promotion counters and sum only conflicting project counters.
+
+- Fix #184: report distinct file or evolved-skill merge collisions and retain their sources instead of silently discarding history.

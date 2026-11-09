@@ -20,6 +20,10 @@ use crate::shared::paths::{global_harness_db_path, harness_projects_root};
 #[path = "regression_254.rs"]
 mod regression_254;
 
+#[cfg(test)]
+#[path = "regression_184.rs"]
+mod regression_184;
+
 // ── Public entry point ───────────────────────────────────────────────────────
 
 pub fn run_merge(from: &str, to: &str, dry_run: bool, delete_source: bool) -> i32 {
@@ -408,7 +412,13 @@ fn copy_dir_files(src_dir: &Path, dst_dir: &Path, dry_run: bool) -> io::Result<u
         let name = entry.file_name();
         let dst = dst_dir.join(&name);
         if dst.exists() {
-            continue;
+            if std::fs::read(&src)? == std::fs::read(&dst)? {
+                continue;
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("distinct source file conflicts with {}", dst.display()),
+            ));
         }
         if dry_run {
             count += 1;
@@ -439,7 +449,13 @@ fn copy_evolved_dir(src_evolved: &Path, dst_evolved: &Path, dry_run: bool) -> io
         let name = entry.file_name();
         let dst = dst_evolved.join(&name);
         if dst.exists() {
-            continue;
+            if same_directory_contents(&src, &dst)? {
+                continue;
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("distinct source skill conflicts with {}", dst.display()),
+            ));
         }
         if !dry_run {
             copy_dir_recursive(&src, &dst)?;
@@ -447,6 +463,40 @@ fn copy_evolved_dir(src_evolved: &Path, dst_evolved: &Path, dry_run: bool) -> io
         count += 1;
     }
     Ok(count)
+}
+
+fn same_directory_contents(left: &Path, right: &Path) -> io::Result<bool> {
+    let mut left_entries = std::fs::read_dir(left)?.collect::<io::Result<Vec<_>>>()?;
+    let mut right_entries = std::fs::read_dir(right)?.collect::<io::Result<Vec<_>>>()?;
+    left_entries.sort_by_key(|entry| entry.file_name());
+    right_entries.sort_by_key(|entry| entry.file_name());
+    if left_entries.len() != right_entries.len() {
+        return Ok(false);
+    }
+    for (a, b) in left_entries.iter().zip(&right_entries) {
+        if a.file_name() != b.file_name() {
+            return Ok(false);
+        }
+        let (a_type, b_type) = (a.file_type()?, b.file_type()?);
+        if a_type.is_symlink() || b_type.is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "links in evolved skills require explicit resolution",
+            ));
+        }
+        if a_type.is_dir() && b_type.is_dir() {
+            if !same_directory_contents(&a.path(), &b.path())? {
+                return Ok(false);
+            }
+        } else if a_type.is_file() && b_type.is_file() {
+            if std::fs::read(a.path())? != std::fs::read(b.path())? {
+                return Ok(false);
+            }
+        } else {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
