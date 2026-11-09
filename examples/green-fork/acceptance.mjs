@@ -43,6 +43,14 @@ for (const name of ["epic", "epic-harness"]) {
   const recall = run(binary, ["mem", "recall", "Artifact policy " + name, "--project", "main_project"]);
   assert.equal(recall.status, 0, recall.stderr);
   assert.ok(recall.stdout.includes("SOURCE_ARTIFACT_MEMORY_SENTINEL_" + name));
+  const dispatch = run(binary, ["dispatch"], main, JSON.stringify({
+    hook_event_name: "UserPromptSubmit", session_id: "artifact-" + name,
+    prompt: "Fix the Artifact policy " + name + " crash and add regression tests.",
+  }));
+  assert.equal(dispatch.status, 0, dispatch.stderr);
+  const guidance = JSON.parse(dispatch.stdout).hookSpecificOutput?.additionalContext;
+  assert.ok(guidance?.includes("Skill: debug") && guidance.includes("Skill: tdd") && guidance.includes("Skill: verify"), "source artifact must deliver matching prompt guidance");
+  assert.ok(guidance.includes("SOURCE_ARTIFACT_MEMORY_SENTINEL_" + name), "prompt hook must autonomously recall newly stored task memory");
   const requests = [
     { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "source-artifact-qa", version: "1" } } },
     { jsonrpc: "2.0", method: "notifications/initialized" },
@@ -99,5 +107,5 @@ for (const name of ["epic", "epic-harness"]) {
       const exited = new Promise(resolve => child.once("exit", resolve)); child.kill(); await exited;
     }
   }
-  console.log("PASS source artifact: " + name + " identity/reflection/hooks/memory/MCP/dashboard/live-session/subagent");
+  console.log("PASS source artifact: " + name + " identity/reflection/hooks/task-dispatch/memory/MCP/dashboard/live-session/subagent");
 }
