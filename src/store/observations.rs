@@ -9,6 +9,28 @@ use std::io;
 use crate::shared::obs::ObsRecord;
 use crate::shared::scoring::ScoreDimensions;
 
+/// Stable import identity for one physical JSONL line, including its content.
+/// Identical anonymous calls on different lines remain distinct observations.
+pub fn jsonl_import_identity(filename: &str, index: usize, rec: &ObsRecord) -> io::Result<String> {
+    let canonical = serde_json::to_string(rec).map_err(io::Error::other)?;
+    Ok(format!("jsonl:{filename}:{index}:{canonical}"))
+}
+
+/// Known fallback imports let readers merge SQLite and undeleted JSONL safely.
+pub async fn jsonl_import_identities_pool(
+    pool: &AnyPool,
+    project: &str,
+) -> io::Result<std::collections::HashSet<String>> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT invocation_id FROM observations WHERE project = ? AND invocation_id LIKE 'jsonl:%'",
+    )
+    .bind(project)
+    .fetch_all(pool)
+    .await
+    .map(|ids| ids.into_iter().collect())
+    .map_err(super::sqlx_err)
+}
+
 /// Insert a single observation record.
 ///
 /// `project` is the project slug to attribute this observation to. The caller
