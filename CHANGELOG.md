@@ -683,3 +683,4 @@ Original files are **not deleted** after import. New users are automatically on 
 - Broken CI badge removed from all READMEs
 
 - CI (#132): verify rebuilt dashboard, both source-built executables, isolated full regressions, and native desktop contracts with commit-bound artifact hashes.
+- Fix #251: honor explicit database environment URLs when configuration is missing or unreadable.
