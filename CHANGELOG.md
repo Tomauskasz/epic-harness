@@ -1,5 +1,7 @@
 # Changelog
 
+- Fix #196: eval help exits before running project commands; unknown arguments and missing/unknown dimension values are rejected.
+
 - Fix #195: generate portable UTC evaluation timestamps and unique report/baseline archive names without an external date executable.
 
 - Fix #180: preserve multiline benchmark JSON scores and fail missing, invalid, or out-of-range composite results.

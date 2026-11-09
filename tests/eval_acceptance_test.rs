@@ -120,9 +120,45 @@ fn fixture_command() {
         "composite-pretty" => println!("{{\n  \"composite\": 0.1\n}}"),
         "composite-missing" => println!("{{\"samples\":3}}"),
         "composite-out-of-range" => println!("{{\"composite\":2}}"),
+        "marker" => {
+            fs::write("EXECUTED.txt", "fixture command ran").unwrap();
+            println!("test result: ok. 10 passed; 0 failed;");
+        }
         _ => println!("test result: ok. 10 passed; 0 failed;"),
     }
     std::process::exit(0);
+}
+
+#[test]
+fn help_is_read_only_and_invalid_eval_arguments_are_rejected() {
+    let f = Fixture::new();
+    f.config(&format!(
+        "benchmarks:\n  - name: fixture\n    command: {}\n",
+        serde_json::to_string(&f.command()).unwrap()
+    ));
+    let help = f.run("marker", &["eval", "--help", "--json"]);
+    assert!(help.status.success());
+    assert!(
+        !f.cwd.join("EXECUTED.txt").exists(),
+        "help executed the benchmark"
+    );
+    for args in [
+        vec!["eval", "--dimension", "benchmakrs"],
+        vec!["eval", "--dimension"],
+        vec!["eval", "--dimension="],
+        vec!["eval", "--bogus"],
+    ] {
+        assert!(
+            !f.run("marker", &args).status.success(),
+            "accepted invalid args {args:?}"
+        );
+    }
+    assert!(!f.cwd.join("EXECUTED.txt").exists());
+    assert!(f.run("marker", &["eval", "--json"]).status.success());
+    assert!(
+        f.cwd.join("EXECUTED.txt").exists(),
+        "valid command control did not run"
+    );
 }
 
 #[test]
