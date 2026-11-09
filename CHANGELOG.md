@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep correctness verdicts consistent with configured minimum pass rates below 80%; accepted partial results report warnings (#178).
 
 ### Fixed
+- Avoid discovering Epic Eval wrappers as benchmarks and reject recursive evaluation contexts while preserving independent nested evaluations (#350).
 - Reject nonfinite or invalid numeric eval settings before running workloads, while preserving valid boundaries and legacy defaults (#284).
 - Exclude skipped dimensions from regression comparisons so unmeasured inputs cannot produce a passing evaluation (#179).
 - Released-artifact hook checks retain lifecycle coverage and defer native prompt
