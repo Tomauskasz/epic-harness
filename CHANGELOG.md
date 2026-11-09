@@ -908,3 +908,5 @@ Original files are **not deleted** after import. New users are automatically on 
 
 - Security (#138): backport gtk-rs's mutable-out-pointer fix to Tauri's compatible `glib` dependency and verify the optimized iterator path and Cargo source provenance.
 - Fix #220: contain selected dashboard project reads and nested links, and keep seesaw GET requests read-only.
+
+- Fix #279: Native Orbit lists primary and legacy state together, retains project metadata, and the dashboard reloads safely when the selected project changes.

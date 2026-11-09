@@ -408,8 +408,8 @@ export async function getHarnessMetrics(project = get(selectedProject)): Promise
     trend,
   };
 }
-export async function getOrbitPipelines(): Promise<OrbitPipeline[]> {
-  const pipelines = await invoke<(OrbitPipeline & { audit_fail_count?: number })[]>('get_orbit_pipelines');
+export async function getOrbitPipelines(project = get(selectedProject)): Promise<OrbitPipeline[]> {
+  const pipelines = await invoke<(OrbitPipeline & { audit_fail_count?: number })[]>('get_orbit_pipelines', projectArgs(project));
   return pipelines.map(pipeline => ({
     ...pipeline,
     check_fail_count: pipeline.audit_fail_count ?? pipeline.check_fail_count ?? 0,
