@@ -1,5 +1,7 @@
 # Changelog
 
+- Fix #178: correctness evaluation now fails on child-process failure and honors the configured minimum test pass rate.
+
 All notable changes to epic-harness will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
