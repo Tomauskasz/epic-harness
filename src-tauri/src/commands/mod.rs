@@ -6,4 +6,5 @@ mod native_orchestration;
 mod native_store;
 pub mod nodes;
 pub mod search;
+pub(crate) mod search_data;
 pub mod stats;
