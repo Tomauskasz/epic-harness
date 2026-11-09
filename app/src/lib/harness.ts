@@ -421,7 +421,9 @@ export async function dismissOrbitPipeline(id: string): Promise<{ ok: boolean }>
     if (result?.ok !== true) throw new Error('Pipeline dismissal failed');
     return result;
   }
-  const res = await fetch(`/api/orbit/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  const project = get(selectedProject);
+  const query = project && project !== '__all__' ? `?project=${encodeURIComponent(project)}` : '';
+  const res = await fetch(`/api/orbit/${encodeURIComponent(id)}${query}`, { method: 'DELETE' });
   const result = await res.json();
   if (!res.ok || result?.ok !== true) throw new Error(result?.error ?? 'Pipeline dismissal failed');
   return result;

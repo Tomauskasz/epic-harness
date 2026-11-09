@@ -847,3 +847,11 @@ Original files are **not deleted** after import. New users are automatically on 
 - Add native memory/orchestration IPC access and shared safe dismissal commands instead of unavailable HTTP routes (#238).
 
 - Fix #267: Prefer persisted audit counts when both retry field names are present while accepting legacy-only records.
+
+- Fixed corrupt non-object Orbit state crashing the dashboard; valid records remain available (#222).
+- Fix #221: reject empty or ambiguous Orbit deletion IDs and match exact project-scoped sidecars.
+- Fix #264: dismiss exact Orbit records in primary SQLite and sidecar state, preserving project scope and reporting failures.
+
+- Fix #243: serialize orchestration updates with portable interprocess file locks and independent atomic-write files.
+
+- Fix #215: Browser Orbit dismissal passes the selected project so duplicate pipeline IDs cannot affect another project.
