@@ -32,7 +32,7 @@ async fn transfer_inner(conn: &mut SqliteConnection, from: &str, to: &str) -> io
         .execute(&mut *conn)
         .await
         .map_err(super::sqlx_err)?;
-    sqlx::query("UPDATE metrics_state SET value='0' WHERE key='reflection_cursor' AND project=?")
+    sqlx::query("INSERT INTO metrics_state(key,value,project) VALUES('reflection_cursor','0',?) ON CONFLICT(key,project) DO UPDATE SET value=excluded.value")
         .bind(to)
         .execute(&mut *conn)
         .await

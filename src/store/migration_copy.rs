@@ -65,7 +65,7 @@ pub(super) async fn merge(
         if stats.obs > 0 {
             // Observation IDs are allocated again at the destination. Replay is
             // safer than treating a cursor from either ID space as authoritative.
-            sqlx::query("UPDATE metrics_state SET value='0' WHERE key='reflection_cursor' AND project=?")
+            sqlx::query("INSERT INTO metrics_state(key,value,project) VALUES('reflection_cursor','0',?) ON CONFLICT(key,project) DO UPDATE SET value=excluded.value")
                 .bind(slug).execute(&mut *conn).await.map_err(sqlx_err)?;
         }
         Ok(stats)

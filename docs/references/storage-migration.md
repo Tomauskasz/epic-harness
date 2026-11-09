@@ -44,3 +44,6 @@ When observations move between project streams or receive newly allocated IDs,
 the derived reflection cursor resets to zero. This can analyze retained history
 again, but avoids silently skipping pending imported observations. Observation
 history itself is preserved.
+The reset creates the cursor when it was absent, so a legacy timestamp watermark
+cannot suppress freshly imported older-dated records. Original timestamps remain
+unchanged, and an unchanged consolidation retry retains consumed cursor progress.

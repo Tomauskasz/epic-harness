@@ -99,6 +99,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Memory search HTTP type filters are validated and applied before the result limit (#268).
 - Memory search HTTP results include tags and list-row metadata required by the renderer (#240).
 - Session snapshot APIs return recent project-scoped objects from SQLite and legacy JSON, preserving fields and deduplicating same-project copies (#214).
+- Observation transfers initialize a missing reflection cursor transactionally,
+  preventing a legacy timestamp watermark from skipping fresh imported history;
+  failed cursor writes roll back the transfer (#218).
 - Storage transfers preserve complete operational state and invocation identity,
   retain sources on failure, reject differing file collisions, and avoid duplicate
   database/JSONL history on retries. Global project changes roll back on errors;
