@@ -1,5 +1,7 @@
 # Changelog
 
+- Fix #197: distinguish a missing first baseline from unreadable or malformed existing baseline data; invalid baselines fail explicitly.
+
 - Fix #196: eval help exits before running project commands; unknown arguments and missing/unknown dimension values are rejected.
 
 - Fix #195: generate portable UTC evaluation timestamps and unique report/baseline archive names without an external date executable.
