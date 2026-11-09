@@ -686,3 +686,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #251: honor explicit database environment URLs when configuration is missing or unreadable.
 
 - Fix #186: hash untrusted session identities before constructing startup lock filenames.
+
+- Fix #253: derive main checkout identity independently from separately located Git metadata.
