@@ -688,3 +688,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #186: hash untrusted session identities before constructing startup lock filenames.
 
 - Fix #253: derive main checkout identity independently from separately located Git metadata.
+
+- Fix #269: report legacy directory links and junctions without traversing or copying their external targets.
