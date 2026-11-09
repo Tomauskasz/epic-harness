@@ -515,14 +515,15 @@ pub fn run(input: &HookInput) -> i32 {
     };
 
     if let Some((output, stderr, streams_separated)) = resolved_output {
-        let combined = format!("{output}\n{stderr}");
+        let combined = format!("{stderr}\n{output}");
 
         let outcome = explicit_success(input);
         record.failure_category = if outcome == Some(true) {
             None
         } else if outcome == Some(false) {
             Some(
-                classify_failure(&combined)
+                classify_failure(&stderr)
+                    .or_else(|| classify_failure(&output))
                     .unwrap_or("runtime_error")
                     .to_string(),
             )
@@ -537,7 +538,9 @@ pub fn run(input: &HookInput) -> i32 {
         } else if matches!(tool_cat, "read" | "glob" | "grep") {
             classify_failure(&stderr).map(String::from)
         } else {
-            classify_failure(&combined).map(String::from)
+            classify_failure(&stderr)
+                .or_else(|| classify_failure(&output))
+                .map(String::from)
         };
         record.result = Some(
             if record.failure_category.is_none() {
@@ -616,8 +619,7 @@ pub fn run(input: &HookInput) -> i32 {
         record.score = Some(compute_score(&dims));
 
         if record.failure_category.is_some() {
-            let masked = truncate_str(&mask_secrets(&combined), 500).to_string();
-            record.error_snippet = Some(masked);
+            record.error_snippet = Some(failure_excerpt(&mask_secrets(&combined)));
         }
     }
 
