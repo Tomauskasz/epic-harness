@@ -54,6 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reflection consumes project observations by durable row identity and commits its cursor, metrics, and evolution record together, retaining late arrivals and failed saves for retry (#218).
 - Preserve distinct observations and historical data; deduplicate only explicit project/session-scoped invocation IDs (#188).
 - Redact complete JSON and quoted credential values before observation truncation (#177).
+- CLI and native harness snapshots omit escaping project/evolved directory
+  links and validate individual skill paths before listing them (#252).
 - Legacy migration preserves readonly/executable file permissions and treats
   an existing file with different permissions as a conflict (#217).
 - Explicitly managed source installations retain their verified commit during

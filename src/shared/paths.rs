@@ -364,9 +364,6 @@ pub fn project_seesaw_path_for(project: Option<&str>) -> PathBuf {
 pub fn variant_pool_path_for(project: Option<&str>) -> PathBuf {
     resolve_harness_dir(project).join("variants.json")
 }
-pub fn evolved_dir_for(project: Option<&str>) -> PathBuf {
-    resolve_harness_dir(project).join("evolved")
-}
 pub fn manifests_file_for(project: Option<&str>) -> PathBuf {
     resolve_harness_dir(project).join("manifests.jsonl")
 }
