@@ -31,6 +31,11 @@ mod regression_185;
 #[path = "regression_256.rs"]
 mod regression_256;
 
+#[cfg(test)]
+#[path = "regression_257.rs"]
+mod regression_257;
+
+
 // ── Connection factory ──────────────────────────────────────────────────────
 
 async fn open_migrate_conn() -> io::Result<sqlx::SqliteConnection> {
@@ -281,8 +286,8 @@ pub(crate) async fn do_migrate_async(
 
     // Phase 2: Per-file imports. Each source file gets its own BEGIN IMMEDIATE so
     // the WAL never grows unboundedly for large legacy datasets.
-    import_observations(conn, &harness_dir, &mut stats).await?;
     let slug = crate::shared::paths::project_slug();
+    import_observations(conn, &slug, &harness_dir, &mut stats).await?;
     import_sessions(conn, &slug, &harness_dir, &mut stats).await?;
     import_evolution(conn, &slug, &harness_dir, &mut stats).await?;
     import_metrics(conn, &slug, &harness_dir, &mut stats).await?;
@@ -310,6 +315,7 @@ pub(crate) async fn do_migrate_async(
 /// be re-imported without resetting the entire migration.
 async fn import_observations(
     conn: &mut sqlx::SqliteConnection,
+    slug: &str,
     harness_dir: &std::path::Path,
     stats: &mut MigrationStats,
 ) -> io::Result<()> {
@@ -363,8 +369,8 @@ async fn import_observations(
                         "INSERT INTO observations \
                          (timestamp, session_id, tool, tool_category, action, result, score, \
                           dim_success, dim_quality, dim_cost, failure_category, error_snippet, \
-                          file_ext, sequence_id, pipeline_id) \
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                          file_ext, sequence_id, pipeline_id, project) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
                     )
                     .bind(&rec.timestamp)
                     .bind(&session_id)
@@ -381,6 +387,7 @@ async fn import_observations(
                     .bind(&rec.file_ext)
                     .bind(rec.sequence_id.map(super::u64_to_i64))
                     .bind(&rec.pipeline_id)
+                    .bind(slug)
                     .execute(&mut *conn)
                     .await;
 
