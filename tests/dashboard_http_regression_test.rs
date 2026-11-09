@@ -193,3 +193,49 @@ fn issue_221_pipeline_id_matches_exactly_and_honors_selected_project() {
     assert!(!selected.exists());
     assert!(prefix.exists() && other_project.exists());
 }
+
+#[test]
+fn issue_264_dismiss_removes_primary_pipeline_and_sidecar() {
+    let dashboard = Dashboard::start();
+    dashboard.seed_pipeline("PIPELINE-persisted", "project-a", "{}");
+    dashboard.seed_pipeline("PIPELINE-persisted-extra", "project-a", "{}");
+    let sidecar = dashboard.file(
+        "projects/project-a/orbit/PIPELINE-persisted.json",
+        &json!({"id":"PIPELINE-persisted"}),
+    );
+    let (status, body) =
+        dashboard.request("DELETE", "/api/orbit/PIPELINE-persisted?project=project-a");
+    assert_eq!(status, 200);
+    assert_eq!(body["ok"], true);
+    assert!(!sidecar.exists());
+    let (_, remaining) = dashboard.request("GET", "/api/harness?cmd=get_orbit_pipelines");
+    let rows = remaining.as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "successful dismissal must also remove the primary DB row"
+    );
+    assert_eq!(rows[0]["id"], "PIPELINE-persisted-extra");
+}
+
+#[test]
+fn issue_264_database_only_pipeline_can_be_dismissed_with_project_scope() {
+    let dashboard = Dashboard::start();
+    dashboard.seed_pipeline("PIPELINE-db-only", "project-b", "{}");
+    let (wrong_status, wrong_body) =
+        dashboard.request("DELETE", "/api/orbit/PIPELINE-db-only?project=project-a");
+    assert_eq!(wrong_status, 404);
+    assert_eq!(wrong_body["ok"], false);
+    let (_, before) = dashboard.request("GET", "/api/harness?cmd=get_orbit_pipelines");
+    assert_eq!(before.as_array().unwrap().len(), 1);
+    let (status, body) =
+        dashboard.request("DELETE", "/api/orbit/PIPELINE-db-only?project=project-b");
+    assert_eq!(status, 200);
+    assert_eq!(body["ok"], true);
+    assert_eq!(
+        dashboard
+            .request("GET", "/api/harness?cmd=get_orbit_pipelines")
+            .1,
+        json!([])
+    );
+}
