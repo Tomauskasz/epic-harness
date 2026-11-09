@@ -783,3 +783,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Align existing edge integration coverage with persisted edge IDs and reject accidental deletion by source node (#227).
 
 - Fix #185: transfer all supported operational tables and available fields atomically; fail incomplete or conflicting database consolidation instead of dropping state.
+
+- Fix #256: track imported source rows transactionally so retries preserve distinct history without duplicating it; retain identity across writable-source moves and support read-only sources.

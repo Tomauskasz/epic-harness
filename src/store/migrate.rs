@@ -27,6 +27,10 @@ mod migration_copy;
 #[path = "regression_185.rs"]
 mod regression_185;
 
+#[cfg(test)]
+#[path = "regression_256.rs"]
+mod regression_256;
+
 // ── Connection factory ──────────────────────────────────────────────────────
 
 async fn open_migrate_conn() -> io::Result<sqlx::SqliteConnection> {
