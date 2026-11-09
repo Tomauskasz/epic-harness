@@ -105,3 +105,50 @@ fn snapshot_diff_reports_positional_scoring_weight_changes() {
             .contains("no differences")
     );
 }
+
+#[test]
+fn snapshot_never_creates_or_initializes_the_metrics_database() {
+    let fresh = Fixture::new();
+    let snapshot = fresh.snapshot();
+    assert_eq!(snapshot["metrics_summary"]["total_sessions"], 0);
+    assert!(
+        !fresh.data.join("harness.db").exists(),
+        "a read created harness.db"
+    );
+
+    let existing = Fixture::new();
+    let database = existing.data.join("harness.db");
+    sqlx::any::install_default_drivers();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let pool = sqlx::any::AnyPoolOptions::new().max_connections(1)
+            .connect(&format!("sqlite:{}?mode=rwc", database.display())).await.unwrap();
+        for ddl in [
+            "CREATE TABLE metrics_state (key TEXT, value TEXT, project TEXT, PRIMARY KEY(key,project))",
+            "CREATE TABLE score_history (id INTEGER PRIMARY KEY, timestamp TEXT, success_rate REAL, avg_score REAL, observations INTEGER, dim_success REAL, dim_quality REAL, dim_cost REAL, project TEXT)",
+            "CREATE TABLE skill_attribution (skill_name TEXT, sessions_active INTEGER, avg_score_with REAL, avg_score_without REAL, first_seen TEXT, sessions_holdout INTEGER, project TEXT)",
+        ] {
+            sqlx::query(ddl).execute(&pool).await.unwrap();
+        }
+        for (project, count) in [("snapshot-project", "7"), ("other-project", "13")] {
+            sqlx::query("INSERT INTO metrics_state (key,value,project) VALUES ('total_sessions',?,?)")
+                .bind(count).bind(project).execute(&pool).await.unwrap();
+        }
+        pool.close().await;
+    });
+    fs::write(
+        existing.data.join("config.toml"),
+        format!(
+            "[dashboard]\nport=0\nauto_open=false\n[db]\nharness_url={}\n",
+            serde_json::to_string(&format!("sqlite:{}?mode=rwc", database.display())).unwrap()
+        ),
+    )
+    .unwrap();
+    let before = fs::read(&database).unwrap();
+    let snapshot = existing.snapshot();
+    assert_eq!(snapshot["metrics_summary"]["total_sessions"], 7);
+    assert_eq!(
+        fs::read(&database).unwrap(),
+        before,
+        "a read modified database bytes"
+    );
+}

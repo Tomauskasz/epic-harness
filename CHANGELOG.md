@@ -875,3 +875,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #194: Snapshot fingerprints retain guard section membership and rule priority, so blocked-to-warned changes are visible.
 
 - Fix #202: Snapshot differences preserve scoring-weight order while retaining set-style skill additions and removals.
+
+- Fix #261: Read-only snapshots no longer create or initialize databases and use project-scoped metrics from an explicitly read-only SQLite connection.
