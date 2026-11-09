@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep correctness verdicts consistent with configured minimum pass rates below 80%; accepted partial results report warnings (#178).
 
 ### Fixed
+- Persisted Orbit/control JSON accepts Windows PowerShell's leading UTF-8 BOM,
+  so active pipelines remain exclusive and visible after host state updates (#282).
 - Skill validation now checks the published `skills/` directory, rejects empty
   or malformed inputs, and scopes advisory wording checks to descriptions (#280).
 - Updating an existing team's type now persists it before syncing, so generated

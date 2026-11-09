@@ -65,7 +65,7 @@ pub async fn read_running_pipeline_pool(
     match row {
         Some(r) => {
             let json_str: String = r.try_get(0).map_err(super::sqlx_err)?;
-            let val: serde_json::Value = serde_json::from_str(&json_str)
+            let val: serde_json::Value = crate::shared::helpers::parse_persisted_json(&json_str)
                 .unwrap_or(serde_json::Value::Object(Default::default()));
             Ok(Some(val))
         }
@@ -96,7 +96,9 @@ pub async fn list_all_pipelines_pool(pool: &AnyPool) -> io::Result<Vec<serde_jso
 
         // A syntactically valid JSON scalar/array is still corrupt pipeline
         // state. Skip that record instead of panicking the dashboard server.
-        let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str(&state_json) else {
+        let Ok(serde_json::Value::Object(mut map)) =
+            crate::shared::helpers::parse_persisted_json(&state_json)
+        else {
             continue;
         };
         map.insert("id".into(), serde_json::Value::String(id));
@@ -160,6 +162,30 @@ mod tests {
         let pool = super::super::pool::test_memory_pool().await;
         super::super::schema::init_schema_pool(&pool).await.unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn issue282_bom_pipeline_keeps_fields_in_sqlite_projection() {
+        let pool = test_pool().await;
+        upsert_pipeline_pool(
+            &pool,
+            "bom",
+            "fixture",
+            "running",
+            Some("go"),
+            Some("direct"),
+            "\u{feff}{\"goal_slug\":\"preserved\"}",
+        )
+        .await
+        .unwrap();
+        let running = read_running_pipeline_pool(&pool, Some("fixture"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(running["goal_slug"], "preserved");
+        let listed = list_all_pipelines_pool(&pool).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["goal_slug"], "preserved");
     }
 
     #[tokio::test]

@@ -322,7 +322,8 @@ fn running_agent_ids(orch_dir: &Path) -> Vec<String> {
             };
             let status_path = entry.path().join("status.json");
             if let Ok(content) = std::fs::read_to_string(&status_path)
-                && let Ok(doc) = serde_json::from_str::<serde_json::Value>(&content)
+                && let Ok(doc) =
+                    crate::shared::helpers::parse_persisted_json::<serde_json::Value>(&content)
                 && doc.get("status").and_then(|v| v.as_str()) == Some("running")
             {
                 ids.push(agent_id);
@@ -412,7 +413,7 @@ fn check_control_json_pause(current_agent: Option<&str>, orch_dir: &Path) -> boo
         Ok(c) => c,
         Err(_) => return false,
     };
-    let doc: serde_json::Value = match serde_json::from_str(&content) {
+    let doc: serde_json::Value = match crate::shared::helpers::parse_persisted_json(&content) {
         Ok(d) => d,
         Err(_) => return false,
     };
