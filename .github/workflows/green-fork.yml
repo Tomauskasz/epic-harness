@@ -32,6 +32,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: green-${{ runner.os }}
+      - name: Skill validator regressions
+        run: node --test scripts/lint-skills.test.mjs
+      - name: Validate every published skill
+        run: node scripts/lint-skills.mjs
       - name: Install frozen dashboard dependencies
         working-directory: app
         run: pnpm install --frozen-lockfile
