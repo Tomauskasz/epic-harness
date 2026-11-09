@@ -136,7 +136,9 @@ async fn migrate_edge_metadata(pool: &AnyPool) -> io::Result<()> {
             .bind(row.get::<String, _>(0)).bind(row.get::<String, _>(1)).bind(row.get::<String, _>(2))
             .execute(pool).await.map_err(io::Error::other)?;
     }
-    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_id ON edges(id)")
+    // Legacy writers still omit the new column. Empty placeholders must not
+    // conflict with one another before the next opener assigns persistent IDs.
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_id ON edges(id) WHERE id <> ''")
         .execute(pool)
         .await
         .map_err(io::Error::other)?;

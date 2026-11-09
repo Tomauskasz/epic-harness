@@ -777,3 +777,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Security (#156): backport prototype-key defenses to the dashboard build's locked `deepmerge` dependency, with real-consumer adversarial and frozen-patch checks.
 
 - Exclude stale-tagged nodes from all smart recall candidates before applying result limits (#266).
+
+- Allow legacy edge writers to omit additive IDs until reopen assigns unique identities (#227).
