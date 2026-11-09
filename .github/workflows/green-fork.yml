@@ -1,0 +1,82 @@
+name: Green fork verification
+on:
+  push:
+    branches: ['main', 'orbit/epic-green', 'repair/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+  SKIP_DASHBOARD_BUILD: '1'
+  CI: '1'
+jobs:
+  verify:
+    name: Source and artifact (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: green-${{ runner.os }}
+      - name: Install frozen dashboard dependencies
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+      - name: Dashboard typecheck
+        working-directory: app
+        run: pnpm exec svelte-check --tsconfig ./tsconfig.json
+      - name: Dashboard tests
+        working-directory: app
+        run: pnpm exec vitest run
+      - name: Build the dashboard embedded in this artifact
+        working-directory: app
+        run: pnpm run build
+      - name: Stage matching dashboard bytes
+        run: node -e "require('fs').copyFileSync('app/dist/index.html','assets/dashboard.html')"
+      - name: Rust format
+        run: cargo fmt --all -- --check
+      - name: Rust Clippy (all CLI targets)
+        run: cargo clippy -p epic-harness --all-targets --locked -- -D warnings
+      - name: Full Rust regression suite with isolated user state
+        run: node examples/green-fork/run-isolated.mjs cargo test -p epic-harness --locked
+      - name: Hook and installer integration regressions
+        shell: bash
+        run: |
+          shopt -s nullglob
+          tests=(registry/scripts/hooks/*.test.mjs registry/scripts/*.test.mjs)
+          test "${#tests[@]}" -gt 0
+          node --test "${tests[@]}"
+      - name: Patched frontend dependency regression
+        run: node --test scripts/deepmerge-security.test.mjs
+      - name: Build both executables from this commit
+        run: cargo build -p epic-harness --release --bins --locked
+      - name: Acceptance through both changed-source executables
+        run: node examples/green-fork/acceptance.mjs target/release
+      - name: Compile native desktop contracts on MSVC
+        if: runner.os == 'Windows'
+        run: cargo check -p epic-harness-dashboard --all-targets --locked
+      - name: Native desktop Clippy on MSVC
+        if: runner.os == 'Windows'
+        run: cargo clippy -p epic-harness-dashboard --all-targets --locked -- -D warnings
+      - name: Save exact artifact provenance
+        env:
+          VERIFIED_SHA: ${{ github.sha }}
+        run: node -e "const fs=require('fs'),c=require('crypto'),p=require('path');const files=['assets/dashboard.html',...['epic','epic-harness'].map(n=>'target/release/'+n+(process.platform==='win32'?'.exe':''))];fs.mkdirSync('verified-artifact',{recursive:true});const hashes=Object.fromEntries(files.map(f=>[f,c.createHash('sha256').update(fs.readFileSync(f)).digest('hex')]));fs.writeFileSync('verified-artifact/provenance.json',JSON.stringify({commit:process.env.VERIFIED_SHA,platform:process.platform,hashes},null,2));for(const f of files)fs.copyFileSync(f,'verified-artifact/'+p.basename(f));"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: green-${{ runner.os }}-${{ github.sha }}
+          path: verified-artifact/
+          if-no-files-found: error

@@ -675,3 +675,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Hook dispatch now checks `PATH` before falling back to Node.js scripts
 - Homebrew tap path shortened to `epicsagas/tap` across all i18n READMEs
 - Broken CI badge removed from all READMEs
+
+- CI (#132): verify rebuilt dashboard, both source-built executables, isolated full regressions, and native desktop contracts with commit-bound artifact hashes.
