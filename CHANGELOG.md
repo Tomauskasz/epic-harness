@@ -765,3 +765,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #243: serialize orchestration updates with portable interprocess file locks and independent atomic-write files.
 
 - Fix #244: use heartbeat activity for cleanup and retain stale agents as blocked rather than inventing successful completion.
+
+- Fix #187: resolve edit-pause directives from the same project-scoped orchestration store as lifecycle hooks.
