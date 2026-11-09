@@ -701,3 +701,4 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #219: execute configured Windows npx.cmd formatters and record nonblocking child failures.
 
 - Fix #272: honor per-project sharing consent and documented exports while preserving explicit legacy stores.
+- Fix #255: preserve complete distinct evolution records during project merges and deduplicate identical retry records.
