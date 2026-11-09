@@ -78,3 +78,6 @@ pub use recall::{smart_recall, smart_recall_pool};
 pub use search::{
     query_nodes, query_nodes_pool, search_nodes, search_nodes_filtered, search_nodes_pool,
 };
+// Used by the desktop crate through the library; the CLI embeds these modules too.
+#[allow(unused_imports)]
+pub use search::search_nodes_filtered_pool;

@@ -44,7 +44,7 @@ async fn seed(pool: &sqlx::AnyPool, node_type: &str) {
 async fn issue_240_native_search_returns_renderable_memory_rows() {
     let pool = pool().await;
     seed(&pool, "concept").await;
-    let rows = search_data::search_nodes(&pool, "Zebrafixture", None)
+    let rows = search_data::search_nodes(&pool, "Zebrafixture", None, None)
         .await
         .unwrap();
     let value = serde_json::to_value(rows).unwrap();
@@ -55,4 +55,40 @@ async fn issue_240_native_search_returns_renderable_memory_rows() {
     assert_eq!(value[0]["importance"], 0.8);
     assert!(value[0]["updated"].is_string());
     assert!(value[0]["snippet"].is_string());
+}
+
+#[tokio::test]
+async fn issue_268_native_type_filter_precedes_search_limit() {
+    let pool = pool().await;
+    for _ in 0..25 {
+        seed(&pool, "concept").await;
+    }
+    seed(&pool, "decision").await;
+    let rows = search_data::search_nodes(&pool, "Zebrafixture", Some(1), Some("decision"))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].node_type, "decision");
+    let rows = search_data::search_nodes(&pool, "Zebrafixture", None, Some("resolution"))
+        .await
+        .unwrap();
+    assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn issue_268_native_type_filter_validates_supported_values() {
+    let pool = pool().await;
+    assert!(
+        search_data::search_nodes(&pool, "Zebrafixture", None, Some("bogus"))
+            .await
+            .is_err()
+    );
+    for node_type in ["instinct", "psychographic"] {
+        seed(&pool, node_type).await;
+        let rows = search_data::search_nodes(&pool, "Zebrafixture", None, Some(node_type))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].node_type, node_type);
+    }
 }

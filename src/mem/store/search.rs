@@ -23,10 +23,6 @@ pub fn search_nodes_filtered(query: &str, limit: usize, node_type: Option<&str>)
     runtime::block_on(search_nodes_filtered_async(&pool, query, limit, node_type))
 }
 
-async fn search_nodes_async(pool: &sqlx::AnyPool, query: &str, limit: usize) -> Vec<Node> {
-    search_nodes_filtered_async(pool, query, limit, None).await
-}
-
 async fn search_nodes_filtered_async(
     pool: &sqlx::AnyPool,
     query: &str,
@@ -154,7 +150,17 @@ pub async fn search_nodes_pool(
     query: &str,
     limit: i64,
 ) -> io::Result<Vec<Node>> {
-    Ok(search_nodes_async(pool, query, limit as usize).await)
+    search_nodes_filtered_pool(pool, query, limit, None).await
+}
+
+/// Search on an explicit memory pool, filtering type before the result limit.
+pub async fn search_nodes_filtered_pool(
+    pool: &sqlx::AnyPool,
+    query: &str,
+    limit: i64,
+    node_type: Option<&str>,
+) -> io::Result<Vec<Node>> {
+    Ok(search_nodes_filtered_async(pool, query, limit.max(0) as usize, node_type).await)
 }
 
 pub async fn query_nodes_pool(
