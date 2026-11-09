@@ -748,3 +748,4 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #205: verify synthesis against project-scoped primary Critic state and reject unreadable or invalid gating state.
 - Fix #271: seed permitted cold-start presets before building the first session's evolved-skill context.
 - Windows SessionStart attempts bootstrap before checking for the newly installed executable (#223).
+- Bootstrap version detection resolves Codex, Claude and Grok plugin roots without depending on the working directory (#225).
