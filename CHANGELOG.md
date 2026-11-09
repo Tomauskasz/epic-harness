@@ -878,3 +878,5 @@ Original files are **not deleted** after import. New users are automatically on 
 
 - Fix #261: Read-only snapshots no longer create or initialize databases and use project-scoped metrics from an explicitly read-only SQLite connection.
 - Security (#156): preserve benign null/primitive placeholder merges while rejecting poison keys and failing closed on throwing object introspection.
+
+- Security (#138): backport gtk-rs's mutable-out-pointer fix to Tauri's compatible `glib` dependency and verify the optimized iterator path and Cargo source provenance.
