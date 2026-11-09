@@ -729,3 +729,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Use exact project and tag membership instead of substring or SQL wildcard matching (#228).
 
 - Preserve ordinary uppercase words when quoting literal full-text recall terms (#231).
+
+- Keep graph-augmented MCP recall within exact project scope and the advertised result limit (#229).
