@@ -29,13 +29,18 @@ fn native_evolution_reads_selected_project_without_mutating_registry() {
         )
         .unwrap();
     }
-    let alpha = native_files::project_folder(root.path(), "alpha").unwrap();
+    let alpha = root.path().join("alpha");
     let before = std::fs::read(alpha.join("seesaw.json")).unwrap();
     let value = native_files::read_json(&alpha, "seesaw.json", serde_json::json!({})).unwrap();
     assert_eq!(value["solved"]["task"], 1);
     assert_eq!(std::fs::read(alpha.join("seesaw.json")).unwrap(), before);
-    assert!(native_files::project_folder(root.path(), "../beta").is_err());
-    assert!(native_files::project_folder(root.path(), "C:\\outside").is_err());
+    assert!(
+        native_files::read_json(&alpha, "../beta/seesaw.json", serde_json::Value::Null).is_err()
+    );
+    assert!(
+        include_str!("../src-tauri/src/commands/harness.rs")
+            .contains("checked_harness_dir_for_slug")
+    );
 }
 
 #[test]

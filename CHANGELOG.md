@@ -841,3 +841,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #263: Keep generated skill registry imports covered by dashboard type checking.
 
 - Fix #238: Load native memory and orchestration data through registered IPC instead of absent HTTP endpoints.
+
+- Remove the duplicate native project resolver after adopting shared canonical validation (#239).

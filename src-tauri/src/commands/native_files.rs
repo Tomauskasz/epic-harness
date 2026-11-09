@@ -8,25 +8,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub fn project_folder(root: &Path, slug: &str) -> Result<PathBuf, String> {
-    if slug.is_empty() || matches!(slug, "." | "..") || slug.contains(['/', '\\', ':']) {
-        return Err("invalid project slug".into());
-    }
-    let project = root.join(slug);
-    if !root.exists() {
-        return Ok(project);
-    }
-    let root = root.canonicalize().map_err(|e| e.to_string())?;
-    if !project.exists() {
-        return Ok(root.join(slug));
-    }
-    let project = project.canonicalize().map_err(|e| e.to_string())?;
-    if !project.starts_with(&root) || !project.is_dir() {
-        return Err("project escapes harness root".into());
-    }
-    Ok(project)
-}
-
 fn checked_file(project: &Path, name: &str) -> Result<PathBuf, String> {
     let path = project.join(name);
     if !path.exists() {
