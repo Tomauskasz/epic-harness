@@ -129,6 +129,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Live Agents now shows recently active coding sessions and project-scoped
   subagent lifecycle state from both file and SQLite stores. Project switching
   cannot restore stale responses, and session dates use observation timestamps.
+- Align the AGENTS Orbit overview with explicit interactive opt-in, automatic
+  Council/Direct selection and evolution regardless of CI outcome (#283).
 - **Dashboard English labels**: 27 translation keys used by the Topbar,
   Dashboard, Memory, and Settings pages were missing from `en.ts`, so
   English (and the fallback for every other locale) rendered raw key names
