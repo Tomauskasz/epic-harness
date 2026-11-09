@@ -831,7 +831,8 @@ fn is_leap(y: i32) -> bool {
 
 // ── Main Hook ───────────────────────────────────────
 
-/// Ingest today's JSONL fallback session files into SQLite, then remove them.
+/// Ingest pending JSONL fallback session files into SQLite, then remove them.
+/// Host session IDs need not contain a date; observation timestamps carry it.
 ///
 /// observe/polish write JSONL only when the SQLite write failed mid-session.
 /// Without this backfill, those records were stranded forever: the old read
@@ -839,15 +840,12 @@ fn is_leap(y: i32) -> bool {
 /// one later successful SQLite write and the fallback data went unread.
 /// The file is removed only after every record was inserted, so a partial
 /// backfill leaves the remainder for the next attempt.
-async fn backfill_jsonl_to_sqlite(pool: &sqlx::AnyPool, today_str: &str) {
+async fn backfill_jsonl_to_sqlite(pool: &sqlx::AnyPool, _today_str: &str) {
     if !obs_dir().is_dir() {
         return;
     }
     let project = crate::shared::paths::project_slug();
     for fname in list_files(&obs_dir(), ".jsonl") {
-        if !fname.contains(today_str) {
-            continue;
-        }
         let recs = read_jsonl_typed(&obs_dir().join(&fname));
         if recs.is_empty() {
             continue;
@@ -859,10 +857,23 @@ async fn backfill_jsonl_to_sqlite(pool: &sqlx::AnyPool, today_str: &str) {
             .unwrap_or("backfill")
             .to_string();
         let mut all_ok = true;
-        for rec in &recs {
-            if crate::store::observations::insert_observation_pool(pool, rec, &sid, &project)
-                .await
-                .is_err()
+        for (index, rec) in recs.iter().enumerate() {
+            // Stable, content-qualified import identity makes a partially
+            // completed backfill retryable without conflating real calls.
+            let Ok(content) = serde_json::to_string(rec) else {
+                all_ok = false;
+                continue;
+            };
+            let identity = format!("jsonl:{fname}:{index}:{content}");
+            if crate::store::observations::insert_observation_with_identity_pool(
+                pool,
+                rec,
+                &sid,
+                &project,
+                Some(&identity),
+            )
+            .await
+            .is_err()
             {
                 all_ok = false;
             }
