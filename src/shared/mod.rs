@@ -558,13 +558,28 @@ warned:
         let dir = tempfile::tempdir().unwrap();
         // Create a real file outside the orbit dir to point a symlink at
         let real = dir.path().join("real.json");
-        fs::write(&real, r#"{"id":"evil","status":"running"}"#).unwrap();
+        fs::write(
+            &real,
+            format!(
+                r#"{{"id":"evil","status":"running","updated_at":"{}"}}"#,
+                now_iso()
+            ),
+        )
+        .unwrap();
         // Create symlink inside the orbit dir
         let link = dir.path().join("PIPELINE-20260507-symlink.json");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &link).unwrap();
         #[cfg(windows)]
-        std::os::windows::fs::symlink_file(&real, &link).unwrap();
+        if let Err(error) = std::os::windows::fs::symlink_file(&real, &link) {
+            if error.raw_os_error() == Some(1314) {
+                eprintln!(
+                    "SKIP symlink-file defense assertion: Windows symlink privilege unavailable (1314); directory-junction containment tests still run"
+                );
+                return;
+            }
+            panic!("unable to create symlink fixture: {error}");
+        }
 
         let result = scan_running_pipeline_in(dir.path());
         assert!(
