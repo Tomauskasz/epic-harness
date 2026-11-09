@@ -1,5 +1,7 @@
 # Changelog
 
+- Fix #195: generate portable UTC evaluation timestamps and unique report/baseline archive names without an external date executable.
+
 - Fix #180: preserve multiline benchmark JSON scores and fail missing, invalid, or out-of-range composite results.
 
 - Fix #179: regression-only evaluation now runs its measurement inputs and rejects empty evaluations/comparisons.
