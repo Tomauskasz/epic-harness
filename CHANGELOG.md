@@ -759,3 +759,4 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #212: Show no matches for a completed memory search and discard outdated search responses.
 
 - Fix #213: Display graph node and edge counts from the canonical backend statistics fields.
+- Fixed corrupt non-object Orbit state crashing the dashboard; valid records remain available (#222).
