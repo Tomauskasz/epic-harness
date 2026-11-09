@@ -33,11 +33,12 @@ const hooks = Object.values(manifest.hooks)
   .flatMap((group) => group.hooks)
   .filter((handler) => handler.type === "command")
   .map((handler) => {
-    const m = handler.command.match(
-      /^node\s+"\$\{PLUGIN_ROOT\}\/([^"\r\n]+)"\s+(\S+)$/,
-    );
-    if (!m) throw new Error(`unrecognized hook command: ${handler.command}`);
-    return { raw: handler.command, script: m[1], sub: m[2] };
+    const prefix = `node -e "const p=require('node:path').join(process.env.PLUGIN_ROOT,'registry/scripts/hooks/run.mjs');process.argv.splice(1,0,p);import(require('node:url').pathToFileURL(p).href)" `;
+    const sub = handler.command.slice(prefix.length);
+    if (!handler.command.startsWith(prefix) || !/^[a-z-]+$/.test(sub)) {
+      throw new Error(`unrecognized hook command: ${handler.command}`);
+    }
+    return { raw: handler.command, sub };
   });
 
 let failures = 0;
@@ -61,7 +62,7 @@ process.on("exit", () => {
   rmSync(fixture, { recursive: true, force: true });
 });
 const runHook = (hook) => {
-  const command = hook.raw.replaceAll("\u0024{PLUGIN_ROOT}", root);
+  const command = hook.raw;
   const options = { input: "{}", encoding: "utf8", timeout: 60000, env: childEnv, windowsHide: true };
   return process.platform === "win32"
     ? spawnSync("cmd.exe", ["/D", "/S", "/C", command], { ...options, windowsVerbatimArguments: true })

@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Redact complete JSON and quoted credential values before observation truncation (#177).
 - Legacy migration preserves readonly/executable file permissions and treats
   an existing file with different permissions as a conflict (#217).
+- Plugin hooks read their root through the host environment, preserving literal
+  percent references and shell metacharacters in Windows installation paths (#265).
 - Linked worktrees on Windows now share the main checkout's harness identity,
   using native absolute-path detection for Git's common directory.
 - Reflection compares canonical project/root and vault/home paths consistently
