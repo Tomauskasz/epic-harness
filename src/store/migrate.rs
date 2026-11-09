@@ -272,15 +272,14 @@ pub(crate) async fn do_migrate_async(
     // window between the outer read in run_subcommand and this BEGIN IMMEDIATE.
     {
         begin_immediate(conn).await?;
-        let already: bool =
-            sqlx::query("SELECT value FROM _harness_meta WHERE key = ?")
-                .bind(&marker)
-                .fetch_optional(&mut *conn)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|row| row.try_get::<String, _>(0).ok())
-                .is_some_and(|v| v == "1" || v == "in_progress");
+        let already: bool = sqlx::query("SELECT value FROM _harness_meta WHERE key = ?")
+            .bind(&marker)
+            .fetch_optional(&mut *conn)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|row| row.try_get::<String, _>(0).ok())
+            .is_some_and(|v| v == "1" || v == "in_progress");
 
         if already {
             rollback(conn).await;
@@ -1250,14 +1249,13 @@ mod tests {
         assert_eq!(stats.obs_imported, 0);
         assert_eq!(stats.sess_imported, 0);
 
-        let migrated: String =
-            sqlx::query("SELECT value FROM _harness_meta WHERE key = ?")
-                .bind(legacy_marker())
-                .fetch_one(&mut conn)
-                .await
-                .unwrap()
-                .try_get(0)
-                .unwrap();
+        let migrated: String = sqlx::query("SELECT value FROM _harness_meta WHERE key = ?")
+            .bind(legacy_marker())
+            .fetch_one(&mut conn)
+            .await
+            .unwrap()
+            .try_get(0)
+            .unwrap();
         assert_eq!(migrated, "1");
     }
 
