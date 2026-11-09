@@ -591,6 +591,11 @@ pub async fn list_dashboard_pipelines_pool(
         .await
         .unwrap_or_default();
     all.retain(|pipeline| project.is_none_or(|slug| pipeline["project"].as_str() == Some(slug)));
+    for pipeline in &mut all {
+        if let Some(slug) = pipeline["project"].as_str().map(str::to_owned) {
+            pipeline["_project"] = serde_json::Value::String(slug);
+        }
+    }
     let identity = |slug: &str, id: &str| {
         (
             slug.to_owned(),

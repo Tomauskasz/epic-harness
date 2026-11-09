@@ -597,6 +597,7 @@ fn issue_279_primary_copies_win_without_hiding_foreign_same_id() {
     let (_, body) = dashboard.request("GET", "/api/harness?cmd=get_orbit_pipelines");
     let rows = body.as_array().unwrap();
     assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row["_project"] == row["project"]));
     assert_eq!(
         rows.iter()
             .find(|row| row["project"] == "project-a")
