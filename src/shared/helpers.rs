@@ -329,12 +329,16 @@ pub fn copy_file_preserving_existing(src: &Path, dest: &Path) -> std::io::Result
         }
     }
     let source = src.symlink_metadata()?;
+    let permissions = source.permissions();
     if !source.is_file() || is_link_or_reparse_point(&source) {
         return Err(std::io::Error::other("unsupported migration source"));
     }
     match dest.symlink_metadata() {
         Ok(target) => {
-            if !target.is_file() || is_link_or_reparse_point(&target) || !same_contents(src, dest)?
+            if !target.is_file()
+                || is_link_or_reparse_point(&target)
+                || target.permissions() != permissions
+                || !same_contents(src, dest)?
             {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::AlreadyExists,
@@ -369,7 +373,8 @@ pub fn copy_file_preserving_existing(src: &Path, dest: &Path) -> std::io::Result
         fs::hard_link(&temporary, dest)
     })();
     let _ = fs::remove_file(temporary);
-    result
+    result?;
+    fs::set_permissions(dest, permissions)
 }
 
 /// Like `copy_dir` but counts successes and errors instead of silently ignoring failures.

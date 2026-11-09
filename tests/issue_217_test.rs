@@ -130,3 +130,32 @@ fn preexisting_partial_destination_is_retried_without_overwriting_conflicts() {
             .is_file()
     );
 }
+
+#[test]
+fn legacy_import_preserves_file_permissions() {
+    let temp = fixture();
+    let source = temp.path().join("project/.harness/memory/readonly.md");
+    std::fs::write(&source, "readonly legacy rule").unwrap();
+    let mut permissions = std::fs::metadata(&source).unwrap().permissions();
+    permissions.set_readonly(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o555);
+    }
+    std::fs::set_permissions(&source, permissions).unwrap();
+    let out = resume(temp.path(), "compact", "permissions");
+    assert!(out.status.success());
+    let copied = std::fs::metadata(temp.path().join("data/projects/project/memory/readonly.md"))
+        .unwrap()
+        .permissions();
+    assert!(
+        copied.readonly(),
+        "an import must preserve original readonly/executable permission metadata"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(copied.mode() & 0o777, 0o555);
+    }
+}
