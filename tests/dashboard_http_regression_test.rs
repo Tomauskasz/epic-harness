@@ -633,3 +633,27 @@ fn issue_279_legacy_pipeline_fallback_survives_unavailable_database() {
     assert_eq!(rows.as_array().unwrap().len(), 1);
     assert_eq!(rows[0]["id"], "legacy");
 }
+
+#[test]
+fn issue_282_bom_legacy_pipeline_remains_visible_beside_database_rows() {
+    let dashboard = Dashboard::start();
+    dashboard.seed_pipeline("database", "project-b", "{}");
+    let valid = dashboard.file(
+        "projects/project-a/orbit/PIPELINE-bom.json",
+        &json!({"id":"bom", "status":"running"}),
+    );
+    fs::write(&valid, format!("\u{feff}{}", fs::read_to_string(&valid).unwrap())).unwrap();
+    let invalid = dashboard.file("projects/project-a/orbit/PIPELINE-invalid.json", &json!({}));
+    fs::write(invalid, "\u{feff}{malformed").unwrap();
+    let repeated = dashboard.file("projects/project-a/orbit/PIPELINE-repeated.json", &json!({}));
+    fs::write(repeated, "\u{feff}\u{feff}{\"id\":\"repeated\",\"status\":\"running\"}").unwrap();
+    let (status, selected) = dashboard.request(
+        "GET", "/api/harness?cmd=get_orbit_pipelines&project=project-a",
+    );
+    assert_eq!(status, 200);
+    assert_eq!(selected.as_array().unwrap().len(), 1);
+    assert_eq!(selected[0]["id"], "bom");
+    let (_, all) = dashboard.request("GET", "/api/harness?cmd=get_orbit_pipelines");
+    assert_eq!(all.as_array().unwrap().len(), 2);
+    assert_eq!(dashboard.request("GET", "/api/projects").0, 200);
+}
