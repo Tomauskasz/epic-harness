@@ -684,3 +684,5 @@ Original files are **not deleted** after import. New users are automatically on 
 
 - CI (#132): verify rebuilt dashboard, both source-built executables, isolated full regressions, and native desktop contracts with commit-bound artifact hashes.
 - Fix #251: honor explicit database environment URLs when configuration is missing or unreadable.
+
+- Fix #186: hash untrusted session identities before constructing startup lock filenames.
