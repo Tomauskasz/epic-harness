@@ -719,3 +719,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Reject malformed Unicode and invalid memory timestamps without crashing recall (#233).
 
 - Respond to MCP liveness ping with an empty result object (#235).
+
+- Preserve explicit importance values across database opens and legacy imports (#232).
