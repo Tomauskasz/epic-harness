@@ -839,3 +839,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Use the shared canonical project resolver for native evolution readers (#239; requires #252).
 
 - Fix #263: Keep generated skill registry imports covered by dashboard type checking.
+
+- Fix #238: Load native memory and orchestration data through registered IPC instead of absent HTTP endpoints.
