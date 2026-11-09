@@ -586,10 +586,17 @@ pub async fn list_dashboard_pipelines_pool(
     project: Option<&str>,
     limit: Option<usize>,
 ) -> std::io::Result<Vec<serde_json::Value>> {
-    let primary = crate::store::orbit_store::list_all_pipelines_pool(pool)
-        .await
-        .unwrap_or_default();
-    merge_dashboard_pipeline_sidecars(primary, project, limit)
+    match crate::store::orbit_store::list_all_pipelines_pool(pool).await {
+        Ok(primary) => merge_dashboard_pipeline_sidecars(primary, project, limit),
+        Err(error) => {
+            let legacy = merge_dashboard_pipeline_sidecars(Vec::new(), project, limit)?;
+            if legacy.is_empty() {
+                Err(error)
+            } else {
+                Ok(legacy)
+            }
+        }
+    }
 }
 
 fn merge_dashboard_pipeline_sidecars(
