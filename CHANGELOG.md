@@ -824,3 +824,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Register native evolution dashboard handlers with scoped, contained read-only sidecar access (#239).
 
 - Fix #215: Require successful pipeline deletion and show dismissal errors without hiding the row.
+
+- Fix #216: Open memory details through a native focusable title button.
