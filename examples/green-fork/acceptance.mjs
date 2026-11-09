@@ -56,6 +56,12 @@ for (const name of ["epic", "epic-harness"]) {
   assert.ok(replies.find(r => r.id === 2)?.result?.tools?.length >= 6);
   assert.deepEqual(replies.find(r => r.id === 3)?.result, {});
   assert.equal(replies.length, 3, "notifications must not receive responses");
+  const agentId = "artifact-worker-" + name;
+  const agentStart = run(binary, ["observe"], main, JSON.stringify({
+    hook_event_name: "SubagentStart", session_id: "artifact-" + name,
+    agent_id: agentId, agent_type: "builder",
+  }));
+  assert.equal(agentStart.status, 0, agentStart.stderr);
   const serverSocket = net.createServer();
   const port = await new Promise((resolve, reject) => { serverSocket.once("error", reject); serverSocket.listen(0, "127.0.0.1", () => { const value = serverSocket.address().port; serverSocket.close(() => resolve(value)); }); });
   const child = spawn(binary, ["serve", "--port=" + port], { cwd: main, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -72,10 +78,26 @@ for (const name of ["epic", "epic-harness"]) {
     assert.ok(html.includes("harness-version"), "dashboard version provenance missing");
     const activity = await fetch("http://127.0.0.1:" + port + "/api/harness?cmd=get_live_activity&project=main_project").then(r => r.json());
     assert.ok(Array.isArray(activity.sessions) && Array.isArray(activity.runs));
+    assert.ok(activity.sessions.some(session => session.session_id === "artifact-" + name
+      && session.project === "main_project"), "SessionStart must expose the active coding session");
+    const agents = activity.runs.flatMap(run => run.agents).filter(agent => agent.id === agentId);
+    assert.equal(agents.length, 1, "one SubagentStart must expose exactly one tracked agent");
+    assert.equal(agents[0].status, "running", "started subagent must be visible as running");
+    const unrelated = await fetch("http://127.0.0.1:" + port + "/api/harness?cmd=get_live_activity&project=unrelated_project").then(r => r.json());
+    assert.deepEqual(unrelated.sessions, [], "coding sessions must remain project scoped");
+    assert.deepEqual(unrelated.runs, [], "subagents must remain project scoped");
+    const agentStop = run(binary, ["observe"], main, JSON.stringify({
+      hook_event_name: "SubagentStop", session_id: "artifact-" + name, agent_id: agentId,
+    }));
+    assert.equal(agentStop.status, 0, agentStop.stderr);
+    const stopped = await fetch("http://127.0.0.1:" + port + "/api/harness?cmd=get_live_activity&project=main_project").then(r => r.json());
+    const completed = stopped.runs.flatMap(run => run.agents).filter(agent => agent.id === agentId);
+    assert.equal(completed.length, 1, "completion must update the existing tracked agent");
+    assert.equal(completed[0].status, "done", "stopped subagent must leave running state");
   } finally {
     if (child.exitCode === null) {
       const exited = new Promise(resolve => child.once("exit", resolve)); child.kill(); await exited;
     }
   }
-  console.log("PASS source artifact: " + name + " identity/reflection/hooks/memory/MCP/dashboard");
+  console.log("PASS source artifact: " + name + " identity/reflection/hooks/memory/MCP/dashboard/live-session/subagent");
 }
