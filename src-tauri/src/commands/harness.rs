@@ -459,7 +459,7 @@ fn selected_project_dir(project: Option<&str>) -> Result<std::path::PathBuf, Str
     let slug = native_store::project_scope(project)
         .map(str::to_string)
         .unwrap_or_else(epic_harness::shared::paths::project_slug);
-    native_files::project_folder(&epic_harness::shared::paths::harness_projects_root(), &slug)
+    epic_harness::shared::paths::checked_harness_dir_for_slug(&slug)
 }
 
 /// Read the selected project's solved-task registry without running migration writes.

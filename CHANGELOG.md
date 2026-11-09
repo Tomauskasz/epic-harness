@@ -832,3 +832,8 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #267: Normalize the persisted audit failure count for browser and native Orbit displays.
 
 - Fix #263: Generate the skill catalog and copied commands from current skill metadata rather than obsolete names.
+- Fix #269: report legacy directory links and junctions without traversing or copying their external targets.
+
+- Fix #252: validate selected project paths and every existing descendant ancestor before reflection reads.
+
+- Use the shared canonical project resolver for native evolution readers (#239; requires #252).
