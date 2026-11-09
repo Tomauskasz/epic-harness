@@ -35,6 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plugin bootstrap and refuse upstream replacement until the rollout removes its pin.
 - Plugin hooks read their root through the host environment, preserving literal
   percent references and shell metacharacters in Windows installation paths (#265).
+- New orchestration work reopens completed runs and clears stale completion
+  metadata (#242).
+- Orchestration updates use portable interprocess locks and independent atomic
+  write files (#243).
+- Cleanup uses heartbeat activity and retains stale agents as blocked (#244).
+- Edit-pause directives resolve from the project orchestration store (#187).
+- Orbit preserves fresh startup reservations, serializes admission and refuses
+  active-pipeline unlocks, with optional `EPIC_ORBIT_OWNER` verification (#247).
+- Explicit failed Agent outcomes retain failed status and terminal timestamps
+  while preserving the existing downstream resolution policy (#245).
+- Windows scan tests explicitly handle unavailable file-symlink privileges.
 - Agent pause/cancel directives now deny synchronous pre-tool spawns and remain
   visible in lifecycle tracking instead of being overwritten as running (#241).
 - Dependency completion updates both the run graph and per-agent status,
