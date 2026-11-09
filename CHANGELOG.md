@@ -690,3 +690,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #253: derive main checkout identity independently from separately located Git metadata.
 
 - Fix #269: report legacy directory links and junctions without traversing or copying their external targets.
+
+- Fix #252: validate selected project paths and every existing descendant ancestor before reflection reads.

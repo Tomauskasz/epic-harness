@@ -80,22 +80,13 @@ pub fn run_context(
     // Collect obs from all target project slugs
     for slug in &project_slugs {
         // Fix 1: Verify resolved path stays within harness projects root
-        let slug_harness = harness_dir_for_slug(slug);
-        let safe = if slug_harness.exists() {
-            match (
-                slug_harness.canonicalize(),
-                harness_projects_root().canonicalize(),
-            ) {
-                (Ok(project), Ok(root)) => project.starts_with(root),
-                _ => false,
+        let _slug_harness = match checked_harness_dir_for_slug(slug) {
+            Ok(path) => path,
+            Err(_) => {
+                eprintln!("{{\"error\":\"slug escapes harness root: {slug}\"}}");
+                return 1;
             }
-        } else {
-            slug_harness.starts_with(harness_projects_root())
         };
-        if !safe {
-            eprintln!("{{\"error\":\"slug escapes harness root: {slug}\"}}");
-            return 1;
-        }
         // SQLite is the primary observation store; the JSONL files only hold
         // records from rounds where the DB write failed. Reading JSONL alone
         // reported `total: 0` for projects with thousands of stored rows.
@@ -111,7 +102,13 @@ pub fn run_context(
             Vec::new()
         });
 
-        let slug_obs_dir = slug_harness.join("obs");
+        let slug_obs_dir = match checked_harness_path_for_slug(slug, "obs") {
+            Ok(path) => path,
+            Err(_) => {
+                eprintln!("{{\"error\":\"observation directory escapes project root\"}}");
+                return 1;
+            }
+        };
         let jsonl_recs: Vec<ObsRecord> = if slug_obs_dir.is_dir() {
             list_files(&slug_obs_dir, ".jsonl")
                 .into_iter()
@@ -121,7 +118,10 @@ pub fn run_context(
                         .map(|s| s >= cutoff_tag.as_str())
                         .unwrap_or(true)
                 })
-                .flat_map(|f| read_jsonl_typed(&slug_obs_dir.join(f)))
+                .filter_map(|f| {
+                    checked_harness_path_for_slug(slug, std::path::Path::new("obs").join(f)).ok()
+                })
+                .flat_map(|path| read_jsonl_typed(&path))
                 .collect()
         } else {
             Vec::new()
