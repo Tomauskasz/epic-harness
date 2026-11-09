@@ -172,3 +172,89 @@ fn local_team_sync_respects_scope_and_global_is_explicit() {
         "global sync must not recreate project agents"
     );
 }
+
+#[test]
+fn unlink_rejects_other_org_before_removing_any_local_mirror() {
+    let fixture = Fixture::new();
+    let alpha = fixture.seed_team("alpha", "backend");
+    let beta = fixture.seed_team("beta", "backend");
+    fs::create_dir_all(fixture.project.join(".codex")).unwrap();
+    fixture.success(&["sync", "backend", "--org", "alpha"]);
+    let claude = fixture.project.join(".claude/agents/backend/tester.md");
+    let codex = fixture.project.join(".codex/agents/backend/tester.toml");
+    let before = [
+        read(&claude),
+        read(&codex),
+        read(&alpha.join("config.json")),
+        read(&beta.join("config.json")),
+    ];
+
+    for operation in ["unlink", "delete"] {
+        let result = fixture.run(&[operation, "backend", "--org", "beta"]);
+        assert!(
+            !result.status.success(),
+            "{operation} must reject another org's local team"
+        );
+        assert_eq!(read(&claude), before[0]);
+        assert_eq!(read(&codex), before[1]);
+        assert_eq!(read(&alpha.join("config.json")), before[2]);
+        assert_eq!(read(&beta.join("config.json")), before[3]);
+    }
+    fixture.success(&["unlink", "backend", "--org", "alpha"]);
+    let config: serde_json::Value =
+        serde_json::from_str(&read(&alpha.join("config.json"))).unwrap();
+    assert_eq!(config["projects"], serde_json::json!([]));
+    assert!(alpha.join("agents/tester.md").exists());
+    assert_eq!(read(&beta.join("config.json")), before[3]);
+}
+
+#[test]
+fn unlink_infers_org_from_codex_only_mirror() {
+    let fixture = Fixture::new();
+    let canonical = fixture.seed_team("alpha", "backend");
+    fs::create_dir_all(fixture.project.join(".codex")).unwrap();
+    fixture.success(&["sync", "backend", "--org", "alpha"]);
+    let claude = fixture.project.join(".claude/agents/backend");
+    assert!(
+        claude
+            .canonicalize()
+            .unwrap()
+            .starts_with(fixture.project.canonicalize().unwrap())
+    );
+    fs::remove_dir_all(claude).unwrap();
+    fixture.success(&["unlink", "backend"]);
+    assert!(!fixture.project.join(".codex/agents/backend").exists());
+    let config: serde_json::Value =
+        serde_json::from_str(&read(&canonical.join("config.json"))).unwrap();
+    assert_eq!(
+        config["projects"],
+        serde_json::json!([]),
+        "inferred owner must be deregistered"
+    );
+}
+
+#[test]
+fn unlink_rejects_conflicting_mirror_owners() {
+    let fixture = Fixture::new();
+    fixture.seed_team("alpha", "backend");
+    fs::create_dir_all(fixture.project.join(".codex")).unwrap();
+    fixture.success(&["sync", "backend", "--org", "alpha"]);
+    let codex = fixture.project.join(".codex/agents/backend/tester.toml");
+    fs::write(
+        &codex,
+        read(&codex).replace("org = \"alpha\"", "org = \"beta\""),
+    )
+    .unwrap();
+    let result = fixture.run(&["unlink", "backend", "--org", "alpha"]);
+    assert!(
+        !result.status.success(),
+        "all installed mirrors must have the requested owner"
+    );
+    assert!(
+        fixture
+            .project
+            .join(".claude/agents/backend/tester.md")
+            .exists()
+    );
+    assert!(codex.exists());
+}

@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Team unlink/delete validates local mirror ownership before removal, preserving
+  other orgs' agents and correctly deregistering Codex-only links (#249).
 - Project-local team sync keeps other host installations untouched; home-wide
   mirrors now require the explicit `--global` option (#248).
 - Linked worktrees on Windows now share the main checkout's harness identity,

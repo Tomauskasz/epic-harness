@@ -117,6 +117,10 @@ Project sync also writes a local Codex mirror when the project has `.codex/`.
 Home-wide mirrors for Codex, Antigravity, Cursor and OpenCode require `sync --global`;
 a normal project sync or link does not install agents into other projects.
 
+Unlink and delete check the owning org in every local Claude/Codex mirror before
+removing anything. A mismatched `--org` or conflicting mirror ownership is rejected;
+when `--org` is omitted, Codex-only projects can infer it from the agent TOML.
+
 ---
 
 ## Team Types
