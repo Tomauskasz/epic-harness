@@ -715,3 +715,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Preserve separate project knowledge when deduplicating same-title memory nodes (#181).
 
 - Reject foreign-origin and browser-simple memory mutation requests before storage changes (#234).
+
+- Reject malformed Unicode and invalid memory timestamps without crashing recall (#233).
