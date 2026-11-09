@@ -694,3 +694,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #252: validate selected project paths and every existing descendant ancestor before reflection reads.
 
 - Fix #217: retry incomplete legacy imports safely, preserve conflicting destinations and keep originals and project-local resources.
+
+- Fix #219: execute configured Windows npx.cmd formatters and record nonblocking child failures.
