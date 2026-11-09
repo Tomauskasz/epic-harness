@@ -96,6 +96,7 @@ pub struct ResolvedCommands {
     pub mutation_command: Option<String>,
     pub stack: String,
     pub min_pass_rate: f64,
+    pub max_regression_pct: f64,
 }
 
 // ── Defaults ────────────────────────────────────────────────────────
@@ -360,6 +361,16 @@ fn detect_benchmarks(cwd: &Path) -> Vec<Benchmark> {
 /// eval delegates build/test/lint to `verify`. Only explicitly configured
 /// dimension commands are returned; stack is informational.
 pub fn resolve_commands(cfg: &EvalConfig) -> Result<ResolvedCommands, String> {
+    if !cfg
+        .dimensions
+        .performance
+        .extra
+        .max_regression_pct
+        .is_finite()
+        || cfg.dimensions.performance.extra.max_regression_pct < 0.0
+    {
+        return Err("performance max_regression_pct must be finite and non-negative".into());
+    }
     if !cfg.dimensions.correctness.extra.min_pass_rate.is_finite()
         || !(0.0..=1.0).contains(&cfg.dimensions.correctness.extra.min_pass_rate)
     {
@@ -391,5 +402,6 @@ pub fn resolve_commands(cfg: &EvalConfig) -> Result<ResolvedCommands, String> {
         mutation_command: mutation_cmd,
         stack,
         min_pass_rate: cfg.dimensions.correctness.extra.min_pass_rate,
+        max_regression_pct: cfg.dimensions.performance.extra.max_regression_pct,
     })
 }

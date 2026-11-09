@@ -208,9 +208,42 @@ fn fixture_command() {
             fs::write("EXECUTED.txt", "fixture command ran").unwrap();
             println!("test result: ok. 10 passed; 0 failed;");
         }
+        "latency-fast" | "latency-slow" => {
+            let started = std::time::Instant::now();
+            std::thread::sleep(std::time::Duration::from_millis(
+                if scenario == "latency-fast" { 5 } else { 250 },
+            ));
+            println!(
+                "{}",
+                serde_json::json!({"latency_ms": started.elapsed().as_secs_f64() * 1000.0})
+            );
+        }
         _ => println!("test result: ok. 10 passed; 0 failed;"),
     }
     std::process::exit(0);
+}
+
+#[test]
+fn measured_performance_regressions_honor_the_configured_percentage() {
+    let f = Fixture::new();
+    f.config(&format!("dimensions:\n  performance:\n    enabled: true\n    command: {}\n    extra:\n      max_regression_pct: 20\n  regression:\n    enabled: true\n", serde_json::to_string(&f.command()).unwrap()));
+    let baseline = f.run("latency-fast", &["eval", "--baseline-update", "--json"]);
+    assert!(
+        baseline.status.success(),
+        "{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let slow = f.run("latency-slow", &["eval", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&slow.stdout).unwrap();
+    assert!(!slow.status.success(), "slow measurement passed: {report}");
+    assert_eq!(
+        report["dimensions"]["regression"]["details"]["deltas"]["performance"]["regressed"],
+        true
+    );
+    assert_eq!(
+        report["dimensions"]["performance"]["details"]["metric"],
+        "latency_ms"
+    );
 }
 
 #[test]

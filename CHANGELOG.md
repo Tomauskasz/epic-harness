@@ -1,5 +1,7 @@
 # Changelog
 
+- Fix #275: compare measured latency, throughput or native command duration against performance baselines using the configured percentage threshold.
+
 - Fix #201: eval command parsing preserves empty arguments, escaped literal quotes and Windows path separators, and rejects unterminated quoting.
 
 - Fix #200: honor warning-only regression policy while retaining measured regression evidence and failing actual child commands or empty comparisons.

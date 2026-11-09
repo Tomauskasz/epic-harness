@@ -184,6 +184,7 @@ pub fn run(args: &[String]) -> i32 {
         // failures or an invalid/empty comparison.
         if !dims.regression.extra.fail_on_regression
             && regression.verdict == "FAIL"
+            && regression.details["comparison_error"] != true
             && regression
                 .details
                 .get("deltas")
