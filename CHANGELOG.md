@@ -820,3 +820,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #245: record authoritative failed Agent outcomes as failed, preserve terminal timestamps, and keep downstream resolution policy coherent.
 
 - Fix native dashboard project scoping and aggregate metrics, filtering history and snapshots before limits (#237).
+
+- Register native evolution dashboard handlers with scoped, contained read-only sidecar access (#239).
