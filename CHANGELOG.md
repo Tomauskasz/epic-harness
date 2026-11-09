@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Classify mutating Git/find/fd modes and BSD in-place sed diagnostics instead of treating them as quoted reads (#193).
 - Resolve nonempty `path` and `file_path` aliases consistently for observation actions and extensions (#191).
 - Keep native Windows directory components in observation file identity (#189).
+- Ring 3 attribution uses each host session's actual injected skills and eligible controls, respecting template policy and context budgets instead of crediting every skill on disk (#208).
 - Reflection consumes project observations by durable row identity and commits its cursor, metrics, and evolution record together, retaining late arrivals and failed saves for retry (#218).
 - Preserve distinct observations and historical data; deduplicate only explicit project/session-scoped invocation IDs (#188).
 - Redact complete JSON and quoted credential values before observation truncation (#177).
