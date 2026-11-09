@@ -696,3 +696,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #217: retry incomplete legacy imports safely, preserve conflicting destinations and keep originals and project-local resources.
 
 - Fix #219: execute configured Windows npx.cmd formatters and record nonblocking child failures.
+
+- Fix #272: honor per-project sharing consent and documented exports while preserving explicit legacy stores.
