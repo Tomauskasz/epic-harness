@@ -837,3 +837,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #252: validate selected project paths and every existing descendant ancestor before reflection reads.
 
 - Use the shared canonical project resolver for native evolution readers (#239; requires #252).
+
+- Fix #263: Keep generated skill registry imports covered by dashboard type checking.
