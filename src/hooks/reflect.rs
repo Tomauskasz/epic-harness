@@ -854,12 +854,17 @@ fn is_leap(y: i32) -> bool {
 /// The file is removed only after every record was inserted, so a partial
 /// backfill leaves the remainder for the next attempt.
 async fn backfill_jsonl_to_sqlite(pool: &sqlx::AnyPool, _today_str: &str) {
-    if !obs_dir().is_dir() {
-        return;
-    }
     let project = crate::shared::paths::project_slug();
-    for fname in list_files(&obs_dir(), ".jsonl") {
-        let Ok(content) = fs::read_to_string(obs_dir().join(&fname)) else {
+    let Ok(directory) = checked_harness_path_for_slug(&project, "obs") else {
+        return;
+    };
+    for fname in list_files(&directory, ".jsonl") {
+        let Ok(source) =
+            checked_harness_path_for_slug(&project, std::path::Path::new("obs").join(&fname))
+        else {
+            continue;
+        };
+        let Ok(content) = fs::read_to_string(&source) else {
             continue;
         };
         // session_{sid}.jsonl → recover the session id for attribution.
@@ -899,7 +904,7 @@ async fn backfill_jsonl_to_sqlite(pool: &sqlx::AnyPool, _today_str: &str) {
             }
         }
         if all_ok {
-            let _ = std::fs::remove_file(obs_dir().join(&fname));
+            let _ = std::fs::remove_file(&source);
         }
     }
 }
@@ -955,6 +960,23 @@ pub fn run(_input: &HookInput) -> i32 {
     if !harness_exists() {
         return 0;
     }
+    let current_project = project_slug();
+    // Validate before opening the writer lock or touching analysis state.
+    // The ordinary hook shares the context reader's project/child boundary.
+    let lock_path = match (
+        checked_harness_dir_for_slug(&current_project),
+        checked_harness_path_for_slug(&current_project, "obs"),
+        checked_harness_path_for_slug(&current_project, ".reflect.lock"),
+    ) {
+        (Ok(_), Ok(_), Ok(lock)) => lock,
+        _ => {
+            hint(
+                "reflect",
+                "Project or observation path escapes harness root; analysis skipped",
+            );
+            return 0;
+        }
+    };
 
     // Cumulative reflection state needs one project writer and a durable row
     // cursor. Equal timestamps and late arrivals are not duplicate identities.
@@ -963,7 +985,7 @@ pub fn run(_input: &HookInput) -> i32 {
         .write(true)
         .create(true)
         .truncate(false)
-        .open(harness_dir().join(".reflect.lock"))
+        .open(lock_path)
     else {
         return 0;
     };
@@ -971,7 +993,6 @@ pub fn run(_input: &HookInput) -> i32 {
         return 0;
     }
     let today_str = today();
-    let current_project = project_slug();
     let pending = match crate::store::runtime::block_on(async {
         let pool = crate::store::pool::harness_pool().await?;
         let stored: Option<String> = sqlx::query_scalar(

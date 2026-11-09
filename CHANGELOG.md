@@ -48,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Classify mutating Git/find/fd modes and BSD in-place sed diagnostics instead of treating them as quoted reads (#193).
 - Resolve nonempty `path` and `file_path` aliases consistently for observation actions and extensions (#191).
 - Keep native Windows directory components in observation file identity (#189).
+- Ordinary reflection validates project, observation-directory, and fallback-file containment before reading or deleting data, matching context-reader boundaries while preserving hook no-op behavior (#252).
 - Fallback imports share physical-line identities with reflection context, preserving malformed source lines and avoiding duplicate counts during partial retries (#203).
 - Synthesis acceptance propagates pending/ledger persistence errors, retains retryable pending work, and deduplicates the ledger when a retry completes (#204).
 - Ring 3 attribution uses each host session's actual injected skills and eligible controls, respecting template policy and context budgets instead of crediting every skill on disk (#208).
