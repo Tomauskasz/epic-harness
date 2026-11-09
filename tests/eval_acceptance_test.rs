@@ -83,9 +83,30 @@ fn fixture_command() {
         }
         "partial-summary" => println!("test result: ok. 9 passed; 1 failed;"),
         "composite-low" => println!("{{\"composite\":0.1}}"),
+        "composite-pretty" => println!("{{\n  \"composite\": 0.1\n}}"),
+        "composite-missing" => println!("{{\"samples\":3}}"),
+        "composite-out-of-range" => println!("{{\"composite\":2}}"),
         _ => println!("test result: ok. 10 passed; 0 failed;"),
     }
     std::process::exit(0);
+}
+
+#[test]
+fn composite_preserves_multiline_scores_and_rejects_missing_or_invalid_scores() {
+    let f = Fixture::new();
+    f.config(&format!("benchmarks:\n  - name: fixture\n    command: {}\n    result_type: composite\ndimensions:\n  regression:\n    enabled: false\n", serde_json::to_string(&f.command()).unwrap()));
+    let pretty = f.run("composite-pretty", &["eval", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&pretty.stdout).unwrap();
+    assert!(pretty.status.success());
+    assert_eq!(report["dimensions"]["benchmark:fixture"]["score"], 0.1);
+    for scenario in ["composite-missing", "composite-out-of-range"] {
+        let output = f.run(scenario, &["eval", "--json"]);
+        assert!(
+            !output.status.success(),
+            "{scenario}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
 }
 
 #[test]

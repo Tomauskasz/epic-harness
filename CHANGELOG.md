@@ -1,5 +1,7 @@
 # Changelog
 
+- Fix #180: preserve multiline benchmark JSON scores and fail missing, invalid, or out-of-range composite results.
+
 - Fix #179: regression-only evaluation now runs its measurement inputs and rejects empty evaluations/comparisons.
 
 - Fix #178: correctness evaluation now fails on child-process failure and honors the configured minimum test pass rate.
