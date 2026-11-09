@@ -1,5 +1,7 @@
 # Changelog
 
+- Fix #201: eval command parsing preserves empty arguments, escaped literal quotes and Windows path separators, and rejects unterminated quoting.
+
 - Fix #200: honor warning-only regression policy while retaining measured regression evidence and failing actual child commands or empty comparisons.
 
 - Fix #199: eval init/scaffold JSON modes emit one serialized JSON document with correctly escaped paths and no human stdout preamble.
