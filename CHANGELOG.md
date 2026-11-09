@@ -791,3 +791,4 @@ Original files are **not deleted** after import. New users are automatically on 
 
 - Fix #256: track imported source rows transactionally so retries preserve distinct history without duplicating it; retain identity across writable-source moves and support read-only sources.
 - Fix #203: recover UUID-named fallback observations and use stable import identities for safe partial retries.
+- Fix #221: reject empty or ambiguous Orbit deletion IDs and match exact project-scoped sidecars.

@@ -154,3 +154,42 @@ fn issue_222_nonobject_pipeline_database_rows_do_not_terminate_dashboard() {
     assert_eq!(body[0]["id"], "valid");
     assert_eq!(dashboard.request("GET", "/api/projects").0, 200);
 }
+
+#[test]
+fn issue_221_empty_pipeline_id_rejects_without_deleting_other_projects() {
+    let dashboard = Dashboard::start();
+    let a = dashboard.file(
+        "projects/project-a/orbit/PIPELINE-alpha.json",
+        &json!({"id":"alpha"}),
+    );
+    let b = dashboard.file(
+        "projects/project-b/orbit/PIPELINE-beta.json",
+        &json!({"id":"beta"}),
+    );
+    let (status, body) = dashboard.request("DELETE", "/api/orbit/");
+    assert_eq!(status, 400);
+    assert_eq!(body["ok"], false);
+    assert!(a.exists() && b.exists());
+}
+
+#[test]
+fn issue_221_pipeline_id_matches_exactly_and_honors_selected_project() {
+    let dashboard = Dashboard::start();
+    let selected = dashboard.file(
+        "projects/project-a/orbit/PIPELINE-alpha.json",
+        &json!({"id":"alpha"}),
+    );
+    let prefix = dashboard.file(
+        "projects/project-a/orbit/PIPELINE-alpha-extra.json",
+        &json!({"id":"alpha-extra"}),
+    );
+    let other_project = dashboard.file(
+        "projects/project-b/orbit/PIPELINE-alpha.json",
+        &json!({"id":"alpha"}),
+    );
+    let (status, body) = dashboard.request("DELETE", "/api/orbit/alpha?project=project-a");
+    assert_eq!(status, 200);
+    assert_eq!(body["ok"], true);
+    assert!(!selected.exists());
+    assert!(prefix.exists() && other_project.exists());
+}
