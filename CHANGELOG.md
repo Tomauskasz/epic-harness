@@ -1,5 +1,7 @@
 # Changelog
 
+- Fix #179: regression-only evaluation now runs its measurement inputs and rejects empty evaluations/comparisons.
+
 - Fix #178: correctness evaluation now fails on child-process failure and honors the configured minimum test pass rate.
 
 All notable changes to epic-harness will be documented in this file.

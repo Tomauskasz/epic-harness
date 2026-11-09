@@ -82,9 +82,44 @@ fn fixture_command() {
             std::process::exit(7);
         }
         "partial-summary" => println!("test result: ok. 9 passed; 1 failed;"),
+        "composite-low" => println!("{{\"composite\":0.1}}"),
         _ => println!("test result: ok. 10 passed; 0 failed;"),
     }
     std::process::exit(0);
+}
+
+#[test]
+fn regression_selection_runs_measurements_and_rejects_empty_comparisons() {
+    let f = Fixture::new();
+    f.config(&format!(
+        "benchmarks:\n  - name: fixture\n    command: {}\n    result_type: composite\n",
+        serde_json::to_string(&f.command()).unwrap()
+    ));
+    let baselines = f.eval_dir().join("baselines");
+    fs::create_dir_all(&baselines).unwrap();
+    fs::write(
+        baselines.join("latest.json"),
+        r#"{"dimensions":{"benchmark:fixture":{"score":0.9}}}"#,
+    )
+    .unwrap();
+    let output = f.run(
+        "composite-low",
+        &["eval", "--dimension", "regression", "--json"],
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!output.status.success(), "{report}");
+    assert_eq!(report["dimensions"]["benchmark:fixture"]["score"], 0.1);
+    assert_eq!(
+        report["dimensions"]["regression"]["details"]["deltas"]["benchmark:fixture"]["regressed"],
+        true
+    );
+
+    f.config("dimensions:\n  regression:\n    enabled: true\n");
+    let empty = f.run("pass", &["eval", "--json"]);
+    assert!(
+        !empty.status.success(),
+        "no measurement must not be a successful check"
+    );
 }
 
 #[test]
