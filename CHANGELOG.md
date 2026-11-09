@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other orgs' agents and correctly deregistering Codex-only links (#249).
 - Project-local team sync keeps other host installations untouched; home-wide
   mirrors now require the explicit `--global` option (#248).
+- Resolve nonempty `path` and `file_path` aliases consistently for observation actions and extensions (#191).
 - Keep native Windows directory components in observation file identity (#189).
 - Preserve distinct observations and historical data; deduplicate only explicit project/session-scoped invocation IDs (#188).
 - Redact complete JSON and quoted credential values before observation truncation (#177).
