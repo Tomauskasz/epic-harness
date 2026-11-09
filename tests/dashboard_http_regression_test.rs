@@ -553,3 +553,65 @@ fn issue_268_memory_search_preserves_rest_supported_types() {
         assert_eq!(body[0]["type"], node_type);
     }
 }
+
+#[test]
+fn issue_279_mixed_database_and_legacy_pipeline_lists_preserve_selected_projects() {
+    let dashboard = Dashboard::start();
+    dashboard.file(
+        "projects/project-a/orbit/PIPELINE-legacy.json",
+        &json!({"id":"legacy", "status":"running", "started_at":"2026-11-09T10:00:00Z"}),
+    );
+    let (_, before) = dashboard.request(
+        "GET",
+        "/api/harness?cmd=get_orbit_pipelines&project=project-a",
+    );
+    assert_eq!(
+        before[0]["id"], "legacy",
+        "legacy-only control must be visible"
+    );
+    dashboard.seed_pipeline("database", "project-b", "{}");
+    let (status, selected) = dashboard.request(
+        "GET",
+        "/api/harness?cmd=get_orbit_pipelines&project=project-a",
+    );
+    assert_eq!(status, 200);
+    assert_eq!(selected.as_array().unwrap().len(), 1);
+    assert_eq!(selected[0]["id"], "legacy");
+    let (_, all) = dashboard.request("GET", "/api/harness?cmd=get_orbit_pipelines");
+    assert_eq!(all.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn issue_279_primary_copies_win_without_hiding_foreign_same_id() {
+    let dashboard = Dashboard::start();
+    dashboard.seed_pipeline("shared-id", "project-a", "{}");
+    let primary_copy = dashboard.file(
+        "projects/project-a/orbit/PIPELINE-shared-id.json",
+        &json!({"id":"shared-id", "status":"running"}),
+    );
+    dashboard.file(
+        "projects/project-b/orbit/PIPELINE-shared-id.json",
+        &json!({"id":"shared-id", "status":"running"}),
+    );
+    let before = fs::read(&primary_copy).unwrap();
+    let (_, body) = dashboard.request("GET", "/api/harness?cmd=get_orbit_pipelines");
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows.iter()
+            .find(|row| row["project"] == "project-a")
+            .unwrap()["status"],
+        "complete"
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|row| row["project"] == "project-b")
+            .unwrap()["status"],
+        "running"
+    );
+    assert_eq!(
+        fs::read(primary_copy).unwrap(),
+        before,
+        "listing must not import/rewrite files"
+    );
+}

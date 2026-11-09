@@ -578,6 +578,84 @@ fn selected_project_dirs(
     Ok(projects)
 }
 
+/// Read primary and legacy Orbit state together without importing or rewriting it.
+/// Project scope and identity deduplication precede the optional display limit;
+/// an authoritative SQLite row wins over its same-project sidecar copy.
+pub async fn list_dashboard_pipelines_pool(
+    pool: &sqlx::AnyPool,
+    project: Option<&str>,
+    limit: Option<usize>,
+) -> std::io::Result<Vec<serde_json::Value>> {
+    let projects = selected_project_dirs(project)?;
+    let mut all = crate::store::orbit_store::list_all_pipelines_pool(pool)
+        .await
+        .unwrap_or_default();
+    all.retain(|pipeline| project.is_none_or(|slug| pipeline["project"].as_str() == Some(slug)));
+    let identity = |slug: &str, id: &str| {
+        (
+            slug.to_owned(),
+            id.strip_prefix("PIPELINE-").unwrap_or(id).to_owned(),
+        )
+    };
+    let mut seen: std::collections::HashSet<_> = all
+        .iter()
+        .filter_map(|row| Some(identity(row["project"].as_str()?, row["id"].as_str()?)))
+        .collect();
+    for (slug, _) in projects {
+        let Ok(orbit_dir) = crate::shared::paths::checked_harness_path_for_slug(&slug, "orbit")
+        else {
+            continue;
+        };
+        let Ok(entries) = std::fs::read_dir(orbit_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let filename = entry.file_name().to_string_lossy().into_owned();
+            let Some(file_id) = filename
+                .strip_prefix("PIPELINE-")
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            let Ok(path) = crate::shared::paths::checked_harness_path_for_slug(
+                &slug,
+                std::path::Path::new("orbit").join(entry.file_name()),
+            ) else {
+                continue;
+            };
+            let Some(serde_json::Value::Object(mut map)) = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            else {
+                continue;
+            };
+            let id = map
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .unwrap_or(file_id)
+                .to_owned();
+            if !seen.insert(identity(&slug, &id)) {
+                continue;
+            }
+            map.insert("id".into(), serde_json::Value::String(id));
+            map.insert("project".into(), serde_json::Value::String(slug.clone()));
+            map.insert("_project".into(), serde_json::Value::String(slug.clone()));
+            all.push(serde_json::Value::Object(map));
+        }
+    }
+    all.sort_by(|a, b| {
+        b["started_at"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(a["started_at"].as_str().unwrap_or(""))
+    });
+    if let Some(limit) = limit {
+        all.truncate(limit);
+    }
+    Ok(all)
+}
+
 fn parse_query_param(url: &str, key: &str) -> Option<String> {
     let query = url.split('?').nth(1)?;
     for pair in query.split('&') {
@@ -956,68 +1034,12 @@ fn handle_harness_cmd(cmd: &str, harness_dir: &std::path::Path, project: Option<
             .to_string()
         }
         "get_orbit_pipelines" => {
-            // Try SQLite first
-            if let Ok(pipelines) = crate::store::runtime::block_on(async {
+            let pipelines = crate::store::runtime::block_on(async {
                 let pool = crate::store::pool::harness_pool().await?;
-                crate::store::orbit_store::list_all_pipelines_pool(&pool).await
-            }) && !pipelines.is_empty()
-            {
-                let mut sorted: Vec<_> = pipelines
-                    .into_iter()
-                    .filter(|pipeline| {
-                        project.is_none_or(|slug| pipeline["project"].as_str() == Some(slug))
-                    })
-                    .collect();
-                sorted.sort_by(|a, b| {
-                    let ta = a["started_at"].as_str().unwrap_or("");
-                    let tb = b["started_at"].as_str().unwrap_or("");
-                    tb.cmp(ta)
-                });
-                return serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".into());
-            }
-            // Fallback: scan PIPELINE-*.json files
-            let mut all: Vec<serde_json::Value> = vec![];
-            if let Ok(projects) = selected_project_dirs(project) {
-                for (slug, _) in projects {
-                    let Ok(orbit_dir) =
-                        crate::shared::paths::checked_harness_path_for_slug(&slug, "orbit")
-                    else {
-                        continue;
-                    };
-                    if let Ok(files) = fs::read_dir(orbit_dir) {
-                        for f in files.filter_map(|e| e.ok()) {
-                            let fname = f.file_name().to_string_lossy().to_string();
-                            if fname.starts_with("PIPELINE-")
-                                && fname.ends_with(".json")
-                                && let Ok(path) =
-                                    crate::shared::paths::checked_harness_path_for_slug(
-                                        &slug,
-                                        std::path::Path::new("orbit").join(f.file_name()),
-                                    )
-                                && let Ok(content) = fs::read_to_string(path)
-                                && let Ok(serde_json::Value::Object(mut map)) =
-                                    serde_json::from_str::<serde_json::Value>(&content)
-                            {
-                                map.insert(
-                                    "_project".into(),
-                                    serde_json::Value::String(slug.clone()),
-                                );
-                                map.insert(
-                                    "project".into(),
-                                    serde_json::Value::String(slug.clone()),
-                                );
-                                all.push(serde_json::Value::Object(map));
-                            }
-                        }
-                    }
-                }
-            }
-            all.sort_by(|a, b| {
-                let ta = a["started_at"].as_str().unwrap_or("");
-                let tb = b["started_at"].as_str().unwrap_or("");
-                tb.cmp(ta)
-            });
-            serde_json::to_string(&all).unwrap_or_else(|_| "[]".into())
+                list_dashboard_pipelines_pool(&pool, project, None).await
+            })
+            .unwrap_or_default();
+            serde_json::to_string(&pipelines).unwrap_or_else(|_| "[]".into())
         }
         "get_integration_status" => {
             let home = std::env::var("HOME")
