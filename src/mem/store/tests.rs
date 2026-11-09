@@ -90,6 +90,58 @@ async fn issue_232_reopening_preserves_explicit_importance() {
     );
 }
 
+#[tokio::test]
+async fn issue_228_project_and_tag_membership_are_exact_literals() {
+    let pool = crate::store::pool::test_memory_pool().await;
+    init_schema_pool(&pool).await.unwrap();
+    for (id, project, tag) in [
+        ("alpha-note", "alpha", "prod"),
+        ("alphabet-note", "alphabet", "production"),
+        ("literal-percent", "%", "%"),
+    ] {
+        let mut node = make_node(id, id, "concept", &[tag], None);
+        node.frontmatter.projects = vec![project.into()];
+        write_node_pool(&pool, &node).await.unwrap();
+    }
+    let alpha = query_nodes_pool(&pool, None, None, Some("alpha"), 20)
+        .await
+        .unwrap();
+    assert_eq!(
+        alpha
+            .iter()
+            .map(|n| n.frontmatter.id.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha-note"]
+    );
+    assert_eq!(
+        query_nodes_pool(&pool, Some("prod"), None, None, 20)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        query_nodes_pool(&pool, None, None, Some("%"), 20)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        query_nodes_pool(&pool, Some("_"), None, None, 20)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        smart_recall_pool(&pool, Some("alpha"), None, 20)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 #[test]
 fn issue_232_legacy_import_defaults_only_missing_importance() {
     let legacy = "---\nid: legacy-decision\ntype: decision\ntitle: Legacy choice\ncreated: 2024-01-01\nupdated: 2024-01-01\n---\nbody";

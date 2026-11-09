@@ -725,3 +725,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Migrate edge IDs and weights additively, delete exact edge identities, and align native edge creation (#227).
 
 - Return standard JSON-RPC parse and envelope errors while preserving notification semantics (#236).
+
+- Use exact project and tag membership instead of substring or SQL wildcard matching (#228).
