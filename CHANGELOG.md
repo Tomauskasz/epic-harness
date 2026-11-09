@@ -755,3 +755,5 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #210: propagate dashboard backend failures instead of displaying fabricated production metrics.
 
 - Fix #211: Discard stale Evolution responses and capture project identity for every panel request.
+
+- Fix #212: Show no matches for a completed memory search and discard outdated search responses.
