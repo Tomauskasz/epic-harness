@@ -872,3 +872,4 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #243: serialize orchestration updates with portable interprocess file locks and independent atomic-write files.
 
 - Fix #215: Browser Orbit dismissal passes the selected project so duplicate pipeline IDs cannot affect another project.
+- Fix #194: Snapshot fingerprints retain guard section membership and rule priority, so blocked-to-warned changes are visible.
