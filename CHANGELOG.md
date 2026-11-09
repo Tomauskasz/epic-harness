@@ -751,3 +751,4 @@ Original files are **not deleted** after import. New users are automatically on 
 - Bootstrap version detection resolves Codex, Claude and Grok plugin roots without depending on the working directory (#225).
 - Update checks use the running executable and return before all installation, registration, and dashboard side effects (#224).
 - Windows installation fails on locked replacement or hash/copy errors and verifies installed bytes before claiming success (#226).
+- Release installation uses the published archive layout, installs both CLI names, preserves aliases on failed replacement, and acceptance runs the real host shell and shipped installer (#132).

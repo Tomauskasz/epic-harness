@@ -145,12 +145,7 @@ available on Windows. Hooks have the same PATH requirement and degrade to
 All Codex hook handlers route through
 `registry/scripts/hooks/run.mjs`, so the only prerequisites are `node` (the
 plugin bootstrap already required it) and `epic` on PATH — no `sh`, Git Bash,
-or WSL. One known limit:
-
-- Codex runs Windows hook commands via `cmd.exe /C`, and an install path
-  containing spaces breaks unquoted commands (openai/codex#32402). Until
-  that upstream bug is fixed, install the plugin (and Node) under
-  space-free paths.
+or WSL. Plugin paths containing spaces are covered by real-shell regression tests.
 
 ### Windows acceptance: automated (CI) vs manual
 
@@ -159,9 +154,11 @@ The ci.yml `Windows hook portability` job proves, on real `windows-latest`
 exit 0 without the harness, every hook (including the session-start
 installer) exits 0 with it, and `epic mem mcp` answers a JSON-RPC
 initialize — with `epic` installed from the **latest release artifact**
-(sha256-verified), not a source build. Driver:
+(sha256-verified) through the shipped `install.ps1`, including archive layout and both executable aliases. This released-artifact job is separate from the candidate source-build verification; it cannot certify changes that are not in a release. Driver:
 `windows-acceptance.mjs` (modes: `degrade` / `live` / `mcp`), runnable
 locally on any Windows box with `PLUGIN_ROOT` pointing at a checkout.
+
+The driver executes each shipped manifest command through `cmd.exe` rather than converting it to argv. Each invocation uses a fresh temporary HOME/harness root, telemetry off, and dashboard auto-launch disabled.
 
 What CI cannot prove — ChatGPT auth has no place in CI — is the last leg of
 the install path. Manual runbook on a native Windows box (no Git Bash/WSL):
