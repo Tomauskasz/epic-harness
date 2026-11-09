@@ -20,6 +20,18 @@ pub async fn insert_observation_pool(
     session_id: &str,
     project: &str,
 ) -> io::Result<i64> {
+    insert_observation_with_identity_pool(pool, rec, session_id, project, None).await
+}
+
+/// Only an explicit host invocation/import identity can deduplicate delivery.
+/// Without one, preserve calls even when timestamps/actions happen to match.
+pub async fn insert_observation_with_identity_pool(
+    pool: &AnyPool,
+    rec: &ObsRecord,
+    session_id: &str,
+    project: &str,
+    invocation_id: Option<&str>,
+) -> io::Result<i64> {
     let (dim_s, dim_q, dim_c) = match &rec.dimensions {
         Some(d) => (
             Some(d.tool_success),
@@ -28,18 +40,15 @@ pub async fn insert_observation_pool(
         ),
         None => (None, None, None),
     };
-    // Cross-process dedup: Codex fires each matched hook command twice per
-    // tool call (measured on codex-cli 0.155.0), and each hook runs as its
-    // own process, so the in-batch dedup key can never see the duplicate.
-    // The unique index on (session_id, timestamp, tool, action) absorbs the
-    // race atomically — a WHERE NOT EXISTS pre-check lost it once two hook
-    // processes SELECTed between each other's INSERTs.
-    let res = sqlx::query(
+    // The partial unique index scopes stable delivery IDs to project/session/tool.
+    // RETURNING keeps the inserted ID tied to this pooled insertion.
+    let invocation_id = invocation_id.filter(|id| !id.is_empty());
+    let inserted: Option<i64> = sqlx::query_scalar(
         "INSERT OR IGNORE INTO observations
          (timestamp, session_id, tool, tool_category, action, result, score,
           dim_success, dim_quality, dim_cost, failure_category, error_snippet,
-          file_ext, sequence_id, pipeline_id, project)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          file_ext, sequence_id, pipeline_id, project, invocation_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id",
     )
     .bind(&rec.timestamp)
     .bind(session_id)
@@ -57,33 +66,30 @@ pub async fn insert_observation_pool(
     .bind(rec.sequence_id.map(super::u64_to_i64))
     .bind(&rec.pipeline_id)
     .bind(project)
-    .execute(pool)
+    .bind(invocation_id)
+    .fetch_optional(pool)
     .await
     .map_err(super::sqlx_err)?;
 
-    if res.rows_affected() == 0 {
+    if inserted.is_none() {
         // Duplicate of an existing row — surface its id so callers linking
         // on the observation still resolve.
         let existing: Option<i64> = sqlx::query_scalar(
             "SELECT id FROM observations
-             WHERE session_id = ? AND timestamp = ? AND tool = ? AND action IS ?
+             WHERE project = ? AND session_id = ? AND tool = ? AND invocation_id = ?
              ORDER BY id DESC LIMIT 1",
         )
+        .bind(project)
         .bind(session_id)
-        .bind(&rec.timestamp)
         .bind(&rec.tool)
-        .bind(&rec.action)
+        .bind(invocation_id)
         .fetch_optional(pool)
         .await
         .map_err(super::sqlx_err)?;
         return Ok(existing.unwrap_or(0));
     }
 
-    let id: i64 = sqlx::query_scalar("SELECT last_insert_rowid()")
-        .fetch_one(pool)
-        .await
-        .map_err(super::sqlx_err)?;
-    Ok(id)
+    Ok(inserted.unwrap())
 }
 
 /// Standalone insert — uses global pool via runtime bridge.
@@ -606,6 +612,90 @@ mod tests {
         let pool = super::super::pool::test_memory_pool().await;
         super::super::schema::init_schema_pool(&pool).await.unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn issue_188_distinct_calls_and_projects_survive_same_second() {
+        let pool = test_pool().await;
+        let mut rec: ObsRecord=serde_json::from_value(serde_json::json!({"timestamp":"2026-11-09T00:00:00Z","tool":"Bash","tool_category":"bash","action":"node synthetic.js","result":"success","score":1.0})).unwrap();
+        insert_observation_pool(&pool, &rec, "shared-session", "project-a")
+            .await
+            .unwrap();
+        rec.result = Some("error".into());
+        rec.score = Some(0.32);
+        insert_observation_pool(&pool, &rec, "shared-session", "project-a")
+            .await
+            .unwrap();
+        insert_observation_pool(&pool, &rec, "shared-session", "project-b")
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn issue_188_schema_reopen_never_collapses_historical_calls() {
+        let pool = test_pool().await;
+        sqlx::query("DROP INDEX IF EXISTS idx_obs_dedup")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for project in ["project-a", "project-b", "project-a"] {
+            sqlx::query("INSERT INTO observations (timestamp, session_id, tool, tool_category, action, project) VALUES ('2026-11-09T00:00:00Z','same-session','Bash','bash','same action',?)").bind(project).execute(&pool).await.unwrap();
+        }
+        super::super::schema::init_schema_pool(&pool).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn issue_188_stable_identity_deduplicates_only_the_same_invocation_scope() {
+        let pool = test_pool().await;
+        let mut rec: ObsRecord=serde_json::from_value(serde_json::json!({"timestamp":"2026-11-09T00:00:00Z","tool":"Bash","tool_category":"bash","action":"node synthetic.js","result":"success","score":1.0})).unwrap();
+        let first = insert_observation_with_identity_pool(
+            &pool,
+            &rec,
+            "session",
+            "project-a",
+            Some("call-1"),
+        )
+        .await
+        .unwrap();
+        rec.timestamp = "2026-11-09T00:00:01Z".into();
+        let duplicate = insert_observation_with_identity_pool(
+            &pool,
+            &rec,
+            "session",
+            "project-a",
+            Some("call-1"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first, duplicate);
+        for (session, project, id) in [
+            ("session", "project-a", "call-2"),
+            ("session", "project-b", "call-1"),
+            ("other-session", "project-a", "call-1"),
+        ] {
+            let distinct =
+                insert_observation_with_identity_pool(&pool, &rec, session, project, Some(id))
+                    .await
+                    .unwrap();
+            assert_ne!(first, distinct);
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM observations")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            4
+        );
     }
 
     #[tokio::test]

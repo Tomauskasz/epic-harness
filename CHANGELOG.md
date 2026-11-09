@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other orgs' agents and correctly deregistering Codex-only links (#249).
 - Project-local team sync keeps other host installations untouched; home-wide
   mirrors now require the explicit `--global` option (#248).
+- Preserve distinct observations and historical data; deduplicate only explicit project/session-scoped invocation IDs (#188).
 - Redact complete JSON and quoted credential values before observation truncation (#177).
 - Linked worktrees on Windows now share the main checkout's harness identity,
   using native absolute-path detection for Git's common directory.
