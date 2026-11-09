@@ -1,5 +1,16 @@
 # Changelog
 
+All notable changes to epic-harness will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+- Keep correctness verdicts consistent with configured minimum pass rates below 80%; accepted partial results report warnings (#178).
+
+### Fixed
+- Rebuild the bundled dashboard from the integrated source, including live activity, memory search, and persisted Orbit phases.
 - Fix #275: compare measured latency, throughput or native command duration against performance baselines using the configured percentage threshold.
 
 - Fix #201: eval command parsing preserves empty arguments, escaped literal quotes and Windows path separators, and rejects unterminated quoting.
@@ -21,17 +32,6 @@
 - Fix #179: regression-only evaluation now runs its measurement inputs and rejects empty evaluations/comparisons.
 
 - Fix #178: correctness evaluation now fails on child-process failure and honors the configured minimum test pass rate.
-
-All notable changes to epic-harness will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
-- Keep correctness verdicts consistent with configured minimum pass rates below 80%; accepted partial results report warnings (#178).
-
-### Fixed
 - Persisted Orbit/control JSON accepts Windows PowerShell's leading UTF-8 BOM,
   so active pipelines remain exclusive and visible after host state updates (#282).
 - Skill validation now checks the published `skills/` directory, rejects empty
