@@ -796,3 +796,6 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #203: recover UUID-named fallback observations and use stable import identities for safe partial retries.
 - Fix #221: reject empty or ambiguous Orbit deletion IDs and match exact project-scoped sidecars.
 - Fix #264: dismiss exact Orbit records in primary SQLite and sidecar state, preserving project scope and reporting failures.
+- Test portability: retain orbit symlink checks where supported and explicitly handle Windows file-symlink privilege limitations.
+
+- Fix #247: retain fresh Orbit reservations, serialize admission, reject active-pipeline unlocks, and optionally verify EPIC_ORBIT_OWNER.
