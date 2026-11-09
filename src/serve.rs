@@ -304,6 +304,8 @@ pub fn run_serve(port: Option<u16>) -> i32 {
                             | "error"
                             | "session"
                             | "resolution"
+                            | "instinct"
+                            | "psychographic"
                     )
                 {
                     let _ = request.respond(

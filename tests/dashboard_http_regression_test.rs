@@ -538,3 +538,18 @@ fn issue_268_memory_search_rejects_unknown_type() {
     assert_eq!(status, 400);
     assert!(body["error"].is_string());
 }
+
+#[test]
+fn issue_268_memory_search_preserves_rest_supported_types() {
+    let dashboard = Dashboard::start();
+    for node_type in ["instinct", "psychographic"] {
+        dashboard.seed_memory(node_type, &format!("Zebrafixture {node_type}"));
+        let (status, body) = dashboard.request(
+            "GET",
+            &format!("/api/search?q=Zebrafixture&type={node_type}"),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(body.as_array().unwrap().len(), 1);
+        assert_eq!(body[0]["type"], node_type);
+    }
+}
