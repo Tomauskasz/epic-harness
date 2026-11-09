@@ -738,3 +738,4 @@ Original files are **not deleted** after import. New users are automatically on 
 - Fix #206: scope reflection history, snapshots and fallback paths consistently to the selected project.
 - Fix #207: derive reflection pattern and seeded-skill statistics from the current evolution record fields.
 - Fix #273: document the current two-round promotion and absolute improvement/rollback thresholds.
+- Fix #204: stage complete evolved-skill installs, preserve existing content on failure, and propagate write errors before consuming synthesis.
