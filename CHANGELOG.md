@@ -75,6 +75,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   denials, warnings and safe allows without claiming warnings block execution (#274).
 - Memory search HTTP results include tags and list-row metadata required by the renderer (#240).
 - Session snapshot APIs return recent project-scoped objects from SQLite and legacy JSON, preserving fields and deduplicating same-project copies (#214).
+- Storage transfers preserve complete operational state and invocation identity,
+  retain sources on failure, reject differing file collisions, and avoid duplicate
+  database/JSONL history on retries. Global project changes roll back on errors;
+  source-only promotion counters survive and remapped reflection cursors reset
+  safely (#183, #184, #185, #254, #255, #256).
+- Legacy observation imports retain project attribution, migration completion is
+  scoped per project, and scoped metrics preserve text and Boolean values
+  (#257, #258, #259).
 - Linked worktrees on Windows now share the main checkout's harness identity,
   using native absolute-path detection for Git's common directory.
 - Reflection compares canonical project/root and vault/home paths consistently
